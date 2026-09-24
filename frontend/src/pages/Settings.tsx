@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FastForward, Save, Zap } from "lucide-react";
+import { Bug, FastForward, Save, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api } from "../api/client";
 import type { AppSettings } from "../api/types";
+import { NotifyCard } from "../components/NotifyCard";
 import { WindowEditor } from "../components/WindowEditor";
 import { Button, Card, ErrorBox, Field, Loading, PageHeader, Switch } from "../components/ui";
 import { serverTime } from "../lib/format";
@@ -14,6 +15,7 @@ function SimControls() {
   const [bars, setBars] = useState(60);
   const [symbol, setSymbol] = useState("EURUSD");
   const [pct, setPct] = useState(-1);
+  const [fault, setFault] = useState("requote");
   const [busy, setBusy] = useState(false);
   const run = async (fn: () => Promise<unknown>, msg: string) => {
     setBusy(true);
@@ -59,7 +61,31 @@ function SimControls() {
             Shock
           </Button>
         </div>
+        <div className="flex items-end gap-2">
+          <Field label="Broker fault (applies to the next order / close)" className="flex-1">
+            <select className="field" value={fault} onChange={(e) => setFault(e.target.value)} data-testid="sim-fault-kind">
+              {["requote", "timeout_filled", "timeout_none", "partial", "price_zero", "close_fail", "close_timeout_done"].map((f) => (
+                <option key={f}>{f}</option>
+              ))}
+            </select>
+          </Field>
+          <Button icon={<Bug className="size-4" />} loading={busy} onClick={() => run(() => api.simFault(fault), `Queued fault ${fault}`)} data-testid="sim-fault">
+            Inject
+          </Button>
+        </div>
+        <div className="flex flex-wrap items-end gap-3 text-sm">
+          <Switch
+            checked={!q.data.is_demo}
+            onChange={(v) => run(() => api.simAccount({ is_demo: !v }), v ? "Simulated account is now LIVE" : "Simulated account is now demo")}
+            label="Simulate a LIVE account"
+            testId="sim-live"
+          />
+          <Button size="sm" variant="ghost" loading={busy} onClick={() => run(() => api.simAccount({ login: q.data!.login + 1 }), "Simulated an account switch")} data-testid="sim-switch-account">
+            Switch account ({q.data.login})
+          </Button>
+        </div>
       </div>
+      {q.data.faults.length > 0 && <p className="mt-3 text-xs text-warn" data-testid="sim-faults">Queued faults: {q.data.faults.join(", ")}</p>}
     </Card>
   );
 }
@@ -112,6 +138,7 @@ export default function Settings() {
           </div>
         </div>
       </Card>
+      <NotifyCard notify={q.data!.notify} />
       <Card title="Learning">
         <div className="grid gap-4 md:grid-cols-3">
           <div className="flex items-end pb-1.5">

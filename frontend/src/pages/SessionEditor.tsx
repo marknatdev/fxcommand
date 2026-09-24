@@ -3,7 +3,7 @@ import { ChevronDown, ChevronRight, Plus, Save, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { api } from "../api/client";
+import { api, type ApiError } from "../api/client";
 import { TIMEFRAMES, type AssignmentInput, type SessionInput, type StrategyInfo, type Timeframe } from "../api/types";
 import { WindowEditor } from "../components/WindowEditor";
 import { Button, Card, ConfirmDialog, ErrorBox, Field, Loading, PageHeader, Switch } from "../components/ui";
@@ -67,6 +67,7 @@ export default function SessionEditor() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [confirmLogin, setConfirmLogin] = useState<string | null>(null);
 
   useEffect(() => {
     if (form) return;
@@ -79,6 +80,9 @@ export default function SessionEditor() {
         max_positions: s.max_positions,
         daily_loss_pct: s.daily_loss_pct,
         window: s.window,
+        execution: s.execution,
+        weekend_close: s.weekend_close,
+        weekend_close_time: s.weekend_close_time,
         assignments: s.assignments.map((a) => ({
           symbol: a.symbol,
           timeframe: a.timeframe,
@@ -97,6 +101,9 @@ export default function SessionEditor() {
         max_positions: 5,
         daily_loss_pct: 3,
         window: settings.data.app.default_window ?? DEFAULT_WINDOW,
+        execution: "broker",
+        weekend_close: false,
+        weekend_close_time: "22:30",
         assignments: [blankAssignment("", strategies.data)],
       });
       setOpen(0);
@@ -118,12 +125,14 @@ export default function SessionEditor() {
       return setError("A Symbol may appear only once per Session.");
     setSaving(true);
     try {
-      const s = editing ? await api.updateSession(Number(id), form) : await api.createSession(form);
+      const body = confirmLogin ? { ...form, confirm_login: Number(confirmLogin) } : form;
+      const s = editing ? await api.updateSession(Number(id), body) : await api.createSession(body);
       toast.success(`Session '${s.name}' saved`);
       ["sessions", "session", "overview", "symbols"].forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
       nav(`/sessions/${s.id}`);
     } catch (e) {
       setError((e as Error).message);
+      if ((e as ApiError).code === "confirm_required" && confirmLogin === null) setConfirmLogin("");
     } finally {
       setSaving(false);
     }
@@ -176,6 +185,23 @@ export default function SessionEditor() {
           <div className="flex items-end pb-1.5">
             <Switch checked={form.auto_resume} onChange={(v) => setForm({ ...form, auto_resume: v })} label="Auto-resume on app restart" testId="session-auto-resume" />
           </div>
+          <Field label="Execution" hint={form.execution === "paper" ? "Real prices, simulated fills in a local book — nothing is sent to the account." : "Orders go to the account."}>
+            <select className="field" value={form.execution} onChange={(e) => setForm({ ...form, execution: e.target.value as SessionInput["execution"] })} data-testid="session-execution">
+              <option value="broker">Broker</option>
+              <option value="paper">Paper</option>
+            </select>
+          </Field>
+          <div className="flex items-end pb-1.5 md:col-span-2">
+            <Switch checked={form.weekend_close} onChange={(v) => setForm({ ...form, weekend_close: v })} label="Close positions before the weekend" testId="session-weekend-close" />
+          </div>
+          <Field label="…on Friday at (server time)" hint="No new entries after this time until the market reopens.">
+            <input className="field num" value={form.weekend_close_time} disabled={!form.weekend_close} onChange={(e) => setForm({ ...form, weekend_close_time: e.target.value })} data-testid="session-weekend-time" />
+          </Field>
+          {confirmLogin !== null && (
+            <Field label="Account number (switching to Broker execution on a LIVE account)" className="md:col-span-2">
+              <input className="field num" value={confirmLogin} onChange={(e) => setConfirmLogin(e.target.value)} data-testid="session-confirm-login" autoFocus />
+            </Field>
+          )}
         </div>
       </Card>
 

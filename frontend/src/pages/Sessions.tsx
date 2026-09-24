@@ -64,7 +64,9 @@ export default function Sessions() {
                         <Link to={`/sessions/${s.id}`} className="font-medium text-ink hover:text-accent" data-testid="session-link">
                           {s.name}
                         </Link>
-                        <div className="num text-[11px] text-faint">magic {s.magic}</div>
+                        <div className="num text-[11px] text-faint">
+                          magic {s.magic} {s.execution === "paper" && <Badge tone="accent" testId="session-paper">PAPER</Badge>}
+                        </div>
                       </td>
                       <td className="td">
                         <StatusBadge status={status} />

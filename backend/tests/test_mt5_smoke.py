@@ -70,3 +70,90 @@ def test_positions_and_history_read(mt5_broker):
     hist = mt5_broker.history(int(time.time()) - 7 * 86400)
     print(f"\nopen positions: {len(pos)}; closed in last 7 days: {len(hist)}; server time {time.strftime('%Y-%m-%d %H:%M', time.gmtime(mt5_broker.server_time()))}")
     assert isinstance(pos, list) and isinstance(hist, list)
+
+
+def test_live_readiness_facts(mt5_broker):
+    """Hedging account, terminal state, and our loss-at-stop math against the terminal's own
+    calculators (order_calc_profit / order_calc_margin) — calculators only, nothing is sent."""
+    import MetaTrader5 as mt5
+
+    from fxcommand.risk.gate import loss_at_stop
+
+    a = mt5_broker.account()
+    t = mt5_broker.terminal()
+    print(f"\nmargin mode {a.margin_mode}; terminal build {t.build}, ping {t.ping_ms} ms, algo trading {'on' if t.algo_trading else 'OFF'}")
+    assert a.margin_mode == "hedging", "FXCommand trades hedging accounts only (ADR 0006)"
+    names = mt5_broker.symbols()
+    checked = 0
+    for sym in [n for n in ("EURUSD", "USDJPY", "GBPJPY", "GOLD") if n in names] or names[:3]:
+        info, tick = mt5_broker.symbol_info(sym), mt5_broker.tick(sym)
+        dist = 200 * info.point
+        ours = loss_at_stop(info.volume_min, dist, info)
+        theirs = -mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, sym, info.volume_min, tick.ask, tick.ask - dist)
+        margin = mt5_broker.margin_required(sym, "long", info.volume_min)
+        print(f"{sym}: trade_mode={info.trade_mode} freeze={info.freeze_level} loss@200pts ours={ours:.4f} terminal={theirs:.4f} margin(min lot)={margin}")
+        assert ours == pytest.approx(theirs, rel=0.02, abs=0.011)
+        assert margin > 0
+        checked += 1
+    assert checked
+
+
+async def test_paper_session_on_the_real_feed(tmp_path):
+    """A Paper Session runs the full engine on the real terminal's prices for two M1 bar closes.
+    The real adapter's order methods are tripwired: any attempt to reach the Account fails the test."""
+    import asyncio
+
+    pytest.importorskip("MetaTrader5")
+    from fxcommand.broker import BrokerThread
+    from fxcommand.broker.mt5 import Mt5Broker
+    from fxcommand.broker.paper import PaperBook, PaperRouter
+    from fxcommand.engine import AssignmentIn, SessionIn, SessionManager
+    from fxcommand.journal import EventBus, Journal
+    from fxcommand.store import Store
+
+    real = Mt5Broker()
+    hits: list[str] = []
+
+    def tripwire(name):
+        def f(*a, **k):
+            hits.append(name)
+            raise AssertionError(f"{name} reached the real Account from a Paper Session")
+
+        return f
+
+    real.market_order, real.modify, real.close = tripwire("market_order"), tripwire("modify"), tripwire("close")  # type: ignore[method-assign]
+    try:
+        real.connect()
+    except Exception as e:  # noqa: BLE001
+        pytest.skip(f"MT5 terminal not available: {e}")
+    store = Store(f"sqlite:///{tmp_path / 'paper.db'}")
+    thread = BrokerThread(PaperRouter(real, PaperBook(store)))
+    bus = EventBus()
+    bus.attach(asyncio.get_running_loop())
+    mgr = SessionManager(thread, store, Journal(store, bus), bus)
+    try:
+        await mgr.tick_once()
+        if mgr.now - (await thread.run(lambda b: b.tick("EURUSD"))).time > 120:
+            pytest.skip("market closed: no fresh EURUSD quotes")
+        fast = {"fast": 2, "slow": 3, "atr_period": 5, "sl_atr": 3.0, "tp_atr": 6.0}
+        s = await mgr.create_session(
+            SessionIn(name="Paper smoke", execution="paper", assignments=[AssignmentIn(symbol="EURUSD", timeframe="M1", params=fast)])
+        )
+        await mgr.start(s.id)
+        evaluated = False
+        deadline = asyncio.get_running_loop().time() + 150  # at most ~2 M1 bar closes
+        while asyncio.get_running_loop().time() < deadline and not evaluated:
+            await mgr.tick_once()
+            st = next(iter(mgr.assignment_states(s.id).values()))
+            assert not st["status"].startswith("error"), st
+            evaluated = st["status"].startswith("evaluated")
+            await asyncio.sleep(1.0)
+        assert evaluated, "no M1 bar was evaluated within 150 s"
+        await mgr.stop(s.id)
+        kinds = [j.kind for j in store.journal(session_id=s.id, limit=500)]
+        print(f"\npaper smoke journal: {kinds}; paper trades: {len(store.trades(session_id=s.id))}")
+        assert not hits
+        assert all(t.paper and t.ticket < 0 for t in store.trades(session_id=s.id))
+        assert "state" in kinds
+    finally:
+        thread.shutdown()

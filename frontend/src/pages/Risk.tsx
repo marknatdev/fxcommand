@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { api } from "../api/client";
 import { useLive } from "../api/live";
 import type { RiskProfile } from "../api/types";
+import { EquityFloorCard, LiveCapsCard } from "../components/LiveControls";
 import { Badge, Button, Card, ConfirmDialog, Dialog, ErrorBox, Field, Kpi, Loading, PageHeader, ProgressBar, Switch } from "../components/ui";
 import { money, pnlClass, serverTime, signed } from "../lib/format";
 
@@ -17,6 +18,8 @@ const BLANK: Omit<RiskProfile, "id"> = {
   trailing: false,
   trailing_atr: 2,
   trailing_start_r: 1,
+  allow_min_lot: false,
+  min_lot_max_risk_pct: 2,
 };
 
 function ProfileDialog({ profile, onClose }: { profile: RiskProfile | "new" | null; onClose: () => void }) {
@@ -95,6 +98,17 @@ function ProfileDialog({ profile, onClose }: { profile: RiskProfile | "new" | nu
         </Field>
         <Field label="Start after (R)">
           <input type="number" step={0.1} className="field num" value={form.trailing_start_r} onChange={num("trailing_start_r")} disabled={!form.trailing} />
+        </Field>
+        <div className="col-span-2 mt-1">
+          <Switch
+            checked={form.allow_min_lot}
+            onChange={(v) => setForm({ ...form, allow_min_lot: v })}
+            label="Allow the minimum lot when risk % buys less"
+            testId="profile-min-lot"
+          />
+        </div>
+        <Field label="…if its risk is at most (% equity)" hint="The journal shows the real risk taken">
+          <input type="number" step={0.1} className="field num" value={form.min_lot_max_risk_pct} onChange={num("min_lot_max_risk_pct")} disabled={!form.allow_min_lot} data-testid="profile-min-lot-pct" />
         </Field>
       </div>
     </Dialog>
@@ -190,6 +204,11 @@ export default function Risk() {
         </Card>
       </div>
 
+      <div className="grid gap-5 xl:grid-cols-2">
+        <LiveCapsCard r={r} />
+        <EquityFloorCard r={r} />
+      </div>
+
       <Card
         title="Risk profiles"
         testId="risk-profiles"
@@ -209,6 +228,7 @@ export default function Risk() {
               <th className="th text-right">Max spread</th>
               <th className="th">Breakeven</th>
               <th className="th">Trailing</th>
+              <th className="th">Min lot</th>
               <th className="th text-right">Used by</th>
               <th className="th" />
             </tr>
@@ -221,6 +241,7 @@ export default function Risk() {
                 <td className="td num text-right">{p.max_spread_points} pts</td>
                 <td className="td">{p.breakeven ? <Badge tone="up">at {p.breakeven_at_r}R</Badge> : <span className="text-faint">off</span>}</td>
                 <td className="td">{p.trailing ? <Badge tone="up">{p.trailing_atr}×ATR after {p.trailing_start_r}R</Badge> : <span className="text-faint">off</span>}</td>
+                <td className="td">{p.allow_min_lot ? <Badge tone="warn">≤ {p.min_lot_max_risk_pct}%</Badge> : <span className="text-faint">off</span>}</td>
                 <td className="td num text-right">{p.used_by}</td>
                 <td className="td text-right">
                   <Button size="sm" variant="ghost" onClick={() => setEditing(p)} aria-label="Edit">

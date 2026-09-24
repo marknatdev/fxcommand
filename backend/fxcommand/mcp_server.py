@@ -121,6 +121,17 @@ def get_journal(session_id: int | None = None, alerts_only: bool = False, limit:
 
 
 @mcp.tool()
+def get_preflight(session_id: int | None = None) -> dict:
+    """Pre-flight Check (read-only): terminal, account, hedging, symbols, quotes, spread, margin,
+    notifier and engine health. With session_id: that Session's Symbols. On a live account the
+    blocking checks must pass before a Broker Session can start."""
+    r = _call("GET", "/preflight", params={"session_id": session_id} if session_id is not None else None)
+    if isinstance(r, dict) and "checks" in r:
+        r["checks"] = [c for c in r["checks"] if c["status"] != "pass"] or "all checks pass"
+    return r
+
+
+@mcp.tool()
 def get_learning_status() -> dict:
     """Self-improvement status per Arena (symbol + timeframe): Champion, Challengers with Shadow Trade
     results and Guardrail checks, Signal Filter mode, last Optimizer Run and pending Promotions."""

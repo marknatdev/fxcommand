@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from ..broker import BrokerError, Timeframe
 from ..engine import DomainError, SessionIn, trade_stats
 from ..journal import journal_dict
+from ..notify import mask, telegram_from_settings
 from ..risk import RiskLimits, TradingWindow
 from ..store import DEFAULT_APP_SETTINGS, RiskProfileRow, SessionRow, TradeRow
 from ..strategies import STRATEGIES
@@ -251,6 +252,19 @@ class ProfileIn(BaseModel):
     trailing: bool = False
     trailing_atr: float = Field(2.0, gt=0, le=50)
     trailing_start_r: float = Field(1.0, ge=0, le=20)
+    allow_min_lot: bool = False
+    min_lot_max_risk_pct: float = Field(2.0, gt=0, le=10)
+
+
+class LiveCapsIn(BaseModel):
+    max_risk_pct: float = Field(gt=0, le=10)
+    max_volume: float = Field(gt=0, le=100)
+    confirm_login: int | None = None
+
+
+class FloorResetIn(BaseModel):
+    confirm_login: int
+    pct: float = Field(80.0, gt=0, lt=100)
 
 
 @router.get("/risk")
@@ -273,7 +287,32 @@ async def risk(request: Request):
             "risk_at_stop": round(sum(p["risk_amount"] or 0 for p in owned), 2),
         },
         "kill_switch_at": snap["kill_switch_at"],
+        "live_caps": snap["live_caps"],
+        "equity_floor": snap["equity_floor"],
+        "account_live": bool(snap["account"] and not snap["account"]["is_demo"]),
+        "login": snap["account"]["login"] if snap["account"] else None,
+        "equity": snap["account"]["equity"] if snap["account"] else None,
     }
+
+
+@router.put("/risk/live-caps")
+async def set_live_caps(request: Request, body: LiveCapsIn):
+    """Live Caps bind only live Accounts; changing them while a live Account is connected needs the typed account number."""
+    r = rt(request)
+    acct = r.manager.snapshot()["account"]
+    if acct and not acct["is_demo"] and body.confirm_login != acct["login"]:
+        raise DomainError("confirm_required", f"type the account number {acct['login']} to change Live Caps on a LIVE account", 422)
+    caps = r.store.set_live_caps({"max_risk_pct": body.max_risk_pct, "max_volume": body.max_volume})
+    r.journal.record("alert" if acct and not acct["is_demo"] else "state", f"Live Caps changed: risk ≤ {caps['max_risk_pct']}%, volume ≤ {caps['max_volume']} lots",
+                     ts=r.manager.now, level="warn", alert=bool(acct and not acct["is_demo"]))
+    return await risk(request)
+
+
+@router.post("/risk/equity-floor/reset")
+async def reset_floor(request: Request, body: FloorResetIn):
+    r = rt(request)
+    await r.manager.reset_equity_floor(body.confirm_login, body.pct)
+    return await risk(request)
 
 
 @router.put("/risk/limits")
@@ -388,7 +427,15 @@ async def account(request: Request):
         "live_enabled": snap["live_enabled"],
         "terminal_path": r.config.mt5_path,
         "db": r.config.db_url,
+        "equity_floor": snap["equity_floor"],
+        "heartbeat_age": snap["heartbeat_age"],
     }
+
+
+@router.get("/preflight")
+async def preflight(request: Request, session_id: int | None = None):
+    """Pre-flight Check. With ``session_id``: that Session's Symbols and Execution Mode."""
+    return await rt(request).manager.preflight(session_id)
 
 
 @router.put("/account/live-enabled")
@@ -400,6 +447,9 @@ async def set_live(request: Request, body: LiveIn):
     if body.enabled and body.confirm.strip() != str(acct["login"]):
         raise DomainError("confirm_required", f"type the account number {acct['login']} to enable live trading", 422)
     r.store.set_live_enabled(acct["login"], body.enabled)
+    if body.enabled and not acct["is_demo"] and r.store.equity_floor(acct["login"]) is None:
+        pct = 80.0
+        r.store.set_equity_floor(acct["login"], {"floor": round(acct["equity"] * pct / 100, 2), "pct": pct, "set_at": r.manager.now, "breached_at": None})
     r.journal.record(
         "alert" if body.enabled else "state",
         f"Live trading {'ENABLED' if body.enabled else 'disabled'} for account {acct['login']}",
@@ -430,10 +480,51 @@ class SettingsIn(BaseModel):
     default_window: dict[str, Any] | None = None
 
 
+def _notify_view(r) -> dict:
+    n = r.store.notify_settings()
+    return {
+        "enabled": bool(n.get("enabled", True)),
+        "telegram_token": mask(n.get("telegram_token") or ""),
+        "telegram_chat_id": str(n.get("telegram_chat_id") or ""),
+        "configured": telegram_from_settings(n) is not None,
+    }
+
+
 @router.get("/settings")
 async def get_settings(request: Request):
     r = rt(request)
-    return {"app": r.store.app_settings(), "defaults": DEFAULT_APP_SETTINGS, "mode": r.config.broker}
+    return {"app": r.store.app_settings(), "defaults": DEFAULT_APP_SETTINGS, "mode": r.config.broker, "notify": _notify_view(r)}
+
+
+class NotifyIn(BaseModel):
+    enabled: bool | None = None
+    telegram_token: str | None = Field(None, max_length=200)  # omitted = keep; "" = clear
+    telegram_chat_id: str | None = Field(None, max_length=64)
+
+
+@router.put("/settings/notify")
+async def put_notify(request: Request, body: NotifyIn):
+    r = rt(request)
+    cur = r.store.notify_settings()
+    patch = {k: (v.strip() if isinstance(v, str) else v) for k, v in body.model_dump().items() if v is not None}
+    r.store.set_setting("notify", {**cur, **patch})
+    r.journal.record("state", f"Notification settings changed: {', '.join(k for k in patch)}", ts=r.manager.now)
+    return _notify_view(r)
+
+
+@router.post("/settings/notify/test")
+async def notify_test(request: Request):
+    r = rt(request)
+    entry = await r.notifier.deliver(f"✅ FXCommand {r.notifier.label()} test message — alerts will arrive here.", force=True)
+    if entry["status"] != "sent":
+        # not configured is the operator's to fix (422); a delivery failure is Telegram's side (502)
+        raise DomainError("notify_failed", f"test message not delivered: {entry['status']}", 502 if entry["status"].startswith("failed") else 422)
+    return entry
+
+
+@router.get("/notify/outbox")
+async def notify_outbox(request: Request):
+    return list(rt(request).notifier.outbox)
 
 
 @router.put("/settings")
@@ -442,7 +533,7 @@ async def put_settings(request: Request, body: SettingsIn):
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
     merged = r.store.update_app_settings(patch)
     r.journal.record("state", f"Settings changed: {', '.join(patch)}", ts=r.manager.now)
-    return {"app": merged, "defaults": DEFAULT_APP_SETTINGS, "mode": r.config.broker}
+    return {"app": merged, "defaults": DEFAULT_APP_SETTINGS, "mode": r.config.broker, "notify": _notify_view(r)}
 
 
 # ================================================================= learning
@@ -598,6 +689,62 @@ async def sim_inject_challenger(request: Request, body: InjectChallengerIn):
     )
     r.learning._trim_challengers(body.symbol, body.timeframe.value, r.manager.now)
     return {"id": ch.id, "candidate": cand.to_dict()}
+
+
+class FaultIn(BaseModel):
+    kind: str
+    count: int = Field(1, ge=1, le=50)
+
+
+class SimAccountIn(BaseModel):
+    login: int | None = None
+    is_demo: bool | None = None
+    margin_mode: str | None = None
+    algo_trading: bool | None = None
+
+
+class SimSymbolIn(BaseModel):
+    symbol: str
+    trade_mode: str = Field(pattern="^(full|longonly|shortonly|closeonly|disabled)$")
+
+
+def _sim(b):
+    return getattr(b, "inner", b)  # the SimBroker behind the PaperRouter
+
+
+@router.post("/sim/fault")
+async def sim_fault(request: Request, body: FaultIn):
+    """Test control (sim only): queue broker faults — requote, timeout_filled, timeout_none, partial,
+    price_zero, hang, close_fail, close_timeout_done."""
+    r = rt(request)
+    _require_sim(r)
+    await r.broker.run(lambda b: _sim(b).inject(body.kind, body.count))
+    return await sim_state(request)
+
+
+@router.post("/sim/account")
+async def sim_account(request: Request, body: SimAccountIn):
+    """Test control (sim only): pretend the terminal switched account / became live / netting."""
+    r = rt(request)
+    _require_sim(r)
+
+    def apply(b):
+        sim = _sim(b)
+        for k, v in body.model_dump().items():
+            if v is not None:
+                setattr(sim, k, v)
+
+    await r.broker.run(apply)
+    await r.manager.tick_once()
+    return await sim_state(request)
+
+
+@router.post("/sim/symbol")
+async def sim_symbol(request: Request, body: SimSymbolIn):
+    r = rt(request)
+    _require_sim(r)
+    await r.broker.run(lambda b: _sim(b).trade_modes.__setitem__(body.symbol, body.trade_mode))
+    return await sim_state(request)
 
 
 @router.post("/sim/clock")

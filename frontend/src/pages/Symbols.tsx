@@ -60,7 +60,9 @@ export default function Symbols() {
                     className={cn("cursor-pointer hover:bg-panel-2/60", s.name === sym && "bg-accent/5")}
                   >
                     <td className="td">
-                      <div className="font-medium">{s.name}</div>
+                      <div className="font-medium">
+                        {s.name} {s.trade_mode && s.trade_mode !== "full" && <Badge tone="warn">{s.trade_mode}</Badge>}
+                      </div>
                       <div className="max-w-[150px] truncate text-[11px] text-faint">{s.description}</div>
                     </td>
                     <td className="td num text-right">{s.bid.toFixed(s.digits)}</td>
@@ -126,6 +128,8 @@ export default function Symbols() {
                     ["Volume min / step", `${info.volume_min} / ${info.volume_step}`],
                     ["Volume max", info.volume_max],
                     ["Stops level", `${info.stops_level} pts`],
+                    ["Freeze level", `${info.freeze_level ?? 0} pts`],
+                    ["Trade mode", info.trade_mode ?? "full"],
                     ["Spread", `${info.spread_points} pts`],
                   ] as [string, string | number][]
                 ).map(([k, v]) => (

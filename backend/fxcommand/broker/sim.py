@@ -28,17 +28,27 @@ from .types import (
     Position,
     Side,
     SymbolInfo,
+    TerminalStatus,
     Tick,
     Timeframe,
     empty_bars,
 )
 
+RET_REQUOTE = 10004
 RET_DONE = 10009
+RET_DONE_PARTIAL = 10010
+RET_TIMEOUT = 10012
+RET_PRICE_OFF = 10021
+RET_MARKET_CLOSED = 10018
 RET_INVALID = 10013
 RET_INVALID_VOLUME = 10014
 RET_INVALID_STOPS = 10016
 RET_NO_MONEY = 10019
 RET_POSITION_NOT_FOUND = 10036
+
+# Fault injection (tests and /api/sim/fault): each queued fault applies to the next matching call.
+ENTRY_FAULTS = ("requote", "timeout_filled", "timeout_none", "partial", "price_zero", "hang")
+CLOSE_FAULTS = ("close_fail", "close_timeout_done")
 
 MINUTE = 60
 DAY = 86400
@@ -168,6 +178,13 @@ class SimBroker:
         self._closed: list[ClosedTrade] = []
         self._series: dict[str, _Series] = {}
         self._drift: dict[str, float] = {}
+        self.faults: list[str] = []
+        self.hang_seconds = 2.0
+        self.login = 99_000_001
+        self.is_demo = True
+        self.margin_mode = "hedging"
+        self.algo_trading = True
+        self.trade_modes: dict[str, str] = {}
         start = start if start is not None else default_start()
         self._generate_history(start, history_days)
         self._last_bar_time = int(next(iter(self._series.values())).t[next(iter(self._series.values())).n - 1])
@@ -253,6 +270,20 @@ class SimBroker:
     def server_time(self) -> int:
         return self.now
 
+    def terminal(self) -> TerminalStatus:
+        return TerminalStatus(connected=self._connected, algo_trading=self.algo_trading, ping_ms=5.0, build=0, name="FXCommand Sim")
+
+    def inject(self, kind: str, count: int = 1) -> None:
+        if kind not in ENTRY_FAULTS + CLOSE_FAULTS:
+            raise ValueError(f"unknown fault {kind!r}; one of {', '.join(ENTRY_FAULTS + CLOSE_FAULTS)}")
+        self.faults.extend([kind] * count)
+
+    def _take_fault(self, kinds: tuple[str, ...]) -> str | None:
+        for i, f in enumerate(self.faults):
+            if f in kinds:
+                return self.faults.pop(i)
+        return None
+
     # ----------------------------------------------------------------- queries
     def _spec(self, symbol: str) -> SimSymbolSpec:
         try:
@@ -291,6 +322,7 @@ class SimBroker:
             volume_step=spec.volume_step,
             stops_level=spec.stops_level,
             filling_mode=1,
+            trade_mode=self.trade_modes.get(symbol, "full"),
         )
 
     def tick(self, symbol: str) -> Tick:
@@ -345,7 +377,7 @@ class SimBroker:
         margin = sum(self._margin(p.symbol, p.volume) for p in self._positions.values())
         equity = self._balance + floating
         return AccountInfo(
-            login=99_000_001,
+            login=self.login,
             name="Simulated Account",
             server="FXCommand-Sim",
             company="FXCommand",
@@ -355,8 +387,9 @@ class SimBroker:
             margin=round(margin, 2),
             margin_free=round(equity - margin, 2),
             leverage=self._leverage,
-            is_demo=True,
-            trade_allowed=True,
+            is_demo=self.is_demo,
+            trade_allowed=self.algo_trading,
+            margin_mode=self.margin_mode,
         )
 
     def positions(self, magic: int | None = None) -> list[Position]:
@@ -433,11 +466,34 @@ class SimBroker:
             return OrderResult(False, RET_INVALID_STOPS, err)
         if self._margin(symbol, volume) > self.account().margin_free:
             return OrderResult(False, RET_NO_MONEY, "not enough money")
+        mode = self.trade_modes.get(symbol, "full")
+        if mode in ("disabled", "closeonly") or (mode == "longonly" and side == "short") or (mode == "shortonly" and side == "long"):
+            return OrderResult(False, RET_MARKET_CLOSED, f"trade mode {mode}")
+        fault = self._take_fault(ENTRY_FAULTS)
+        if fault == "hang":
+            import time as _time
+
+            _time.sleep(self.hang_seconds)
+        if fault == "requote":
+            return OrderResult(False, RET_REQUOTE, "requote")
+        if fault == "timeout_none":
+            return OrderResult(False, RET_TIMEOUT, "request timeout", uncertain=True)
         price = t.ask if side == "long" else t.bid
+        if fault == "partial":
+            half = math.floor(volume / 2 / spec.volume_step) * spec.volume_step
+            volume = max(spec.volume_min, round(half, 2))
         ticket = self._next_ticket
         self._next_ticket += 1
         self._positions[ticket] = _OpenPosition(ticket, symbol, side, round(volume, 2), price, sl, tp or 0.0, magic, self.now, comment)
-        return OrderResult(True, RET_DONE, "done", ticket=ticket, price=price, volume=round(volume, 2))
+        if fault == "timeout_filled":  # the order executed but the answer was lost
+            return OrderResult(False, RET_TIMEOUT, "request timeout", uncertain=True)
+        if fault == "price_zero":
+            return OrderResult(True, RET_DONE, "done", ticket=ticket, price=0.0, volume=round(volume, 2))
+        code = RET_DONE_PARTIAL if fault == "partial" else RET_DONE
+        return OrderResult(True, code, "done", ticket=ticket, price=price, volume=round(volume, 2))
+
+    def margin_required(self, symbol: str, side: Side, volume: float) -> float:
+        return round(self._margin(symbol, volume), 2)
 
     def modify(self, ticket: int, sl: float, tp: float) -> OrderResult:
         p = self._positions.get(ticket)
@@ -454,9 +510,14 @@ class SimBroker:
         p = self._positions.get(ticket)
         if p is None:
             return OrderResult(False, RET_POSITION_NOT_FOUND, f"position {ticket} not found")
+        fault = self._take_fault(CLOSE_FAULTS)
+        if fault == "close_fail":
+            return OrderResult(False, RET_PRICE_OFF, "off quotes")
         t = self.tick(p.symbol)
         price = t.bid if p.side == "long" else t.ask
         self._settle(p, price, "manual" if comment == "manual" else "expert")
+        if fault == "close_timeout_done":
+            return OrderResult(False, RET_TIMEOUT, "request timeout", uncertain=True)
         return OrderResult(True, RET_DONE, "done", ticket=ticket, price=price, volume=p.volume)
 
     def _settle(self, p: _OpenPosition, price: float, reason: str) -> None:
@@ -504,5 +565,9 @@ class SimBroker:
             "open_positions": len(self._positions),
             "closed_trades": len(self._closed),
             "balance": round(self._balance, 2),
+            "faults": list(self.faults),
+            "login": self.login,
+            "is_demo": self.is_demo,
+            "margin_mode": self.margin_mode,
             "prices": {k: s.last_close for k, s in self._series.items()},
         }

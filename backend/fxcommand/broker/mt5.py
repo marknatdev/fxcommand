@@ -21,6 +21,7 @@ from .types import (
     Position,
     Side,
     SymbolInfo,
+    TerminalStatus,
     Tick,
     Timeframe,
     empty_bars,
@@ -34,6 +35,12 @@ except ImportError:  # pragma: no cover
 ACCOUNT_TRADE_MODE_REAL = 2
 SYMBOL_FILLING_FOK = 1
 SYMBOL_FILLING_IOC = 2
+MARGIN_MODES = {0: "netting", 1: "exchange", 2: "hedging"}
+SYMBOL_TRADE_MODES = {0: "disabled", 1: "longonly", 2: "shortonly", 3: "closeonly", 4: "full"}
+
+# Order Outcomes (ADR 0007), by MT5 retcode
+RET_FILLED = {10008, 10009, 10010}  # PLACED, DONE, DONE_PARTIAL
+RET_UNCERTAIN = {10011, 10012, 10031}  # ERROR (request processing), TIMEOUT, CONNECTION
 
 
 def _tf(timeframe: Timeframe) -> int:
@@ -117,6 +124,17 @@ class Mt5Broker:
             leverage=int(a.leverage),
             is_demo=a.trade_mode != ACCOUNT_TRADE_MODE_REAL,
             trade_allowed=bool(a.trade_allowed and a.trade_expert and algo_on),
+            margin_mode=MARGIN_MODES.get(int(a.margin_mode), "unknown"),
+        )
+
+    def terminal(self) -> TerminalStatus:
+        t = self._need(mt5.terminal_info(), "terminal_info")
+        return TerminalStatus(
+            connected=bool(t.connected),
+            algo_trading=bool(t.trade_allowed) and not bool(getattr(t, "tradeapi_disabled", False)),
+            ping_ms=round(float(t.ping_last) / 1000.0, 1),
+            build=int(t.build),
+            name=str(t.name),
         )
 
     def symbols(self) -> list[str]:
@@ -139,6 +157,8 @@ class Mt5Broker:
             volume_step=float(s.volume_step),
             stops_level=int(s.trade_stops_level),
             filling_mode=int(s.filling_mode),
+            trade_mode=SYMBOL_TRADE_MODES.get(int(s.trade_mode), "disabled"),
+            freeze_level=int(s.trade_freeze_level),
         )
 
     def tick(self, symbol: str) -> Tick:
@@ -245,18 +265,38 @@ class Mt5Broker:
         return mt5.ORDER_FILLING_RETURN
 
     def _send(self, request: dict) -> OrderResult:
+        """order_send + Order Outcome classification. Never retries (the engine decides)."""
         r = mt5.order_send(request)
-        if r is None:
-            return OrderResult(False, -1, f"order_send failed: {mt5.last_error()}")
-        ok = r.retcode == mt5.TRADE_RETCODE_DONE
-        return OrderResult(
-            ok,
-            int(r.retcode),
-            r.comment or ("done" if ok else "rejected"),
-            ticket=int(r.order) if ok else None,
-            price=float(r.price) if ok else None,
-            volume=float(r.volume) if ok else None,
-        )
+        if r is None:  # no reply at all: the request may or may not have reached the server
+            return OrderResult(False, -1, f"order_send returned nothing: {mt5.last_error()}", uncertain=True)
+        code = int(r.retcode)
+        if code in RET_FILLED:
+            return OrderResult(
+                True,
+                code,
+                r.comment or "done",
+                ticket=int(r.order) or None,
+                price=float(r.price) or None,
+                volume=float(r.volume) or None,
+                extra={"deal": int(r.deal), "order": int(r.order)},
+            )
+        return OrderResult(False, code, r.comment or "rejected", uncertain=code in RET_UNCERTAIN)
+
+    def _position_of(self, res: OrderResult):
+        """The position an entry opened. On hedging accounts its ticket is the order ticket; otherwise
+        follow the deal to its position id."""
+        order, deal = res.extra.get("order"), res.extra.get("deal")
+        if order:
+            found = mt5.positions_get(ticket=order)
+            if found:
+                return found[0]
+        if deal:
+            deals = mt5.history_deals_get(ticket=deal) or []
+            for d in deals:
+                found = mt5.positions_get(ticket=d.position_id)
+                if found:
+                    return found[0]
+        return None
 
     def market_order(
         self, symbol: str, side: Side, volume: float, sl: float, tp: float, magic: int, comment: str = ""
@@ -266,13 +306,14 @@ class Mt5Broker:
         mt5.symbol_select(symbol, True)
         t = self._need(mt5.symbol_info_tick(symbol), "symbol_info_tick")
         buy = side == "long"
-        return self._send(
+        price = t.ask if buy else t.bid
+        res = self._send(
             {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
                 "volume": float(volume),
                 "type": mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL,
-                "price": t.ask if buy else t.bid,
+                "price": price,
                 "sl": float(sl),
                 "tp": float(tp or 0.0),
                 "deviation": self._deviation,
@@ -282,6 +323,26 @@ class Mt5Broker:
                 "type_filling": self._filling(symbol),
             }
         )
+        if not res.ok:
+            return res
+        # the reply's price/ticket are not trustworthy on every server (0 on market execution):
+        # report what the position itself says
+        pos = self._position_of(res)
+        if pos is not None:
+            return OrderResult(
+                True, res.retcode, res.message, ticket=int(pos.ticket), price=float(pos.price_open), volume=float(pos.volume), extra=res.extra
+            )
+        # filled but not visible yet (or already stopped out): best available facts
+        return OrderResult(
+            True, res.retcode, res.message, ticket=res.ticket, price=res.price or float(price), volume=res.volume or float(volume), extra=res.extra
+        )
+
+    def margin_required(self, symbol: str, side: Side, volume: float) -> float:
+        mt5.symbol_select(symbol, True)
+        t = self._need(mt5.symbol_info_tick(symbol), "symbol_info_tick")
+        buy = side == "long"
+        m = mt5.order_calc_margin(mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL, symbol, float(volume), t.ask if buy else t.bid)
+        return float(self._need(m, f"order_calc_margin({symbol})"))
 
     def modify(self, ticket: int, sl: float, tp: float) -> OrderResult:
         pos = mt5.positions_get(ticket=ticket)

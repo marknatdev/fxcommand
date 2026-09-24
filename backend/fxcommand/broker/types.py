@@ -60,6 +60,7 @@ class AccountInfo:
     leverage: int
     is_demo: bool
     trade_allowed: bool
+    margin_mode: str = "hedging"  # hedging | netting | exchange (ADR 0006: only hedging is traded)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -79,6 +80,8 @@ class SymbolInfo:
     volume_step: float
     stops_level: int  # minimum SL/TP distance from price, in points
     filling_mode: int = 0  # MT5 SYMBOL_FILLING_* bitmask
+    trade_mode: str = "full"  # full | longonly | shortonly | closeonly | disabled
+    freeze_level: int = 0  # no SL/TP change while price is within this many points of them
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -141,6 +144,9 @@ class ClosedTrade:
 
 @dataclass(frozen=True)
 class OrderResult:
+    """A Broker's answer to an order. ``ok`` means filled. When not ok, ``uncertain`` says whether a
+    position may nevertheless exist (timeout, lost connection, no reply) — see ADR 0007."""
+
     ok: bool
     retcode: int
     message: str
@@ -148,6 +154,23 @@ class OrderResult:
     price: float | None = None
     volume: float | None = None
     extra: dict = field(default_factory=dict)
+    uncertain: bool = False
+
+    @property
+    def outcome(self) -> str:
+        return "filled" if self.ok else ("uncertain" if self.uncertain else "not_executed")
+
+    def to_dict(self) -> dict:
+        return {**asdict(self), "outcome": self.outcome}
+
+
+@dataclass(frozen=True)
+class TerminalStatus:
+    connected: bool
+    algo_trading: bool  # the terminal's "Algo Trading" button
+    ping_ms: float
+    build: int = 0
+    name: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)

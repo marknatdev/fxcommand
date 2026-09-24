@@ -24,6 +24,10 @@ class SessionRow(SQLModel, table=True):
     started_at: Optional[int] = None
     stopped_at: Optional[int] = None
     stop_reason: str = ""
+    execution: str = "broker"  # broker | paper (Execution Mode, ADR 0007)
+    login: Optional[int] = None  # Pinned Login while active (ADR 0006)
+    weekend_close: bool = False
+    weekend_close_time: str = "22:30"  # Friday, server time
 
 
 class AssignmentRow(SQLModel, table=True):
@@ -52,6 +56,8 @@ class RiskProfileRow(SQLModel, table=True):
     trailing: bool = False
     trailing_atr: float = 2.0
     trailing_start_r: float = 1.0
+    allow_min_lot: bool = False  # trade the minimum lot when risk % buys less, if that risk is small enough
+    min_lot_max_risk_pct: float = 2.0
 
 
 class TradeRow(SQLModel, table=True):
@@ -80,6 +86,7 @@ class TradeRow(SQLModel, table=True):
     profit: Optional[float] = None
     close_reason: str = ""
     adopted: bool = False
+    paper: bool = False
 
 
 class JournalRow(SQLModel, table=True):
@@ -111,6 +118,29 @@ class EquityRow(SQLModel, table=True):
     ts: int = Field(index=True)
     balance: float
     equity: float
+
+
+class PaperPositionRow(SQLModel, table=True):
+    """The Paper book (ADR 0007). Tickets are negative so they can never collide with the Broker's."""
+
+    __tablename__ = "paper_positions"
+
+    ticket: int = Field(primary_key=True)
+    symbol: str = Field(index=True)
+    side: str
+    volume: float
+    price_open: float
+    sl: float
+    tp: float = 0.0
+    magic: int = Field(index=True)
+    time: int
+    comment: str = ""
+    checked_to: int = 0  # server time up to which bars have been checked against SL/TP
+    status: str = Field(default="open", index=True)  # open | closed
+    price_close: Optional[float] = None
+    time_close: Optional[int] = Field(default=None, index=True)
+    profit: Optional[float] = None
+    reason: str = ""
 
 
 # ------------------------------------------------------------------ learning

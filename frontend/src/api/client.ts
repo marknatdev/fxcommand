@@ -1,6 +1,9 @@
 import type {
   AccountView,
   ArenaDetail,
+  NotifySettings,
+  OutboxEntry,
+  PreflightReport,
   LearningOverview,
   OptimizerRunT,
   PendingT,
@@ -89,7 +92,10 @@ export const api = {
   createProfile: (body: Omit<RiskProfile, "id">) => req<RiskProfile>("POST", "/risk/profiles", body),
   updateProfile: (id: number, body: Omit<RiskProfile, "id">) => req<RiskProfile>("PUT", `/risk/profiles/${id}`, body),
   deleteProfile: (id: number) => req<void>("DELETE", `/risk/profiles/${id}`),
-  killSwitch: () => req<{ stopped_sessions: string[]; closed_positions: number }>("POST", "/kill-switch"),
+  killSwitch: () => req<{ stopped_sessions: string[]; closed_positions: number; left_open: number }>("POST", "/kill-switch"),
+  setLiveCaps: (body: { max_risk_pct: number; max_volume: number; confirm_login?: number | null }) => req<RiskOverview>("PUT", "/risk/live-caps", body),
+  resetFloor: (confirm_login: number, pct: number) => req<RiskOverview>("POST", "/risk/equity-floor/reset", { confirm_login, pct }),
+  preflight: (session_id?: number) => req<PreflightReport>("GET", `/preflight${qs({ session_id })}`),
 
   positions: () => req<PositionView[]>("GET", "/positions"),
   closePosition: (ticket: number) => req<unknown>("POST", `/positions/${ticket}/close`),
@@ -104,7 +110,10 @@ export const api = {
   setLiveEnabled: (enabled: boolean, confirm: string) => req<AccountView>("PUT", "/account/live-enabled", { enabled, confirm }),
   reconnect: () => req<AccountView>("POST", "/account/reconnect"),
 
-  settings: () => req<{ app: AppSettings; defaults: AppSettings; mode: string }>("GET", "/settings"),
+  settings: () => req<{ app: AppSettings; defaults: AppSettings; mode: string; notify: NotifySettings }>("GET", "/settings"),
+  saveNotify: (body: { enabled?: boolean; telegram_token?: string; telegram_chat_id?: string }) => req<NotifySettings>("PUT", "/settings/notify", body),
+  testNotify: () => req<OutboxEntry>("POST", "/settings/notify/test"),
+  outbox: () => req<OutboxEntry[]>("GET", "/notify/outbox"),
   saveSettings: (body: Partial<AppSettings>) => req<{ app: AppSettings; defaults: AppSettings; mode: string }>("PUT", "/settings", body),
 
   learning: () => req<LearningOverview>("GET", "/learning"),
@@ -123,4 +132,6 @@ export const api = {
   simAdvance: (bars: number) => req<SimState>("POST", "/sim/advance", { bars }),
   simShock: (symbol: string, pct: number) => req<SimState>("POST", "/sim/shock", { symbol, pct }),
   simClock: (speed: number) => req<SimState>("POST", "/sim/clock", { speed }),
+  simFault: (kind: string, count = 1) => req<SimState>("POST", "/sim/fault", { kind, count }),
+  simAccount: (body: { login?: number; is_demo?: boolean; margin_mode?: string; algo_trading?: boolean }) => req<SimState>("POST", "/sim/account", body),
 };

@@ -119,6 +119,39 @@ Returning an Assignment to its previous Champion Version — by the operator, or
 **Signal Filter**:
 A model, learned from closed trades and Shadow Trades, that estimates how likely a Signal is to win. It first only **observes**; once it has enough evidence it **blocks** unlikely Signals, and it switches itself off if blocked Signals turn out to do better than taken ones.
 
+### Going live
+
+**Execution Mode**:
+How a Session's orders are carried out. **Broker** sends them to the Account. **Paper** runs the whole engine on the Broker's real prices but fills orders in a local simulated book; nothing reaches the Account.
+_Avoid_: dry run, simulation (the simulated market is the sim Broker, a different thing)
+
+**Paper Position**:
+A Position held in the Paper book of a Paper Session. It has no server-side stop-loss, so it is always closed when its Session stops, and is settled from the bars missed if the application was down.
+
+**Order Outcome**:
+What the Broker's answer to an order means: **filled**, **not executed** (nothing happened; one re-gated retry is allowed), or **uncertain** (a position may or may not exist; never retried — the Account's positions decide).
+
+**Orphan**:
+An owned Position (it carries a Session's Magic Number) that the Journal has no record of opening — typically left by an uncertain Order Outcome. It is adopted on the next engine pass.
+
+**Pinned Login**:
+The Account login a Session started on. If the terminal is logged into a different Account while the Session is active, the Session becomes Interrupted.
+
+**Live Caps**:
+Hard limits that apply only to Broker-mode Sessions on a live Account, above any Risk Profile: a ceiling on risk percent per trade and a maximum volume per order.
+
+**Equity Floor**:
+An equity level for a live Account below which the engine fires the Kill Switch and refuses to start Sessions until the operator resets it.
+
+**Pre-flight Check**:
+The list of conditions checked before a Session starts (terminal, Account, Symbols, notifier, engine health). Blocking checks must pass before a live Session may start; on demo they are warnings.
+
+**Weekend Close**:
+An optional per-Session rule that closes its positions at a set Friday server time and opens nothing new until the market reopens.
+
+**Notifier**:
+Where Alerts are delivered outside the application (Telegram), so the operator hears about them when the dashboard is not open.
+
 ## Relationships
 
 - An **Account** has many **Sessions**; a **Session** belongs to exactly one **Account**.
@@ -128,6 +161,8 @@ A model, learned from closed trades and Shadow Trades, that estimates how likely
 - An **Assignment** holds at most one open **Position** at a time.
 - Every **Signal** passes the **Signal Filter** (once it is active) and then the **Risk Gate**; only approved ones become orders.
 - An **Assignment** trades in exactly one **Arena** and has exactly one **Champion**; an **Arena** has at most three **Challengers**.
+- A **Session** has exactly one **Execution Mode**; Paper and Broker Sessions follow the same Symbol rule.
+- A **Session** is pinned to one login while active; **Live Caps** and the **Equity Floor** apply only when that Account is live.
 - A **Promotion** or **Rollback** creates a new **Champion Version**; only the operator may promote on a live **Account**.
 
 ## Example dialogue

@@ -16,6 +16,52 @@ export interface Account {
   leverage: number;
   is_demo: boolean;
   trade_allowed: boolean;
+  margin_mode: string;
+}
+
+export type Execution = "broker" | "paper";
+
+export interface LiveCaps {
+  max_risk_pct: number;
+  max_volume: number;
+}
+
+export interface EquityFloor {
+  floor: number;
+  pct: number;
+  set_at: number;
+  breached_at: number | null;
+}
+
+export interface PreflightCheck {
+  id: string;
+  label: string;
+  status: "pass" | "warn" | "fail";
+  detail: string;
+  blocking: boolean;
+}
+
+export interface PreflightReport {
+  ok: boolean;
+  live: boolean;
+  paper: boolean;
+  enforced: boolean;
+  checks: PreflightCheck[];
+  failed: string[];
+  session_id: number | null;
+}
+
+export interface NotifySettings {
+  enabled: boolean;
+  telegram_token: string;
+  telegram_chat_id: string;
+  configured: boolean;
+}
+
+export interface OutboxEntry {
+  wall: number;
+  text: string;
+  status: string;
 }
 
 export interface PositionView {
@@ -37,6 +83,7 @@ export interface PositionView {
   strategy: string | null;
   timeframe: string | null;
   risk_amount: number | null;
+  paper: boolean;
 }
 
 export interface SessionSummary {
@@ -47,6 +94,8 @@ export interface SessionSummary {
   open_positions: number;
   day_pnl: number;
   stop_reason: string;
+  execution: Execution;
+  login: number | null;
 }
 
 export interface Snapshot {
@@ -63,6 +112,11 @@ export interface Snapshot {
   positions: PositionView[];
   kill_switch_at: number | null;
   passes: number;
+  heartbeat_age: number | null;
+  broker_busy_for: number;
+  disconnected_for: number;
+  equity_floor: EquityFloor | null;
+  live_caps: LiveCaps;
 }
 
 export interface Stats {
@@ -120,6 +174,7 @@ export interface Trade {
   profit: number | null;
   close_reason: string;
   adopted: boolean;
+  paper: boolean;
 }
 
 export interface AssignmentState {
@@ -173,6 +228,10 @@ export interface Session {
   started_at: number | null;
   stopped_at: number | null;
   stop_reason: string;
+  execution: Execution;
+  login: number | null;
+  weekend_close: boolean;
+  weekend_close_time: string;
   assignments: Assignment[];
   open_positions: number;
   day_pnl: number;
@@ -201,6 +260,10 @@ export interface SessionInput {
   daily_loss_pct: number;
   window: TradingWindow;
   assignments: AssignmentInput[];
+  execution: Execution;
+  weekend_close: boolean;
+  weekend_close_time: string;
+  confirm_login?: number | null;
 }
 
 export interface StrategyParam {
@@ -234,6 +297,8 @@ export interface RiskProfile {
   trailing: boolean;
   trailing_atr: number;
   trailing_start_r: number;
+  allow_min_lot: boolean;
+  min_lot_max_risk_pct: number;
   used_by?: number;
 }
 
@@ -249,6 +314,11 @@ export interface RiskOverview {
     risk_at_stop: number;
   };
   kill_switch_at: number | null;
+  live_caps: LiveCaps;
+  equity_floor: EquityFloor | null;
+  account_live: boolean;
+  login: number | null;
+  equity: number | null;
 }
 
 export interface SymbolRow {
@@ -263,6 +333,8 @@ export interface SymbolRow {
   volume_max: number;
   volume_step: number;
   stops_level: number;
+  trade_mode: string;
+  freeze_level: number;
   bid: number;
   ask: number;
   spread_points: number;
@@ -323,6 +395,8 @@ export interface AccountView {
   live_enabled: boolean;
   terminal_path: string | null;
   db: string;
+  equity_floor: EquityFloor | null;
+  heartbeat_age: number | null;
 }
 
 export interface SimState {
@@ -332,6 +406,10 @@ export interface SimState {
   balance: number;
   prices: Record<string, number>;
   speed: number;
+  faults: string[];
+  login: number;
+  is_demo: boolean;
+  margin_mode: string;
 }
 
 // ------------------------------------------------------------------ learning

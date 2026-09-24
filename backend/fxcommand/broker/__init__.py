@@ -1,5 +1,5 @@
-from .base import Broker, BrokerError, BrokerThread
-from .types import AccountInfo, ClosedTrade, OrderResult, Position, Side, SymbolInfo, Tick, Timeframe
+from .base import Broker, BrokerError, BrokerThread, BrokerTimeout
+from .types import AccountInfo, ClosedTrade, OrderResult, Position, Side, SymbolInfo, TerminalStatus, Tick, Timeframe
 
 
 def make_broker(mode: str, **kwargs) -> Broker:
@@ -20,11 +20,13 @@ __all__ = [
     "Broker",
     "BrokerError",
     "BrokerThread",
+    "BrokerTimeout",
     "ClosedTrade",
     "OrderResult",
     "Position",
     "Side",
     "SymbolInfo",
+    "TerminalStatus",
     "Tick",
     "Timeframe",
     "make_broker",

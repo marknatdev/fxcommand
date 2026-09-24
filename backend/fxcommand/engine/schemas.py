@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -42,6 +43,19 @@ class SessionIn(BaseModel):
     daily_loss_pct: float = Field(3.0, gt=0, le=100)
     window: dict[str, Any] | None = None
     assignments: list[AssignmentIn] = Field(min_length=1)
+    execution: Literal["broker", "paper"] = "broker"
+    weekend_close: bool = False
+    weekend_close_time: str = "22:30"  # Friday, server time
+    confirm_login: int | None = None  # typed account number: switching to Broker execution on a LIVE account
+
+    @field_validator("weekend_close_time")
+    @classmethod
+    def _hhmm(cls, v: str) -> str:
+        v = v.strip()
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", v)
+        if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+            raise ValueError("weekend close time must be HH:MM")
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
 
     @field_validator("name")
     @classmethod

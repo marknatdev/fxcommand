@@ -52,6 +52,9 @@ export default function SessionDetail() {
             <StatusBadge status={status} />
             <span className="num">magic {s.magic}</span>·<span>{s.window_text}</span>
             {s.auto_resume && <Badge tone="info">auto-resume</Badge>}
+            {s.execution === "paper" && <Badge tone="accent" testId="detail-paper">PAPER — nothing sent to the account</Badge>}
+            {s.weekend_close && <Badge>closes Fri {s.weekend_close_time}</Badge>}
+            {s.login && <span className="num text-xs text-faint">pinned to account {s.login}</span>}
           </span>
         }
         actions={

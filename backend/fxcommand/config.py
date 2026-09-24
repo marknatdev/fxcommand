@@ -22,6 +22,7 @@ class Config:
     mt5_path: str | None = None
     static_dir: Path | None = None
     run_engine: bool = True
+    keep_awake: bool = False  # keep Windows awake while a Session is active (default on for BROKER=mt5)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -41,4 +42,5 @@ class Config:
             mt5_path=os.environ.get("MT5_PATH") or None,
             static_dir=Path(static) if Path(static).is_dir() else None,
             run_engine=os.environ.get("FXC_ENGINE", "1") != "0",
+            keep_awake=os.environ.get("FXC_KEEP_AWAKE", "1" if broker == "mt5" else "0") == "1",
         )

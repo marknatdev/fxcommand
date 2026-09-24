@@ -210,3 +210,63 @@ def test_sim_injected_challenger_is_deduplicated(client):
     assert a["id"] == b["id"]
     arena = client.get("/api/learning/arenas/GOLD/M1").json()
     assert len(arena["challengers"]) == 1
+
+
+# ------------------------------------------------------------------ going live
+def test_live_readiness_endpoints(client):
+    s = make_session(client)
+    pf = client.get(f"/api/preflight?session_id={s['id']}").json()
+    assert pf["ok"] and not pf["enforced"] and any(c["id"] == "hedging" for c in pf["checks"])
+    assert client.get("/api/preflight").status_code == 200
+    # notifier settings: token is write-only (masked on read)
+    n = client.put("/api/settings/notify", json={"telegram_token": "123456:SECRETTOKEN", "telegram_chat_id": "42"}).json()
+    assert n["configured"] and "SECRET" not in n["telegram_token"] and n["telegram_token"].endswith("OKEN")
+    assert "SECRET" not in client.get("/api/settings").text
+    client.put("/api/settings/notify", json={"telegram_token": ""})
+    assert client.post("/api/settings/notify/test").status_code == 422  # not configured -> clear error
+    assert client.get("/api/notify/outbox").json()[0]["status"] == "skipped: not configured"
+    # Live Caps on a demo account need no confirmation
+    risk = client.put("/api/risk/live-caps", json={"max_risk_pct": 0.5, "max_volume": 0.05}).json()
+    assert risk["live_caps"] == {"max_risk_pct": 0.5, "max_volume": 0.05} and not risk["account_live"]
+
+
+def test_live_account_controls(client):
+    client.post("/api/sim/account", json={"is_demo": False})
+    acct = client.get("/api/account").json()["account"]
+    assert not acct["is_demo"]
+    r = client.put("/api/risk/live-caps", json={"max_risk_pct": 2, "max_volume": 1})
+    assert r.status_code == 422 and r.json()["code"] == "confirm_required"
+    assert client.put("/api/risk/live-caps", json={"max_risk_pct": 2, "max_volume": 1, "confirm_login": acct["login"]}).status_code == 200
+    assert client.put("/api/account/live-enabled", json={"enabled": True, "confirm": str(acct["login"])}).status_code == 200
+    floor = client.get("/api/risk").json()["equity_floor"]
+    assert floor["floor"] == round(acct["equity"] * 0.8, 2)
+    bad = client.post("/api/risk/equity-floor/reset", json={"confirm_login": 1, "pct": 70})
+    assert bad.status_code == 422
+    ok = client.post("/api/risk/equity-floor/reset", json={"confirm_login": acct["login"], "pct": 70}).json()
+    assert ok["equity_floor"]["pct"] == 70
+
+
+def test_sim_fault_and_symbol_controls(client):
+    st = client.post("/api/sim/fault", json={"kind": "requote", "count": 2}).json()
+    assert st["faults"] == ["requote", "requote"]
+    assert client.post("/api/sim/fault", json={"kind": "nope"}).status_code == 422
+    assert client.post("/api/sim/symbol", json={"symbol": "EURUSD", "trade_mode": "closeonly"}).status_code == 200
+    rows = client.get("/api/symbols?q=EURUSD").json()
+    assert rows[0]["trade_mode"] == "closeonly"
+
+
+def test_paper_session_over_http(client):
+    r = client.post(
+        "/api/sessions",
+        json={"name": "P", "execution": "paper", "weekend_close": True, "weekend_close_time": "21:45",
+              "assignments": [{"symbol": "EURUSD", "timeframe": "M1", "strategy": "ema_cross", "params": FAST}]},
+    )
+    assert r.status_code == 201, r.text
+    s = r.json()
+    assert s["execution"] == "paper" and s["weekend_close"] and s["weekend_close_time"] == "21:45"
+    assert client.post(f"/api/sessions/{s['id']}/start").json()["status"] == "running"
+    client.post("/api/sim/advance", json={"bars": 120})
+    trades = client.get(f"/api/trades?session_id={s['id']}").json()["trades"]
+    assert trades and all(t["paper"] for t in trades)
+    bad = client.post("/api/sessions", json={"name": "Q", "weekend_close_time": "25:00", "assignments": [{"symbol": "GBPUSD"}]})
+    assert bad.status_code == 422

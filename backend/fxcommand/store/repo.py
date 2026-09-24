@@ -15,7 +15,7 @@ from sqlmodel import Session as DB
 from sqlmodel import SQLModel, create_engine, select
 
 from ..risk import RiskLimits, RiskProfile, TradingWindow
-from .models import AssignmentRow, EquityRow, JournalRow, RiskProfileRow, SessionRow, SettingRow, TradeRow
+from .models import AssignmentRow, EquityRow, JournalRow, PaperPositionRow, RiskProfileRow, SessionRow, SettingRow, TradeRow
 
 FIRST_MAGIC = 770_001
 
@@ -29,6 +29,9 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "learning_candidates": 200,  # Candidates generated per Optimizer Run
     "learning_bars": 5000,  # history fetched per Optimizer Run
 }
+
+DEFAULT_LIVE_CAPS: dict[str, float] = {"max_risk_pct": 1.0, "max_volume": 0.10}
+DEFAULT_FLOOR_PCT = 80.0
 
 DEFAULT_PROFILES = (
     RiskProfileRow(name="Default", risk_pct=1.0, max_spread_points=30),
@@ -56,7 +59,31 @@ class Store:
             cur.close()
 
         SQLModel.metadata.create_all(self.engine)
+        self._add_missing_columns()
         self._seed()
+
+    def _add_missing_columns(self) -> None:
+        """``create_all`` never alters an existing table. Add columns that newer models declare, with
+        their model default, so an existing database keeps working after an upgrade."""
+        from sqlalchemy import inspect, text
+
+        insp = inspect(self.engine)
+        by_table = {m.__tablename__: m for m in SQLModel.__subclasses__() if getattr(m, "__tablename__", None)}
+        with self.engine.begin() as conn:
+            for table in SQLModel.metadata.sorted_tables:
+                if not insp.has_table(table.name):
+                    continue
+                have = {c["name"] for c in insp.get_columns(table.name)}
+                model = by_table.get(table.name)
+                for col in table.columns:
+                    if col.name in have:
+                        continue
+                    default = None
+                    if model is not None and col.name in model.model_fields:
+                        d = model.model_fields[col.name].default
+                        default = None if d is ... or callable(d) else d
+                    lit = "NULL" if default is None else (str(int(default)) if isinstance(default, bool) else repr(default) if isinstance(default, str) else str(default))
+                    conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col.type.compile(self.engine.dialect)} DEFAULT {lit}'))
 
     def _db(self) -> DB:
         return DB(self.engine, expire_on_commit=False)
@@ -106,6 +133,31 @@ class Store:
         cur = dict(self.get_setting("live_enabled", {}) or {})
         cur[str(login)] = bool(enabled)
         self.set_setting("live_enabled", cur)
+
+    # Live Caps and Equity Floor (live Accounts only)
+    def live_caps(self) -> dict:
+        return {**DEFAULT_LIVE_CAPS, **(self.get_setting("live_caps", {}) or {})}
+
+    def set_live_caps(self, caps: dict) -> dict:
+        merged = {**self.live_caps(), **{k: float(v) for k, v in caps.items() if k in DEFAULT_LIVE_CAPS}}
+        if merged["max_risk_pct"] <= 0 or merged["max_volume"] <= 0:
+            raise ValueError("live caps must be positive")
+        self.set_setting("live_caps", merged)
+        return merged
+
+    def equity_floor(self, login: int) -> dict | None:
+        return (self.get_setting("equity_floor", {}) or {}).get(str(login))
+
+    def set_equity_floor(self, login: int, value: dict | None) -> None:
+        cur = dict(self.get_setting("equity_floor", {}) or {})
+        if value is None:
+            cur.pop(str(login), None)
+        else:
+            cur[str(login)] = value
+        self.set_setting("equity_floor", cur)
+
+    def notify_settings(self) -> dict:
+        return {"telegram_token": "", "telegram_chat_id": "", "enabled": True, **(self.get_setting("notify", {}) or {})}
 
     def allocate_magic(self) -> int:
         magic = int(self.get_setting("next_magic", FIRST_MAGIC))
@@ -287,12 +339,16 @@ class Store:
             return list(db.exec(q.order_by(TradeRow.open_time.desc()).limit(limit)))
 
     def realized_since(self, since: int, session_id: int | None = None) -> float:
+        """Realised P&L of trades closed since ``since``: one Session's, or the Account's (Paper
+        trades excluded — they never touched the Account)."""
         with self._db() as db:
             q = select(func.coalesce(func.sum(TradeRow.profit), 0.0)).where(
                 TradeRow.status == "closed", TradeRow.close_time >= since
             )
             if session_id is not None:
                 q = q.where(TradeRow.session_id == session_id)
+            else:
+                q = q.where(TradeRow.paper == False)  # noqa: E712
             return float(db.exec(q).one())
 
     # ----------------------------------------------------------------- journal
@@ -338,6 +394,36 @@ class Store:
             o = db.exec(select(func.coalesce(func.max(TradeRow.open_time), 0))).one()
             e = db.exec(select(func.coalesce(func.max(EquityRow.ts), 0))).one()
             return int(max(j or 0, t or 0, o or 0, e or 0))
+
+    # ------------------------------------------------------------ paper book
+    def paper_open(self) -> list[PaperPositionRow]:
+        with self._db() as db:
+            return list(db.exec(select(PaperPositionRow).where(PaperPositionRow.status == "open").order_by(PaperPositionRow.ticket.desc())))
+
+    def paper_add(self, row: PaperPositionRow) -> None:
+        with self._db() as db:
+            db.add(row)
+            db.commit()
+
+    def paper_update(self, ticket: int, **fields: Any) -> None:
+        with self._db() as db:
+            row = db.get(PaperPositionRow, ticket)
+            if row is None:
+                raise NotFound(f"paper position {ticket} not found")
+            for k, v in fields.items():
+                setattr(row, k, v)
+            db.add(row)
+            db.commit()
+
+    def paper_closed_since(self, since: int) -> list[PaperPositionRow]:
+        with self._db() as db:
+            q = select(PaperPositionRow).where(PaperPositionRow.status == "closed", PaperPositionRow.time_close >= since)
+            return list(db.exec(q))
+
+    def paper_next_ticket(self) -> int:
+        with self._db() as db:
+            low = db.exec(select(func.min(PaperPositionRow.ticket))).one()
+            return min(int(low or 0), 0) - 1
 
     # ------------------------------------------------------------------ equity
     def add_equity(self, ts: int, balance: float, equity: float) -> None:

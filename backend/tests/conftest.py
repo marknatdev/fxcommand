@@ -4,6 +4,7 @@ from dataclasses import replace
 import pytest
 
 from fxcommand.broker import BrokerThread
+from fxcommand.broker.paper import PaperBook, PaperRouter
 from fxcommand.broker.sim import SimBroker
 from fxcommand.engine import AssignmentIn, SessionIn, SessionManager
 from fxcommand.journal import EventBus, Journal
@@ -18,12 +19,14 @@ FAST = {"fast": 2, "slow": 3, "atr_period": 5, "sl_atr": 3.0, "tp_atr": 6.0}
 class Harness:
     def __init__(self, tmp_path, sim: SimBroker | None = None, db_name="t.db"):
         self.sim = sim or SimBroker(seed=11, start=MON_08, history_days=5)
-        self.thread = BrokerThread(self.sim)
         self.store = Store(f"sqlite:///{tmp_path / db_name}")
+        self.router = PaperRouter(self.sim, PaperBook(self.store))
+        self.thread = BrokerThread(self.router)
         self.bus = EventBus()
         self.bus.attach(asyncio.get_running_loop())
         self.journal = Journal(self.store, self.bus)
         self.mgr = SessionManager(self.thread, self.store, self.journal, self.bus)
+        self.mgr.close_retry_delay = 0.0
 
     async def bars(self, n: int) -> None:
         for _ in range(n):

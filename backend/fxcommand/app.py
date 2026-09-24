@@ -13,10 +13,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .broker import BrokerError, BrokerThread, make_broker
+from .broker.paper import PaperBook, PaperRouter
 from .config import Config
 from .engine import DomainError, SessionManager
 from .journal import EventBus, Journal, LogBuffer
 from .learning.service import LearningService
+from .notify import AlertDispatcher, telegram_from_settings
 from .store import NotFound, Store
 
 log = logging.getLogger("fxcommand")
@@ -32,6 +34,7 @@ class Runtime:
     logs: LogBuffer
     manager: SessionManager
     learning: "LearningService"
+    notifier: AlertDispatcher
     clock_task: asyncio.Task | None = None
 
 
@@ -75,11 +78,24 @@ def build_runtime(config: Config) -> Runtime:
             store.update_app_settings({"sim_speed": config.sim_speed})
     else:
         broker = make_broker("mt5", terminal_path=config.mt5_path)
-    thread = BrokerThread(broker)
+    thread = BrokerThread(PaperRouter(broker, PaperBook(store)))
     journal = Journal(store, bus)
     learning = LearningService(store, thread, journal, config.broker, processes=True)
     manager = SessionManager(thread, store, journal, bus, learning)
-    return Runtime(config, thread, store, bus, journal, logs, manager, learning)
+
+    def label() -> str:
+        a = manager.snapshot_account()
+        if config.broker == "sim":
+            return "[SIM]"
+        return f"[{'DEMO' if a is None or a.is_demo else 'LIVE'} {a.login if a else ''}]".replace(" ]", "]")
+
+    notifier = AlertDispatcher(store, bus, telegram_from_settings, label)
+    manager.notifier_configured = lambda: telegram_from_settings(store.notify_settings()) is not None
+    if config.keep_awake:
+        from .keepawake import set_awake
+
+        manager.on_activity = set_awake
+    return Runtime(config, thread, store, bus, journal, logs, manager, learning, notifier)
 
 
 def create_app(config: Config | None = None) -> FastAPI:
@@ -101,6 +117,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         loop.set_exception_handler(_quiet_resets)
         log.info("FXCommand starting — broker=%s db=%s", config.broker, config.db_url)
         rt.learning.start()
+        rt.notifier.start()  # before boot: "Interrupted" alerts must reach the operator
         await rt.manager.boot()
         if config.run_engine:
             rt.manager.start_loop(lambda: rt.store.app_settings()["poll_interval"])
@@ -113,6 +130,9 @@ def create_app(config: Config | None = None) -> FastAPI:
                 rt.clock_task.cancel()
             await rt.manager.stop_loop()
             await rt.learning.stop()
+            await rt.notifier.stop()
+            if rt.manager.on_activity is not None:
+                rt.manager.on_activity(False)
             await asyncio.get_running_loop().run_in_executor(None, rt.broker.shutdown)
             log.info("FXCommand stopped")
 

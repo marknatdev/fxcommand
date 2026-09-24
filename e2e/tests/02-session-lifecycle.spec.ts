@@ -59,6 +59,11 @@ test("start, trade, pause, resume and stop (closing positions) from the dashboar
   await page.goto(`/sessions/${s.id}`);
 
   await page.getByTestId("start-session").click();
+  // Start shows the Pre-flight Check (advisory on a demo account)
+  const start = page.getByTestId("start-dialog");
+  await expect(start.getByTestId("preflight-status")).toHaveText("ready");
+  await expect(start.getByTestId("check-hedging")).toHaveAttribute("data-status", "pass");
+  await start.getByTestId("confirm-button").click();
   await expect(page.getByTestId("session-status").first()).toHaveText(/running/i);
 
   // move the simulated market; the engine evaluates every closed bar
@@ -113,6 +118,7 @@ test("the same symbol cannot run in two sessions at once", async ({ page, reques
   await api(request, "POST", `/sessions/${a.id}/start`);
   await page.goto(`/sessions/${b.id}`);
   await page.getByTestId("start-session").click();
+  await page.getByTestId("start-dialog").getByTestId("confirm-button").click();
   await expect(page.getByText(/USDJPY already traded by running session 'Conflict A'/)).toBeVisible();
   await expect(page.getByTestId("session-status").first()).toHaveText(/stopped/i);
   await api(request, "POST", `/sessions/${a.id}/stop`, { close_positions: true });

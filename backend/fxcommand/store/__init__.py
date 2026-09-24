@@ -1,4 +1,4 @@
-from .models import AssignmentRow, EquityRow, JournalRow, RiskProfileRow, SessionRow, SettingRow, TradeRow
+from .models import AssignmentRow, EquityRow, JournalRow, PaperPositionRow, RiskProfileRow, SessionRow, SettingRow, TradeRow
 from .repo import DEFAULT_APP_SETTINGS, NotFound, Store
 
 __all__ = [
@@ -7,6 +7,7 @@ __all__ = [
     "EquityRow",
     "JournalRow",
     "NotFound",
+    "PaperPositionRow",
     "RiskProfileRow",
     "SessionRow",
     "SettingRow",

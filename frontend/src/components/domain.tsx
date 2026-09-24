@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, CircleDot, Info, Pause, Play, Square, XCircle } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -6,7 +6,8 @@ import { toast } from "sonner";
 import { api } from "../api/client";
 import type { JournalEntry, PositionView, SessionStatus, Stats, Trade } from "../api/types";
 import { cn, digitsFor, money, price, serverTime, shortTime, strategyTitle } from "../lib/format";
-import { Badge, Button, ConfirmDialog, Empty, Kpi, Pnl, SideBadge, Switch } from "./ui";
+import { PreflightList } from "./Preflight";
+import { Badge, Button, ConfirmDialog, Empty, ErrorBox, Kpi, Loading, Pnl, SideBadge, Switch } from "./ui";
 
 const refreshKeys = ["sessions", "session", "overview", "positions", "risk", "symbols"];
 
@@ -31,12 +32,13 @@ function useSessionAction() {
 export function SessionControls({ id, name, status, size = "sm" }: { id: number; name: string; status: SessionStatus; size?: "sm" | "md" }) {
   const act = useSessionAction();
   const [stopOpen, setStopOpen] = useState(false);
+  const [startOpen, setStartOpen] = useState(false);
   const [closeAll, setCloseAll] = useState(false);
   const busy = act.isPending;
   return (
     <div className="flex items-center gap-1.5" data-testid={`controls-${id}`}>
       {(status === "stopped" || status === "interrupted") && (
-        <Button size={size} variant="success" icon={<Play className="size-3.5" />} loading={busy} onClick={() => act.mutate({ id, op: "start" })} data-testid="start-session">
+        <Button size={size} variant="success" icon={<Play className="size-3.5" />} loading={busy} onClick={() => setStartOpen(true)} data-testid="start-session">
           {status === "interrupted" ? "Restart" : "Start"}
         </Button>
       )}
@@ -55,6 +57,7 @@ export function SessionControls({ id, name, status, size = "sm" }: { id: number;
           Stop
         </Button>
       )}
+      {startOpen && <StartDialog id={id} name={name} restart={status === "interrupted"} onClose={() => setStartOpen(false)} onStart={() => act.mutateAsync({ id, op: "start" })} />}
       <ConfirmDialog
         open={stopOpen}
         onOpenChange={(o) => {
@@ -77,6 +80,35 @@ export function SessionControls({ id, name, status, size = "sm" }: { id: number;
         </div>
       </ConfirmDialog>
     </div>
+  );
+}
+
+/** Start confirmation with the Pre-flight Check; blocked while a blocking check fails. */
+function StartDialog({ id, name, restart, onClose, onStart }: { id: number; name: string; restart: boolean; onClose: () => void; onStart: () => Promise<unknown> }) {
+  // never show a cached answer: conditions change (Algo Trading button, quotes, spread)
+  const q = useQuery({ queryKey: ["preflight", id, "start"], queryFn: () => api.preflight(id), gcTime: 0, refetchInterval: 5000 });
+  const report = q.data;
+  return (
+    <ConfirmDialog
+      open
+      onOpenChange={(o) => !o && onClose()}
+      testId="start-dialog"
+      variant="success"
+      title={`${restart ? "Restart" : "Start"} session '${name}'?`}
+      description={restart ? "Open positions with this Session's magic number are re-adopted." : "The Session acts from the next bar close."}
+      confirmLabel={report && !report.ok ? "Blocked by pre-flight" : restart ? "Restart" : "Start"}
+      confirmDisabled={!report || !report.ok}
+      onConfirm={async () => {
+        try {
+          await onStart();
+        } catch {
+          q.refetch();
+          throw new Error("start failed");
+        }
+      }}
+    >
+      {q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : <PreflightList report={report!} compact />}
+    </ConfirmDialog>
   );
 }
 
@@ -109,7 +141,9 @@ export function PositionsTable({ positions, showSession = true, allowClose = tru
             const d = digitsFor(p.price_open);
             return (
               <tr key={p.ticket} className="hover:bg-panel-2/60" data-testid="position-row">
-                <td className="td num text-dim">#{p.ticket}</td>
+                <td className="td num text-dim">
+                  #{p.ticket} {p.paper && <Badge tone="accent" testId="paper-badge">PAPER</Badge>}
+                </td>
                 <td className="td font-medium">{p.symbol}</td>
                 <td className="td">
                   <SideBadge side={p.side} />
@@ -223,6 +257,7 @@ export function TradesTable({ trades, showSession = false }: { trades: Trade[]; 
                 <td className="td">
                   {t.status === "open" ? <Badge tone="accent">open</Badge> : <Badge tone={t.close_reason === "tp" ? "up" : t.close_reason === "sl" ? "down" : "neutral"}>{t.close_reason || "closed"}</Badge>}
                   {t.adopted && <Badge className="ml-1">adopted</Badge>}
+                  {t.paper && <Badge className="ml-1" tone="accent">PAPER</Badge>}
                 </td>
                 <td className="td text-right">{t.profit !== null ? <Pnl value={t.profit} /> : <span className="text-faint">—</span>}</td>
                 <td className="td num text-right text-dim">{r !== null ? `${r >= 0 ? "+" : ""}${r.toFixed(2)}` : "—"}</td>

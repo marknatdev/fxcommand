@@ -7,11 +7,12 @@ type Listener = (data: unknown) => void;
 
 interface LiveCtx {
   snapshot: Snapshot | null;
+  snapshotAt: number; // wall seconds the last snapshot arrived (a stalled engine sends none)
   wsConnected: boolean;
   on: (type: string, fn: Listener) => () => void;
 }
 
-const Ctx = createContext<LiveCtx>({ snapshot: null, wsConnected: false, on: () => () => {} });
+const Ctx = createContext<LiveCtx>({ snapshot: null, snapshotAt: 0, wsConnected: false, on: () => () => {} });
 
 // Queries whose data changes when the engine records something.
 const LIVE_KEYS = ["overview", "sessions", "session", "trades", "journal", "risk", "positions", "strategies", "symbols", "learning", "arena"];
@@ -19,6 +20,7 @@ const LIVE_KEYS = ["overview", "sessions", "session", "trades", "journal", "risk
 export function LiveProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [snapshotAt, setSnapshotAt] = useState(0);
   const [wsConnected, setWsConnected] = useState(false);
   const listeners = useRef(new Map<string, Set<Listener>>());
   const invalidateTimer = useRef<number | undefined>(undefined);
@@ -49,7 +51,10 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       };
       ws.onmessage = (msg) => {
         const ev = JSON.parse(msg.data) as { type: string; data: unknown };
-        if (ev.type === "snapshot") setSnapshot(ev.data as Snapshot);
+        if (ev.type === "snapshot") {
+          setSnapshot(ev.data as Snapshot);
+          setSnapshotAt(Date.now() / 1000);
+        }
         if (ev.type === "journal") invalidate();
         if (ev.type === "alert") {
           const j = ev.data as JournalEntry;
@@ -75,7 +80,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  return <Ctx.Provider value={{ snapshot, wsConnected, on }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ snapshot, snapshotAt, wsConnected, on }}>{children}</Ctx.Provider>;
 }
 
 export const useLive = () => useContext(Ctx);

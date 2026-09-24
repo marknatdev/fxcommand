@@ -4,6 +4,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { api } from "../api/client";
 import { ModeBadge } from "../components/Layout";
+import { PreflightPanel } from "../components/Preflight";
 import { Badge, Button, Card, ConfirmDialog, Dialog, ErrorBox, Field, Kpi, Loading, PageHeader, Switch } from "../components/ui";
 import { money, serverTime } from "../lib/format";
 
@@ -98,6 +99,9 @@ export default function Account() {
                   {acct.name} · {acct.server} · {acct.company}
                 </span>
                 {acct.is_demo ? <Badge tone="info">DEMO</Badge> : <Badge tone="down">LIVE</Badge>}
+                <Badge tone={acct.margin_mode === "hedging" ? "neutral" : "down"} testId="margin-mode">
+                  {acct.margin_mode}
+                </Badge>
                 {!acct.trade_allowed && <Badge tone="warn">trading disabled in terminal</Badge>}
               </div>
               <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -112,6 +116,13 @@ export default function Account() {
           )}
         </Card>
       </div>
+
+      <Card title="Pre-flight check" testId="preflight-card">
+        <p className="mb-3 text-sm text-dim">
+          What is checked before a Session starts. On a live account the blocking checks must pass; each Session's start dialog adds its own Symbols.
+        </p>
+        <PreflightPanel />
+      </Card>
 
       <Card
         title={
@@ -129,6 +140,12 @@ export default function Account() {
               </>
             ) : (
               <>Demo and simulated accounts can always trade. If you connect a live account, it stays blocked until enabled here.</>
+            )}
+            {a.equity_floor && (
+              <span className="mt-1 block" data-testid="account-floor">
+                Equity Floor {money(a.equity_floor.floor)}
+                {a.equity_floor.breached_at ? " — BREACHED (reset on the Risk page)" : " — armed"}
+              </span>
             )}
           </div>
           <Switch
@@ -150,7 +167,7 @@ export default function Account() {
         onOpenChange={setEnableOpen}
         title="Enable live trading?"
         testId="live-dialog"
-        description="Real money will be at risk. Type the account number to confirm."
+        description="Real money will be at risk. An Equity Floor at 80% of the current equity is armed, and Live Caps (Risk page) apply. Type the account number to confirm."
         footer={
           <>
             <Button variant="ghost" onClick={() => setEnableOpen(false)}>

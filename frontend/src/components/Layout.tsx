@@ -13,7 +13,7 @@ import {
   ShieldAlert,
   Wallet,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "../api/client";
@@ -47,6 +47,24 @@ export function ModeBadge() {
   );
 }
 
+/** Engine heartbeat: warns when the engine loop stalls or a broker call hangs. */
+function EngineHealth() {
+  const { snapshot, snapshotAt, wsConnected } = useLive();
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now() / 1000), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  if (!snapshot || !wsConnected) return null;
+  // the engine publishes after every pass: silence means a stalled loop
+  const age = snapshot.passes > 0 ? now - snapshotAt + (snapshot.heartbeat_age ?? 0) : 0;
+  const busy = snapshot.broker_busy_for > 0 ? snapshot.broker_busy_for + (now - snapshotAt) : 0;
+  if (busy > 5) return <Badge tone="down" testId="engine-health">broker call hanging {busy.toFixed(0)}s</Badge>;
+  if (age > 10) return <Badge tone="down" testId="engine-health">engine stalled {age.toFixed(0)}s</Badge>;
+  if (snapshot.disconnected_for > 0) return <Badge tone="warn" testId="engine-health">offline {snapshot.disconnected_for.toFixed(0)}s</Badge>;
+  return null;
+}
+
 function TopBar() {
   const { snapshot, wsConnected } = useLive();
   const [killOpen, setKillOpen] = useState(false);
@@ -62,6 +80,7 @@ function TopBar() {
           <span className={cn("size-2 rounded-full bg-current", online && "pulse-dot")} />
           {online ? "Connected" : wsConnected ? "Broker offline" : "Dashboard offline"}
         </span>
+        <EngineHealth />
       </div>
       <div className="hidden items-center gap-5 text-xs text-dim md:flex">
         <span>
@@ -94,7 +113,10 @@ function TopBar() {
         description="Stops every Session and closes every position opened by FXCommand. Positions opened manually or by other EAs are never touched."
         onConfirm={async () => {
           const r = await api.killSwitch();
-          toast.error(`Kill switch: stopped ${r.stopped_sessions.length} sessions, closed ${r.closed_positions} positions`);
+          toast.error(
+            `Kill switch: stopped ${r.stopped_sessions.length} sessions, closed ${r.closed_positions} positions` +
+              (r.left_open ? ` — ${r.left_open} could NOT be closed: close them in the terminal` : ""),
+          );
         }}
       />
     </header>

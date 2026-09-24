@@ -21,6 +21,14 @@ Autonomous multi-symbol trading for MetaTrader 5, run and controlled from one da
   - Promotions apply when the position is flat, are versioned, and can be rolled back; a failing Promotion rolls back automatically.
   - A *Signal Filter* learns from every closed trade which signals tend to lose, and blocks them only once it has proven held-out lift.
   - Auto-promotion is opt-in and never allowed on a live account.
+- **Ready for live trading** (see [docs/go-live.md](docs/go-live.md)):
+  - **Paper execution**: a Session can run the full engine on the real MT5 feed with fills in a local book; nothing reaches the account.
+  - **Order outcomes**: requotes get one re-checked retry; timeouts and lost replies are never retried, and any position they left is adopted.
+  - **Closes** are retried until the terminal confirms. The Kill Switch stops Sessions immediately, even when the terminal hangs.
+  - **Account safety**: hedging accounts only; Sessions are pinned to the account they started on; live accounts get **Live Caps** (max risk %, max lots) and an **Equity Floor** that fires the Kill Switch.
+  - **Pre-flight check** before every start (blocking on live accounts); optional **Weekend Close**; Symbol trade mode, free margin and freeze level are respected.
+  - **Telegram alerts** and a daily summary; the dashboard warns when the engine loop stalls.
+  - **Autostart**: `scripts\install-autostart.ps1` runs the app at logon and restarts it after a crash.
 - **Pages:** Overview, Sessions (with detail and editor), Symbols, Strategies, Learning, Risk, Positions, History & Journal, Account, Logs, Settings.
 - **MCP server** lets AI agents read status and start, pause or stop Sessions (`.mcp.json`).
 
@@ -39,6 +47,7 @@ The simulator runs 60× real time by default. You can change the speed, advance 
 1. Start MT5, log in, and enable **Algo Trading**.
 2. From `backend/`, run `$env:BROKER="mt5"; uv run fxcommand` (PowerShell) or `BROKER=mt5 uv run fxcommand` (bash). The app attaches to the running terminal and never stores credentials.
 3. Demo accounts can trade right away. Live accounts stay blocked until you enable live trading on the **Account** page by typing the account number.
+4. Follow [docs/go-live.md](docs/go-live.md): Paper on the real feed, then Broker on demo, then a live account at small risk.
 
 ## Tests
 

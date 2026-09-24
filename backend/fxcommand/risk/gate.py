@@ -27,6 +27,8 @@ class RiskProfile:
     trailing: bool = False
     trailing_atr: float = 2.0  # trail SL this many ATR behind price
     trailing_start_r: float = 1.0  # ...once profit reaches this many R
+    allow_min_lot: bool = False  # when risk % buys less than the minimum lot, trade the minimum lot...
+    min_lot_max_risk_pct: float = 2.0  # ...if its loss at the stop is at most this % of equity
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -38,6 +40,17 @@ class RiskLimits:
     max_positions_global: int = 5
     daily_loss_pct_session: float = 3.0
     daily_loss_pct_global: float = 3.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class LiveCaps:
+    """Hard limits for Broker-mode Sessions on a live Account, above any Risk Profile."""
+
+    max_risk_pct: float = 1.0
+    max_volume: float = 0.10
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -69,6 +82,8 @@ class GateInput:
     exposure: Exposure
     window: TradingWindow
     now: int
+    paper: bool = False  # Paper Session: nothing reaches the Account, so live/AutoTrading gates do not apply
+    caps: LiveCaps | None = None  # set only for Broker-mode Sessions on a live Account
 
 
 @dataclass(frozen=True)
@@ -79,6 +94,7 @@ class Approved:
     tp: float
     risk_amount: float  # account currency lost if SL is hit at this volume
     ok: bool = True
+    note: str = ""  # e.g. "minimum lot", "capped by Live Caps"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -117,13 +133,33 @@ def loss_at_stop(volume: float, sl_dist: float, info: SymbolInfo) -> float:
     return volume * sl_dist / info.trade_tick_size * info.trade_tick_value
 
 
+def normalize_price(price: float, info: SymbolInfo) -> float:
+    """Round to the Symbol's tick size (not just its digits): some Symbols move in steps > 1 point."""
+    tick = info.trade_tick_size if info.trade_tick_size > 0 else info.point
+    return round(round(price / tick) * tick, info.digits)
+
+
+def _round_down(volume: float, info: SymbolInfo) -> float:
+    return round(math.floor(volume / info.volume_step + 1e-9) * info.volume_step, _decimals(info.volume_step))
+
+
+def check_margin(required: float, account: AccountInfo) -> Rejected | None:
+    """Margin the Broker says the approved order needs, against free margin."""
+    if required > account.margin_free:
+        return Rejected("margin", f"order needs {required:.2f} {account.currency} margin, only {account.margin_free:.2f} free")
+    return None
+
+
 def check(g: GateInput) -> Decision:
     info, tick, acct = g.symbol, g.tick, g.account
 
-    if not acct.is_demo and not g.live_enabled:
+    if not g.paper and not acct.is_demo and not g.live_enabled:
         return Rejected("live_blocked", f"account {acct.login} is LIVE and not live-enabled")
-    if not acct.trade_allowed:
+    if not g.paper and not acct.trade_allowed:
         return Rejected("trade_disabled", "trading is disabled in the terminal (AutoTrading off or account read-only)")
+    mode = info.trade_mode
+    if mode in ("disabled", "closeonly") or (mode == "longonly" and g.side == "short") or (mode == "shortonly" and g.side == "long"):
+        return Rejected("symbol_trade_mode", f"{info.name} trade mode is {mode}: {g.side} entries are not allowed")
     if g.now - tick.time > MAX_QUOTE_AGE:
         return Rejected("stale_quote", f"last {info.name} quote is {g.now - tick.time}s old (max {MAX_QUOTE_AGE}s); market closed or feed stalled")
     if not g.window.is_open(g.now):
@@ -146,18 +182,17 @@ def check(g: GateInput) -> Decision:
     if g.sl_dist <= 0:
         return Rejected("no_stop", "signal has no stop-loss distance; every order must carry a stop-loss")
 
-    d = info.digits
     min_stop = info.stops_level * info.point
     spread = tick.ask - tick.bid
     if g.side == "long":
         entry = tick.ask
-        sl = round(entry - g.sl_dist, d)
-        tp = round(entry + g.tp_dist, d) if g.tp_dist > 0 else 0.0
+        sl = normalize_price(entry - g.sl_dist, info)
+        tp = normalize_price(entry + g.tp_dist, info) if g.tp_dist > 0 else 0.0
         sl_gap, tp_gap = tick.bid - sl, (tp - tick.bid) if tp else None
     else:
         entry = tick.bid
-        sl = round(entry + g.sl_dist, d)
-        tp = round(entry - g.tp_dist, d) if g.tp_dist > 0 else 0.0
+        sl = normalize_price(entry + g.sl_dist, info)
+        tp = normalize_price(entry - g.tp_dist, info) if g.tp_dist > 0 else 0.0
         sl_gap, tp_gap = sl - tick.ask, (tick.ask - tp) if tp else None
     if sl_gap < min_stop - 1e-12:
         return Rejected(
@@ -168,17 +203,35 @@ def check(g: GateInput) -> Decision:
     if tp_gap is not None and tp_gap < min_stop - 1e-12:
         return Rejected("stops_level", f"take-profit is inside the broker minimum stop distance ({info.stops_level} pts)")
 
-    risk_amount = acct.equity * g.profile.risk_pct / 100
+    caps = g.caps
+    risk_pct = g.profile.risk_pct if caps is None else min(g.profile.risk_pct, caps.max_risk_pct)
+    notes = [f"risk capped at {risk_pct}% by Live Caps"] if caps is not None and risk_pct < g.profile.risk_pct else []
+    risk_amount = acct.equity * risk_pct / 100
     actual_sl_dist = abs(entry - sl)
     volume = size_volume(risk_amount, actual_sl_dist, info)
     if volume <= 0:
         need = loss_at_stop(info.volume_min, actual_sl_dist, info)
-        return Rejected(
-            "volume_min",
-            f"risk {risk_amount:.2f} {acct.currency} buys less than the minimum {info.volume_min} lots "
-            f"(minimum lot would risk {need:.2f})",
-        )
-    return Approved(volume=volume, entry=entry, sl=sl, tp=tp, risk_amount=round(loss_at_stop(volume, actual_sl_dist, info), 2))
+        need_pct = need / acct.equity * 100 if acct.equity > 0 else float("inf")
+        limit_pct = g.profile.min_lot_max_risk_pct if caps is None else min(g.profile.min_lot_max_risk_pct, caps.max_risk_pct)
+        if g.profile.allow_min_lot and need_pct <= limit_pct + 1e-9:
+            volume = info.volume_min
+            notes.append(f"minimum lot: real risk {need:.2f} {acct.currency} = {need_pct:.2f}% of equity")
+        else:
+            extra = f"; allowed minimum-lot risk is {limit_pct}%" if g.profile.allow_min_lot else ""
+            return Rejected(
+                "volume_min",
+                f"risk {risk_amount:.2f} {acct.currency} buys less than the minimum {info.volume_min} lots "
+                f"(minimum lot would risk {need:.2f} = {need_pct:.2f}% of equity{extra})",
+            )
+    if caps is not None and volume > caps.max_volume + 1e-12:
+        capped = _round_down(caps.max_volume, info)
+        if capped < info.volume_min - 1e-12:
+            return Rejected("live_cap", f"Live Caps max volume {caps.max_volume} is below the {info.name} minimum {info.volume_min} lots")
+        notes.append(f"volume {volume} capped to {capped} by Live Caps")
+        volume = capped
+    return Approved(
+        volume=volume, entry=entry, sl=sl, tp=tp, risk_amount=round(loss_at_stop(volume, actual_sl_dist, info), 2), note="; ".join(notes)
+    )
 
 
 def manage(
@@ -197,9 +250,16 @@ def manage(
         candidates.append(price - profile.trailing_atr * atr if long else price + profile.trailing_atr * atr)
     if not candidates:
         return None
-    new_sl = round(max(candidates) if long else min(candidates), info.digits)
+    new_sl = normalize_price(max(candidates) if long else min(candidates), info)
     cur = position.sl
-    min_stop = info.stops_level * info.point
+    min_stop = max(info.stops_level, info.freeze_level) * info.point
+    freeze = info.freeze_level * info.point
+    if freeze > 0:
+        # inside the freeze distance of the current SL/TP the Broker refuses any change
+        near_sl = bool(cur) and ((tick.bid - cur) if long else (cur - tick.ask)) <= freeze
+        near_tp = bool(position.tp) and ((position.tp - tick.bid) if long else (tick.ask - position.tp)) <= freeze
+        if near_sl or near_tp:
+            return None
     if long:
         improves = cur == 0 or new_sl > cur + info.point / 2
         legal = tick.bid - new_sl >= min_stop
