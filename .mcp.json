@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "fxcommand": {
+      "command": "uv",
+      "args": ["run", "--no-sync", "--directory", "backend", "python", "-m", "fxcommand.mcp_server"],
+      "env": { "FXC_URL": "http://127.0.0.1:8000" }
+    }
+  }
+}

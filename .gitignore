@@ -1,0 +1,18 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+backend/data/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Playwright
+e2e/.tmp/
+e2e/test-results/
+e2e/playwright-report/
+.playwright-cli/
+frontend/tsconfig.tsbuildinfo
+*.db

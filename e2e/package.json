@@ -1,0 +1,15 @@
+{
+  "name": "fxcommand-e2e",
+  "private": true,
+  "scripts": {
+    "build:ui": "npm --prefix ../frontend run build",
+    "test": "npm run build:ui && playwright test",
+    "test:only": "playwright test",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63",
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2"
+  }
+}
