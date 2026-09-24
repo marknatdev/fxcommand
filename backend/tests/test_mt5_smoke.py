@@ -99,8 +99,9 @@ def test_live_readiness_facts(mt5_broker):
 
 
 async def test_paper_session_on_the_real_feed(tmp_path):
-    """A Paper Session runs the full engine on the real terminal's prices for two M1 bar closes.
-    The real adapter's order methods are tripwired: any attempt to reach the Account fails the test."""
+    """A Paper Session runs the full engine on the real terminal's prices until it has opened a paper
+    position, then stops (which closes it). The real adapter's order methods are tripwired: any
+    attempt to reach the Account fails the test. Takes up to ~8 minutes (M1 bar closes)."""
     import asyncio
 
     pytest.importorskip("MetaTrader5")
@@ -127,6 +128,10 @@ async def test_paper_session_on_the_real_feed(tmp_path):
     except Exception as e:  # noqa: BLE001
         pytest.skip(f"MT5 terminal not available: {e}")
     store = Store(f"sqlite:///{tmp_path / 'paper.db'}")
+    # a small real account cannot buy the minimum lot at 1% risk: allow it, as the runbook says for Stage 1
+    prof = store.risk_profiles()[0]
+    prof.allow_min_lot, prof.min_lot_max_risk_pct, prof.max_spread_points = True, 25.0, 60.0
+    store.save_risk_profile(prof)
     thread = BrokerThread(PaperRouter(real, PaperBook(store)))
     bus = EventBus()
     bus.attach(asyncio.get_running_loop())
@@ -136,24 +141,32 @@ async def test_paper_session_on_the_real_feed(tmp_path):
         if mgr.now - (await thread.run(lambda b: b.tick("EURUSD"))).time > 120:
             pytest.skip("market closed: no fresh EURUSD quotes")
         fast = {"fast": 2, "slow": 3, "atr_period": 5, "sl_atr": 3.0, "tp_atr": 6.0}
+        names = await thread.run(lambda b: b.symbols())
+        symbols = [x for x in ("EURUSD", "GBPUSD", "USDJPY") if x in names]  # three chances per bar close
         s = await mgr.create_session(
-            SessionIn(name="Paper smoke", execution="paper", assignments=[AssignmentIn(symbol="EURUSD", timeframe="M1", params=fast)])
+            SessionIn(name="Paper smoke", execution="paper", daily_loss_pct=50,
+                      assignments=[AssignmentIn(symbol=sym, timeframe="M1", params=fast) for sym in symbols])
         )
         await mgr.start(s.id)
-        evaluated = False
-        deadline = asyncio.get_running_loop().time() + 150  # at most ~2 M1 bar closes
-        while asyncio.get_running_loop().time() < deadline and not evaluated:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 480
+        while loop.time() < deadline and not store.trades(session_id=s.id):
             await mgr.tick_once()
             st = next(iter(mgr.assignment_states(s.id).values()))
             assert not st["status"].startswith("error"), st
-            evaluated = st["status"].startswith("evaluated")
             await asyncio.sleep(1.0)
-        assert evaluated, "no M1 bar was evaluated within 150 s"
-        await mgr.stop(s.id)
-        kinds = [j.kind for j in store.journal(session_id=s.id, limit=500)]
-        print(f"\npaper smoke journal: {kinds}; paper trades: {len(store.trades(session_id=s.id))}")
+        kinds = [(j.kind, j.message[:90]) for j in store.journal(session_id=s.id, limit=500)][::-1]
+        assert store.trades(session_id=s.id), f"no paper order within 8 minutes; journal: {kinds}"
+        await mgr.tick_once()
+        await mgr.stop(s.id)  # a Paper Session always closes its positions
+        trades = store.trades(session_id=s.id)
+        print(f"\npaper smoke journal: {kinds}")
+        for t in trades:
+            print(f"paper trade #{t.ticket} {t.side} {t.volume} @ {t.open_price} -> {t.close_price} ({t.close_reason}) P&L {t.profit}")
         assert not hits
-        assert all(t.paper and t.ticket < 0 for t in store.trades(session_id=s.id))
-        assert "state" in kinds
+        assert all(t.paper and t.ticket < 0 for t in trades)
+        assert all(t.status == "closed" and t.profit is not None and t.close_price for t in trades)
+        assert not store.paper_open()
+        assert not [p for p in real.positions() if p.magic == s.magic]  # nothing on the real Account
     finally:
         thread.shutdown()

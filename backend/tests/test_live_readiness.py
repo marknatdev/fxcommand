@@ -340,3 +340,44 @@ async def test_weekend_close_closes_and_blocks_entries(tmp_path):
     assert len(h.store.journal(session_id=s.id, kinds=["order"], limit=1000)) == orders_before
     assert any("entry skipped" in j.message for j in h.store.journal(session_id=s.id, kinds=["info"], limit=500))
     h.close()
+
+
+async def test_switching_accounts_keeps_each_accounts_records(h):
+    """Demo -> another account -> back: the first account's open trade is neither closed as
+    'unknown' nor mixed into the other account's daily P&L."""
+    s = await _with_position(h, daily_loss_pct=90)
+    login_a = h.sim.login
+    ticket = h.sim.positions(s.magic)[0].ticket
+    assert h.store.trade_by_ticket(ticket).login == login_a
+    await h.mgr.stop(s.id, close_positions=False)
+    realized_a = h.store.realized_since(0, login=login_a)
+    # the terminal logs into account B: A's positions are not visible there
+    stash = dict(h.sim._positions)
+    h.sim._positions.clear()
+    h.sim.login = login_a + 1
+    for _ in range(70):  # longer than MISSING_CLOSE_GIVE_UP
+        await h.mgr.tick_once()
+    row = h.store.trade_by_ticket(ticket)
+    assert row.status == "open", "another account's trade must not be closed as unknown"
+    assert h.mgr.snapshot()["day_pnl"] == 0.0  # B's day P&L does not include A's trades
+    assert h.mgr._day_start()[1] == pytest.approx(h.sim.account().equity)
+    # back to account A: the trade is still tracked and its real close is recorded
+    h.sim.login = login_a
+    h.sim._positions.update(stash)
+    await h.mgr.tick_once()
+    assert h.store.trade_by_ticket(ticket).status == "open"
+    await h.mgr.close_position(ticket)
+    closed = h.store.trade_by_ticket(ticket)
+    assert closed.status == "closed" and closed.close_reason != "unknown"
+    assert h.store.realized_since(0, login=login_a) == pytest.approx(realized_a + closed.profit)
+
+
+async def test_paper_entry_is_refused_when_not_routed_to_the_book(h):
+    s = await h.session(symbols=("EURUSD", "GBPUSD"), execution="paper")
+    await h.mgr.start(s.id)
+    h.mgr._sync_paper = lambda: None  # simulate a stale routing table
+    h.router.paper_magics = set()
+    await h.bars(80)
+    assert not h.sim.positions()  # nothing reached the Account
+    rej = h.store.journal(session_id=s.id, kinds=["risk_reject"], limit=50)
+    assert rej and all("not routed to the Paper book" in j.message for j in rej)

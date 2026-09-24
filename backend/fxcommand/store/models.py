@@ -87,6 +87,7 @@ class TradeRow(SQLModel, table=True):
     close_reason: str = ""
     adopted: bool = False
     paper: bool = False
+    login: Optional[int] = Field(default=None, index=True)  # Account the trade lives on (None: recorded before logins were kept)
 
 
 class JournalRow(SQLModel, table=True):

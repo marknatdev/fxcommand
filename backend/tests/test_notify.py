@@ -85,7 +85,7 @@ async def test_daily_summary_on_day_roll(h):
     await h.mgr.start(s.id)
     await h.bars(100)
     day = h.sim.now // 86400
-    h.store.set_setting("day_start", {"day": day - 1, "equity": 10_000.0, "balance": 10_000.0})
+    h.store.set_setting(f"day_start:{h.sim.login}", {"day": day - 1, "equity": 10_000.0, "balance": 10_000.0})
     await h.mgr.tick_once()
     await drain()
     summary = [m for m in mem.sent if "daily summary" in m]

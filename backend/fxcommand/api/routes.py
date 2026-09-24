@@ -272,7 +272,7 @@ async def risk(request: Request):
     r = rt(request)
     snap = r.manager.snapshot()
     limits = r.store.global_limits()
-    owned = [p for p in snap["positions"] if p["owned"]]
+    owned = [p for p in snap["positions"] if p["owned"] and not p["paper"]]  # the Account's exposure: Paper excluded
     profiles = r.store.risk_profiles()
     assigns = r.store.all_assignments()
     return {

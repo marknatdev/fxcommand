@@ -130,8 +130,20 @@ class SessionManager:
     def _j(self, kind: str, msg: str, s: SessionRow | None = None, symbol: str | None = None, **kw) -> dict:
         return self.journal.record(kind, msg, ts=self.now, session_id=s.id if s else None, symbol=symbol, **kw)
 
+    @property
+    def _login(self) -> int | None:
+        return self._account.login if self._account else None
+
+    def _mine(self, login: int | None) -> bool:
+        """Does a trade recorded under ``login`` belong to the connected Account? (None = legacy row)"""
+        return login is None or self._login is None or login == self._login
+
+    def _ds_key(self) -> str:
+        # the trading day's start equity is per Account: switching accounts must not mix them
+        return f"day_start:{self._login}" if self._login is not None else "day_start"
+
     def _day_start(self) -> tuple[int, float]:
-        ds = self.store.get_setting("day_start") or {}
+        ds = self.store.get_setting(self._ds_key()) or {}
         equity = float(ds.get("equity") or (self._account.equity if self._account else 0.0))
         return int(ds.get("day", self.now // DAY)) * DAY, equity
 
@@ -142,10 +154,10 @@ class SessionManager:
 
     def _session_pnl(self, s: SessionRow, day_ts: int) -> float:
         floating = sum(p.profit for p in self._positions if p.magic == s.magic)
-        return self.store.realized_since(day_ts, s.id) + floating
+        return self.store.realized_since(day_ts, s.id, self._login) + floating
 
     def _global_pnl(self, day_ts: int, magics: dict[int, int]) -> float:
-        return self.store.realized_since(day_ts) + sum(p.profit for p in self._owned(magics))
+        return self.store.realized_since(day_ts, login=self._login) + sum(p.profit for p in self._owned(magics))
 
     def _sync_paper(self) -> None:
         """Tell the PaperRouter which Magic Numbers are Paper Sessions (ADR 0007)."""
@@ -352,6 +364,7 @@ class SessionManager:
                     initial_risk=abs(p.price_open - p.sl) if p.sl else 0.0,
                     adopted=True,
                     paper=p.ticket < 0,
+                    login=self._login,
                 )
             )
             adopted += 1
@@ -656,9 +669,9 @@ class SessionManager:
 
     def _roll_day(self) -> None:
         day = self.now // DAY
-        ds = self.store.get_setting("day_start") or {}
+        ds = self.store.get_setting(self._ds_key()) or {}
         if ds.get("day") != day and self._account:
-            self.store.set_setting("day_start", {"day": day, "equity": self._account.equity, "balance": self._account.balance})
+            self.store.set_setting(self._ds_key(), {"day": day, "equity": self._account.equity, "balance": self._account.balance})
             if ds:
                 self._j("info", f"New trading day (server time) — start equity {self._account.equity:.2f}")
                 self._learn(lambda L: L.on_new_day(self.now))
@@ -670,7 +683,9 @@ class SessionManager:
     def daily_summary(self, start: int, end: int, start_equity: float) -> str:
         acct = self._account
         lines = [f"📊 FXCommand daily summary — {time.strftime('%a %Y-%m-%d', time.gmtime(start))} (server time)"]
-        closed = [t for t in self.store.trades(status="closed", limit=100_000) if t.close_time is not None and start <= t.close_time < end]
+        closed = [
+            t for t in self.store.trades(status="closed", limit=100_000) if t.close_time is not None and start <= t.close_time < end and self._mine(t.login)
+        ]
         names = {x.id: x for x in self.store.list_sessions()}
         for sid in sorted({t.session_id for t in closed if t.session_id is not None}):
             mine = [t for t in closed if t.session_id == sid]
@@ -691,7 +706,8 @@ class SessionManager:
         return "\n".join(lines)
 
     async def _reconcile_closed(self) -> None:
-        open_rows = self.store.open_trades()
+        # only this Account's trades: another Account's open positions are simply not visible now
+        open_rows = [r for r in self.store.open_trades() if self._mine(r.login)]
         live = {p.ticket for p in self._positions}
         missing = [r for r in open_rows if r.ticket not in live]
         if not missing:
@@ -879,8 +895,8 @@ class SessionManager:
         # Everything that comes from our own database is read up front...
         magics = self.store.all_magics()
         day_ts, day_equity = self._day_start()
-        realized_session = self.store.realized_since(day_ts, s.id)
-        realized_global = self.store.realized_since(day_ts)
+        realized_session = self.store.realized_since(day_ts, s.id, self._login)
+        realized_global = self.store.realized_since(day_ts, login=self._login)
         profile = self.store.to_profile(self.store.risk_profile(a.risk_profile_id))
         global_limits = self.store.global_limits()
         live_flags = self.store.get_setting("live_enabled", {}) or {}
@@ -929,6 +945,8 @@ class SessionManager:
                 )
                 if isinstance(decision, Rejected):
                     return decision, None, acct, positions, notes
+                if paper and s.magic not in getattr(b, "paper_magics", ()):
+                    return Rejected("paper_routing", "Paper Session is not routed to the Paper book; order refused"), None, acct, positions, notes
                 if not paper:
                     margin_rej = check_margin(b.margin_required(sym, side, decision.volume), acct)
                     if margin_rej is not None:
@@ -997,6 +1015,7 @@ class SessionManager:
                 risk_amount=risk_amount,
                 signal_reason=sig.reason,
                 paper=paper,
+                login=acct.login,
             )
         )
         self._learn(lambda L: L.signal_outcome(record_id, ticket=ticket))

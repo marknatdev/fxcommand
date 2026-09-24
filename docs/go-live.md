@@ -24,6 +24,8 @@ What has **not** been exercised by anyone yet: a real order through your broker.
 2. Start it. The start dialog says *PAPER — nothing is sent to the account*.
 3. Let it run for at least a few days. Check: Positions (PAPER badge), History, Journal ("PAPER Opened …", Risk Gate rejections and their reasons), the daily Telegram summary.
 4. Paper fills are at bid/ask + 1 point; stops are checked on every M1 bar and tick. Real fills can be worse (slippage, requotes) — Paper is an upper bound, not a promise.
+5. Paper sizes positions from the real account's equity. On a small account (e.g. $52 at 1% risk) most signals are rejected for size (`volume_min`) — enable **Allow the minimum lot** on the Risk Profile the Paper Session uses (Risk page) with a cap you would accept later, or Paper will show almost no trades.
+6. The Overview, Strategies and History statistics include Paper trades (they carry a PAPER badge); the Risk page and the daily-loss limits count only the account's own trades.
 
 ## Stage 2 — Broker execution on the demo account
 

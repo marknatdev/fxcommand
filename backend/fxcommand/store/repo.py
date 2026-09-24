@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
-from sqlalchemy import event, func
+from sqlalchemy import event, func, or_
 from sqlmodel import Session as DB
 from sqlmodel import SQLModel, create_engine, select
 
@@ -338,13 +338,16 @@ class Store:
                 q = q.where(TradeRow.open_time <= until)
             return list(db.exec(q.order_by(TradeRow.open_time.desc()).limit(limit)))
 
-    def realized_since(self, since: int, session_id: int | None = None) -> float:
+    def realized_since(self, since: int, session_id: int | None = None, login: int | None = None) -> float:
         """Realised P&L of trades closed since ``since``: one Session's, or the Account's (Paper
-        trades excluded — they never touched the Account)."""
+        trades excluded — they never touched the Account). With ``login``, only that Account's trades
+        (and legacy rows without a login)."""
         with self._db() as db:
             q = select(func.coalesce(func.sum(TradeRow.profit), 0.0)).where(
                 TradeRow.status == "closed", TradeRow.close_time >= since
             )
+            if login is not None:
+                q = q.where(or_(TradeRow.login == login, TradeRow.login.is_(None)))
             if session_id is not None:
                 q = q.where(TradeRow.session_id == session_id)
             else:
