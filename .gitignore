@@ -16,3 +16,6 @@ e2e/playwright-report/
 .playwright-cli/
 frontend/tsconfig.tsbuildinfo
 *.db
+
+# graphify knowledge graph (local)
+graphify-out/
