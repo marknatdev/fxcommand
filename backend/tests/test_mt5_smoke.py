@@ -128,6 +128,7 @@ async def test_paper_session_on_the_real_feed(tmp_path):
     except Exception as e:  # noqa: BLE001
         pytest.skip(f"MT5 terminal not available: {e}")
     store = Store(f"sqlite:///{tmp_path / 'paper.db'}")
+    store.update_app_settings({"cost_check_max_r": 10.0})  # the FAST M1 smoke strategy fails the real Cost Check by design
     # a small real account cannot buy the minimum lot at 1% risk: allow it, as the runbook says for Stage 1
     prof = store.risk_profiles()[0]
     prof.allow_min_lot, prof.min_lot_max_risk_pct, prof.max_spread_points = True, 25.0, 60.0

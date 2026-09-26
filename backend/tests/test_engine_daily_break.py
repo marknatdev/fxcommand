@@ -49,9 +49,13 @@ async def test_a_stop_move_refused_in_the_break_is_journaled_once_and_done_after
     await h.shock("GOLD", move)  # the last bar before the break: breakeven/trailing now wants to act
     assert clock(h) == 23 * 60 + 57 and not h.sim.market_open("GOLD")
     shut = h.sim.now
+    calls = []
+    real_modify = h.sim.modify
+    h.sim.modify = lambda *a, **k: calls.append(h.sim.now) or real_modify(*a, **k)
     await until(h, 1, 0)  # 63 engine passes with the market shut
+    assert len(calls) <= 3, f"{len(calls)} modify requests to a shut market"  # no request per pass (brokers throttle)
     noisy = entries(h, s.id, shut, {"order_fail", "alert"})
-    assert 1 <= len(noisy) <= 3, [j.message for j in noisy]
+    assert len(noisy) <= 3, [j.message for j in noisy]
     assert all("market closed" in j.message for j in noisy if j.kind == "order_fail")
     reopen = h.sim.now
     await h.bars(10)

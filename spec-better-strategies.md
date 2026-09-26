@@ -442,12 +442,12 @@ New catalog entries only. The existing strategies' behaviour and golden rows are
 - [x] Re-pin the noise and planted-edge tests; Guardrail constants unchanged. Both pass unchanged on the new pricing (nothing to re-pin); the sim still charges no swap on its own positions, so an overnight live trade in the sim can differ from its Shadow Trade by the swap
 
 ### 5. Engine
-- [ ] `pending_entries` table and lifecycle: transient retries, per-strategy fill window, cancel events, survives Interrupted, journal once, outcome on the Signal record
-- [ ] Deferred exits for the daily break
-- [ ] Paper Account: pool, `day_start:paper`, limits that stop only Paper Sessions, typed reset refused while active or open, archive epoch, monotonic tickets, swap, paged catch-up
-- [ ] Cost Check enforced in `_start` and at promotion; override per `(session_id, symbol)`, journaled; auto-resume skips
-- [ ] Weekend Close default off for D1/H4 Sessions, with the editor warning data
-- [ ] ADR 0008 (Pending Entries and Paper Account); amend ADR 0007, `CONTEXT.md` and `CLAUDE.md`
+- [x] `pending_entries` table and lifecycle: transient retries (outside window, stale quote, spread, market closed) on every engine pass, per-strategy fill window from the observed Next Tradable Time (`fill_limit`, shared with `EntryGate`), cancel events (Stop, Kill Switch, Auto-stop, Pinned Login change, Champion change, Weekend Close), survives Interrupted, journal once, outcome on the Signal record. In the sim, GOLD Reopen fills at 01:01 and its live trades match its Shadow Trades in Broker and Paper mode; on the Gold profile (60 points) the 70-point reopen spread outlasts the 5-minute window and the entry expires
+- [x] Deferred exits for the daily break: a strategy close the market refuses waits as a pending exit (no alert; no new side meanwhile). The Paper book refuses such closes while the quote is stale; a Paper stop / Kill Switch still settles
+- [x] Paper Account: pool (`paper_account.start_balance`, default 5,000), `day_start:paper`, limits that stop only Paper Sessions, typed reset (`RESET PAPER`) refused while active or open, archive epoch, monotonic tickets, swap, paged catch-up (M1, then H1/D1 for older gaps). The Paper `AccountInfo` is used for sizing only and never becomes the engine's account
+- [x] Cost Check enforced in `_start` and at promotion; override per `(session_id, symbol, timeframe)` (the timeframe is added because of ADR 0009: a GOLD H1 override must not cover a GOLD M1 scalper), journaled; auto-resume skips. Priced from `SpreadBook` (recent good quotes, persisted), never from a quote in the break; with nothing known and the market shut it refuses to start. Limit `cost_check_max_r` in Settings (default 0.15R)
+- [x] Weekend Close default off for D1/H4 Sessions, with the editor warning data (`weekend_close_warning` on the Session; the with/without Evidence comparison comes with milestone 6)
+- [x] ADR 0008 (Pending Entries and Paper Account); amend ADR 0007, `CONTEXT.md` and `CLAUDE.md`
 
 ### 6. Evidence Run and scorecard
 - [ ] Evidence table keyed by `(symbol, tf, candidate_key, exit_rules_hash, weekend_close, window_hash, cost_version)`

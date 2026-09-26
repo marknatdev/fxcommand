@@ -17,12 +17,14 @@ from sqlmodel import SQLModel, create_engine, select
 from ..risk import RiskLimits, RiskProfile, TradingWindow
 from .models import (
     AssignmentRow,
+    CostOverrideRow,
     EquityRow,
     JournalRow,
     LearningSlotRow,
     MagicIdentityRow,
     PaperPositionRow,
     PendingChangeRow,
+    PendingEntryRow,
     RiskProfileRow,
     SessionRow,
     SettingRow,
@@ -40,9 +42,11 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "learning_enabled": True,  # Shadow Trading, Signal Filter and Optimizer Runs
     "learning_candidates": 200,  # Candidates generated per Optimizer Run
     "learning_bars": 5000,  # history fetched per Optimizer Run
+    "cost_check_max_r": 0.15,  # Cost Check: spread + slippage above this share of the stop blocks a start (D14)
 }
 
 DEFAULT_LIVE_CAPS: dict[str, float] = {"max_risk_pct": 1.0, "max_volume": 0.10}
+DEFAULT_PAPER_ACCOUNT: dict[str, float] = {"start_balance": 5000.0, "epoch": 0}  # the notional pool Paper Sessions share (D8)
 DEFAULT_FLOOR_PCT = 80.0
 
 DEFAULT_PROFILES = (
@@ -372,6 +376,53 @@ class Store:
         with self._db() as db:
             return list(db.exec(select(AssignmentRow)))
 
+    # ------------------------------------------------------------ cost overrides
+    def cost_override(self, session_id: int, symbol: str, timeframe: str) -> CostOverrideRow | None:
+        with self._db() as db:
+            q = select(CostOverrideRow).where(
+                CostOverrideRow.session_id == session_id, CostOverrideRow.symbol == symbol, CostOverrideRow.timeframe == timeframe
+            )
+            return db.exec(q).first()
+
+    def set_cost_override(self, session_id: int, symbol: str, timeframe: str, enabled: bool, reason: str = "", ts: int = 0) -> None:
+        with self._db() as db:
+            for row in db.exec(select(CostOverrideRow).where(
+                CostOverrideRow.session_id == session_id, CostOverrideRow.symbol == symbol, CostOverrideRow.timeframe == timeframe
+            )):
+                db.delete(row)
+            if enabled:
+                db.add(CostOverrideRow(session_id=session_id, symbol=symbol, timeframe=timeframe, reason=reason, set_ts=ts))
+            db.commit()
+
+    # ---------------------------------------------------------- pending entries
+    def add_pending_entry(self, row: PendingEntryRow) -> PendingEntryRow:
+        with self._db() as db:
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+            return row
+
+    def pending_entries(self, session_id: int | None = None, status: str | None = "pending") -> list[PendingEntryRow]:
+        with self._db() as db:
+            q = select(PendingEntryRow)
+            if session_id is not None:
+                q = q.where(PendingEntryRow.session_id == session_id)
+            if status is not None:
+                q = q.where(PendingEntryRow.status == status)
+            return list(db.exec(q.order_by(PendingEntryRow.id)))
+
+    def update_pending_entry(self, pending_id: int, **fields: Any) -> PendingEntryRow:
+        with self._db() as db:
+            row = db.get(PendingEntryRow, pending_id)
+            if row is None:
+                raise NotFound(f"pending entry {pending_id} not found")
+            for k, v in fields.items():
+                setattr(row, k, v)
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+            return row
+
     # ----------------------------------------------------------- risk profiles
     def risk_profiles(self) -> list[RiskProfileRow]:
         with self._db() as db:
@@ -550,9 +601,41 @@ class Store:
             return list(db.exec(q))
 
     def paper_next_ticket(self) -> int:
+        """Paper tickets only ever go down, so none is reused, even after a reset (``TradeRow.ticket``
+        is unique across real and Paper trades)."""
         with self._db() as db:
-            low = db.exec(select(func.min(PaperPositionRow.ticket))).one()
-            return min(int(low or 0), 0) - 1
+            low = min(
+                int(db.exec(select(func.min(PaperPositionRow.ticket))).one() or 0),
+                int(db.exec(select(func.min(TradeRow.ticket))).one() or 0),
+                int(self.get_setting("paper_last_ticket", 0) or 0),
+                0,
+            )
+        self.set_setting("paper_last_ticket", low - 1)
+        return low - 1
+
+    def paper_epoch(self) -> int:
+        return int(self.paper_account()["epoch"])
+
+    def paper_account(self) -> dict:
+        return {**DEFAULT_PAPER_ACCOUNT, **(self.get_setting("paper_account", {}) or {})}
+
+    def set_paper_account(self, **fields: Any) -> dict:
+        cur = {**self.paper_account(), **fields}
+        self.set_setting("paper_account", cur)
+        return cur
+
+    def realized_paper(self, since: int = 0, session_id: int | None = None, epoch: int | None = None) -> float:
+        """Realised P&L of the Paper Account's closed trades (this epoch unless given), since ``since``."""
+        epoch = self.paper_epoch() if epoch is None else epoch
+        with self._db() as db:
+            q = select(func.coalesce(func.sum(TradeRow.profit), 0.0)).where(
+                TradeRow.status == "closed", TradeRow.paper == True, TradeRow.paper_epoch == epoch  # noqa: E712
+            )
+            if since:
+                q = q.where(TradeRow.close_time >= since)
+            if session_id is not None:
+                q = q.where(TradeRow.session_id == session_id)
+            return float(db.exec(q).one())
 
     # ------------------------------------------------------------------ equity
     def add_equity(self, ts: int, balance: float, equity: float) -> None:

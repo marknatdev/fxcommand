@@ -60,6 +60,49 @@ class MagicIdentityRow(SQLModel, table=True):
     created_wall: float = 0
 
 
+class PendingEntryRow(SQLModel, table=True):
+    """A Signal the engine could not act on yet (spec D5/D12/D20): an entry waiting for the market
+    or the Trading Window to open, or a strategy exit waiting for the market. Keyed by Arena and
+    bar (never by assignment id); sent only through ``SessionManager._enter`` / the close path."""
+
+    __tablename__ = "pending_entries"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: int = Field(index=True)
+    symbol: str
+    timeframe: str
+    signal_bar_ts: int  # open time of the Signal's bar
+    candidate_key: str
+    kind: str = "entry"  # entry | exit
+    side: str = ""  # long | short (entry)
+    sl_dist: float = 0.0
+    tp_dist: float = 0.0
+    reason: str = ""  # the Signal's reason
+    record_id: Optional[int] = None  # Learning Signal record (the Signal Filter screens only when the Signal arrives)
+    ticket: Optional[int] = None  # exit: the position to close; entry: the fill
+    created_ts: int = 0
+    first_tradable_ts: Optional[int] = None  # Next Tradable Time, as observed
+    expires_ts: Optional[int] = None
+    status: str = Field(default="pending", index=True)  # pending | filled | expired | cancelled | rejected | superseded | closed
+    note: str = ""
+    done_ts: Optional[int] = None
+
+
+class CostOverrideRow(SQLModel, table=True):
+    """The operator let an Assignment start although its Cost Check fails (spec D4). Keyed by
+    (Session, Symbol, Timeframe): since ADR 0009 a Symbol can be in a Session twice, and an override
+    for GOLD H1 must not cover a GOLD M1 scalper."""
+
+    __tablename__ = "cost_overrides"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: int = Field(index=True)
+    symbol: str
+    timeframe: str
+    reason: str = ""
+    set_ts: int = 0
+
+
 class RiskProfileRow(SQLModel, table=True):
     __tablename__ = "risk_profiles"
 
@@ -104,6 +147,7 @@ class TradeRow(SQLModel, table=True):
     adopted: bool = False
     paper: bool = False
     login: Optional[int] = Field(default=None, index=True)  # Account the trade lives on (None: recorded before logins were kept)
+    paper_epoch: int = 0  # Paper Account epoch (a reset starts a new one; older rows are archived, never deleted)
 
 
 class JournalRow(SQLModel, table=True):
@@ -156,8 +200,10 @@ class PaperPositionRow(SQLModel, table=True):
     status: str = Field(default="open", index=True)  # open | closed
     price_close: Optional[float] = None
     time_close: Optional[int] = Field(default=None, index=True)
-    profit: Optional[float] = None
+    profit: Optional[float] = None  # includes swap
     reason: str = ""
+    swap: float = 0.0  # charged at the rollovers held through (spec D28)
+    epoch: int = 0  # Paper Account epoch
 
 
 # ------------------------------------------------------------------ learning

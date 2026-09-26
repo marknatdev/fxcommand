@@ -20,6 +20,9 @@ class Harness:
     def __init__(self, tmp_path, sim: SimBroker | None = None, db_name="t.db"):
         self.sim = sim or SimBroker(seed=11, start=MON_08, history_days=5)
         self.store = Store(f"sqlite:///{tmp_path / db_name}")
+        # the FAST M1 test strategy costs ~0.5R a trade: far above the real 0.15R Cost Check. Tests of
+        # other behaviour lift the limit; test_cost_check.py runs at the default.
+        self.store.update_app_settings({"cost_check_max_r": 10.0})
         self.router = PaperRouter(self.sim, PaperBook(self.store))
         self.thread = BrokerThread(self.router)
         self.bus = EventBus()

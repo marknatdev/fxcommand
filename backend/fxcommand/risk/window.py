@@ -115,6 +115,12 @@ class TradingHours:
         return any(a <= minute < b for a, b in self.sessions[weekday])
 
 
+def fill_limit(bar_seconds: int, fill_window_s: int | None = None) -> int:
+    """How long after the Next Tradable Time an entry may still fill: the bar, or the Strategy's
+    shorter Fill Window. Shared by live Pending Entries and every Backtest (EntryGate)."""
+    return min(int(bar_seconds), int(fill_window_s)) if fill_window_s else int(bar_seconds)
+
+
 def next_tradable(server_ts: int, window: TradingWindow | None = None, hours: TradingHours | None = None, horizon_days: int = 8) -> int | None:
     """The first moment at or after ``server_ts`` when both the market (``hours``) and the Session's
     Trading Window are open, to the minute; None when there is none within ``horizon_days``.

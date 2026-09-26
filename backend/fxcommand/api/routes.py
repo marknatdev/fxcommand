@@ -42,6 +42,8 @@ def session_dict(r, s: SessionRow, with_detail: bool = False) -> dict:
     d = {
         **s.model_dump(),
         "magics": snap.get("magics", [s.magic]),
+        # Weekend Close cuts the tested edge of trades held for days (D6): the editor warns with this
+        "weekend_close_warning": bool(s.weekend_close and any(a.timeframe in ("H4", "D1") for a in assigns)),
         "window_text": TradingWindow.from_dict(s.window).describe(),
         "assignments": [
             {**a.model_dump(), "risk_profile_name": profiles.get(a.risk_profile_id), "state": states.get(a.id)} for a in assigns
@@ -479,6 +481,7 @@ class SettingsIn(BaseModel):
     close_on_auto_stop: bool | None = None
     equity_snapshot_seconds: int | None = Field(None, ge=60, le=86400)
     default_window: dict[str, Any] | None = None
+    cost_check_max_r: float | None = Field(None, ge=0.01, le=10)
 
 
 def _notify_view(r) -> dict:

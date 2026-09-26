@@ -19,9 +19,7 @@ engine's BrokerThread. Nothing here can send, modify or close an order.
 from __future__ import annotations
 
 import asyncio
-import collections
 import logging
-import statistics
 import time
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -32,6 +30,7 @@ from ..broker import BrokerThread, SymbolInfo, Tick, Timeframe
 from ..engine.schemas import DomainError
 from ..journal import Journal
 from ..risk import TradingWindow
+from ..risk.spreads import SpreadBook
 from ..store import AssignmentRow, SessionRow, Store, TradeRow
 from ..store.models import ChallengerRow, PendingChangeRow
 from ..strategies import Signal, get_strategy
@@ -53,7 +52,6 @@ RETRAIN_EVERY = 10
 RETENTION_DAYS = 180
 FEATURE_BARS = 160  # market features need ~100 bars of ATR rank + EMA50 warm-up
 AUTO_KINDS = ("auto_promotion", "auto_rollback")
-ROLLOVER = (23 * 60 + 55, 10)  # server minutes [23:55, 00:10): quotes are shut or several times wider
 ACTIVE = ("running", "paused")
 
 
@@ -96,7 +94,7 @@ class LearningService:
         self._server_time = 0
         self._known: set[str] = set()  # Candidate keys already stored
         self._filters: dict[str, sf.FilterState] = {}  # cache of learning_filters rows
-        self._spreads: dict[str, collections.deque] = {}  # symbol -> recent good spreads (_typical_spread)
+        self.spreads = SpreadBook(store)  # typical spreads (shared with the Cost Check through the store)
 
     # =============================================================== lifecycle
     @property
@@ -152,17 +150,10 @@ class LearningService:
         return self._arenas[key]
 
     def _typical_spread(self, symbol: str, tick: Tick, now: int) -> float:
-        """The spread Shadow Trades and Optimizer Runs are priced at: the median of recent good
-        quotes. A quote is good when it is fresh and outside the rollover minutes, where the market
-        is shut or quotes several times its usual spread (e.g. GOLD's 00:00 break, when GOLD Reopen
-        Drift's signal bar closes). Falls back to the current quote until one is recorded."""
-        spread = max(tick.ask - tick.bid, 0.0)
-        minute = (now % 86400) // 60
-        fresh = now - tick.time <= 120
-        if fresh and not (minute >= ROLLOVER[0] or minute < ROLLOVER[1]):
-            self._spreads.setdefault(symbol, collections.deque(maxlen=60)).append(spread)
-        good = self._spreads.get(symbol)
-        return float(statistics.median(good)) if good else spread
+        """The spread Shadow Trades and Optimizer Runs are priced at (``SpreadBook``: recent good
+        quotes, never one from the daily break). Falls back to the current quote until one is known."""
+        typical = self.spreads.spread_for(symbol, tick, now)
+        return typical if typical is not None else max(tick.ask - tick.bid, 0.0)
 
     @staticmethod
     def _job_args(bars, champion, costs, rules, n_cands, run_id, window, tf, exclude) -> tuple:

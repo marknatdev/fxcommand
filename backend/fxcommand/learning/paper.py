@@ -28,7 +28,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
-from ..risk.window import DAY, TradingWindow, next_tradable
+from ..risk.window import DAY, TradingWindow, fill_limit, next_tradable
 from ..strategies import get_strategy
 from .candidate import Candidate
 from .costs import CostModel
@@ -70,7 +70,7 @@ class EntryGate:
 
     @property
     def limit(self) -> int:
-        return min(self.bar_seconds, self.fill_window_s) if self.fill_window_s else self.bar_seconds
+        return fill_limit(self.bar_seconds, self.fill_window_s)
 
     def __call__(self, t: int) -> bool:
         if self._window is None or self._window.is_open(t):

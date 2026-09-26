@@ -125,6 +125,9 @@ A model, learned from closed trades and Shadow Trades, that estimates how likely
 How a Session's orders are carried out. **Broker** sends them to the Account. **Paper** runs the whole engine on the Broker's real prices but fills orders in a local simulated book; nothing reaches the Account.
 _Avoid_: dry run, simulation (the simulated market is the sim Broker, a different thing)
 
+**Paper Account**:
+The notional balance every Paper Session sizes its trades from and measures its limits against. It is separate from the real Account, and resetting it starts a new epoch that keeps the old records.
+
 **Paper Position**:
 A Position held in the Paper book of a Paper Session. It has no server-side stop-loss, so it is always closed when its Session stops, and is settled from the bars missed if the application was down.
 
@@ -168,6 +171,10 @@ How long after the Next Tradable Time a Strategy's entry may still be sent. Past
 
 **Cost Model**:
 The costs a Backtest charges a trade: spread, slippage and overnight swap, scaled to the price at the time so older, cheaper years are not overcharged.
+
+**Pending Entry**:
+A Signal that could not become an order yet because the market or the Trading Window was shut, or the spread too wide. It waits and is sent at the Next Tradable Time, and is dropped when its Fill Window ends or the Session stops. A strategy exit that the shut market refuses waits the same way.
+_Avoid_: queued order, pending order (MT5's resting limit/stop orders)
 
 **Cost Check**:
 The cost of one round trip (spread and slippage) as a share of an Assignment's stop, in R. An Assignment above the limit cannot start unless the operator overrides it. Swap is shown beside it but never blocks.
