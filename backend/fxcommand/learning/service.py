@@ -19,7 +19,9 @@ engine's BrokerThread. Nothing here can send, modify or close an order.
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
+import statistics
 import time
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -40,7 +42,8 @@ from .candidate import Candidate
 from .features import market_frame, vector
 from .objective import RStats, guardrails, r_stats, should_rollback
 from .optimizer import optimize_job
-from .paper import Costs, ExitRules, PaperTrader
+from .costs import CostModel
+from .paper import Costs, EntryGate, ExitRules, PaperTrader
 from .repo import LearningRepo
 
 log = logging.getLogger("fxcommand.learning")
@@ -50,6 +53,7 @@ RETRAIN_EVERY = 10
 RETENTION_DAYS = 180
 FEATURE_BARS = 160  # market features need ~100 bars of ATR rank + EMA50 warm-up
 AUTO_KINDS = ("auto_promotion", "auto_rollback")
+ROLLOVER = (23 * 60 + 55, 10)  # server minutes [23:55, 00:10): quotes are shut or several times wider
 ACTIVE = ("running", "paused")
 
 
@@ -92,6 +96,7 @@ class LearningService:
         self._server_time = 0
         self._known: set[str] = set()  # Candidate keys already stored
         self._filters: dict[str, sf.FilterState] = {}  # cache of learning_filters rows
+        self._spreads: dict[str, collections.deque] = {}  # symbol -> recent good spreads (_typical_spread)
 
     # =============================================================== lifecycle
     @property
@@ -146,6 +151,24 @@ class LearningService:
             self._arenas[key] = arena
         return self._arenas[key]
 
+    def _typical_spread(self, symbol: str, tick: Tick, now: int) -> float:
+        """The spread Shadow Trades and Optimizer Runs are priced at: the median of recent good
+        quotes. A quote is good when it is fresh and outside the rollover minutes, where the market
+        is shut or quotes several times its usual spread (e.g. GOLD's 00:00 break, when GOLD Reopen
+        Drift's signal bar closes). Falls back to the current quote until one is recorded."""
+        spread = max(tick.ask - tick.bid, 0.0)
+        minute = (now % 86400) // 60
+        fresh = now - tick.time <= 120
+        if fresh and not (minute >= ROLLOVER[0] or minute < ROLLOVER[1]):
+            self._spreads.setdefault(symbol, collections.deque(maxlen=60)).append(spread)
+        good = self._spreads.get(symbol)
+        return float(statistics.median(good)) if good else spread
+
+    @staticmethod
+    def _job_args(bars, champion, costs, rules, n_cands, run_id, window, tf, exclude) -> tuple:
+        """The Optimizer Run's arguments, as sent to the worker process (every one must pickle)."""
+        return (bars, champion, costs, rules, n_cands, run_id, window.to_dict(), tf.seconds, exclude)
+
     def _filter(self, symbol: str, timeframe: str, strategy: str) -> sf.FilterState:
         key = filter_key(symbol, timeframe, strategy)
         if key not in self._filters:
@@ -185,11 +208,11 @@ class LearningService:
 
         profile = self.store.to_profile(self.store.risk_profile(a.risk_profile_id))
         rules = ExitRules.from_profile(profile, a.reverse_on_opposite)
-        window = TradingWindow.from_dict(s.window)
         tf_secs = Timeframe(a.timeframe).seconds
-        spread = max(tick.ask - tick.bid, 0.0)
-        spread_ok = tick.spread_points <= profile.max_spread_points
-        costs = Costs(spread=spread, slippage=info.point)
+        spread = self._typical_spread(a.symbol, tick, now)
+        spread_ok = round(spread / info.point, 1) <= profile.max_spread_points if info.point else True  # as Tick.spread_points
+        costs = CostModel.from_symbol(info, spread=spread, ref_price=float(bars["close"].iloc[-1]))
+        gate = EntryGate(s.window, tf_secs)
         # market features are only needed when some Candidate schedules an entry: compute lazily, once,
         # on a short tail of the window (same index as ``bars``)
         _mf: list[pd.DataFrame] = []
@@ -208,7 +231,8 @@ class LearningService:
             if tr is None:
                 tr = arena.traders[key] = PaperTrader(costs, rules)
             tr.costs, tr.rules = costs, rules
-            tr.allow_entry = lambda ts: spread_ok and window.is_open(ts + tf_secs)
+            cand_gate = gate.for_strategy(cand.strategy)
+            tr.allow_entry = lambda ts, g=cand_gate: spread_ok and g(ts)
             frame = get_strategy(cand.strategy).signals(bars, cand.param_dict)
             cols = {k: frame[k].to_numpy() for k in ("long", "short", "exit_long", "exit_short", "sl_dist", "tp_dist")}
             atr = frame["info_atr"].to_numpy(dtype=float)
@@ -529,12 +553,10 @@ class LearningService:
         profile = self.store.to_profile(self.store.risk_profile(a.risk_profile_id))
         rules = ExitRules.from_profile(profile, a.reverse_on_opposite)
         window = TradingWindow.from_dict(s.window)
-        costs = Costs(spread=max(tick.ask - tick.bid, 0.0), slippage=info.point)
+        costs = CostModel.from_symbol(info, spread=self._typical_spread(symbol, tick, now), ref_price=float(bars["close"].iloc[-1]) if len(bars) else None)
         exclude = {c.candidate_key for c in self.repo.challengers(symbol, timeframe)} | {champion.key}
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            self._pool, optimize_job, bars, champion, costs, rules, n_cands, run_id, window.to_dict(), tf.seconds, exclude
-        )
+        result = await loop.run_in_executor(self._pool, optimize_job, *self._job_args(bars, champion, costs, rules, n_cands, run_id, window, tf, exclude))
         self._server_time = now
         if result.insufficient:
             self.repo.update_run(run_id, status="insufficient", note=result.insufficient, result=result.to_dict(), finished_wall=time.time())

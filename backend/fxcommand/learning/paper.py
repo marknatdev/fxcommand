@@ -10,7 +10,12 @@ Rules mirror live trading (ADR 0004):
   an exit Signal closes and nothing else happens on that bar.
 - Breakeven / ATR trailing are applied at each bar close (live applies them every engine pass,
   so live can tighten slightly earlier — documented tolerance).
-- Costs: spread on entry via the ask, plus ``slippage`` on market fills and stop fills.
+- Costs: spread on entry via the ask, plus ``slippage`` on market fills and stop fills, both at the
+  bar's price (a ``CostModel`` scales them with price, so old cheap years are not overcharged), and
+  overnight swap for every rollover the position was held through.
+- The Trading Window is judged when the entry fills (the next bar's open, the next tradable time),
+  not when the Signal fires: an entry is taken if the window opens within the fill limit (the bar,
+  or the Strategy's shorter fill window), as a live Pending Entry would be.
 
 Everything is measured in R: result / initial stop distance.
 """
@@ -23,14 +28,61 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
+from ..risk.window import DAY, TradingWindow, next_tradable
 from ..strategies import get_strategy
 from .candidate import Candidate
+from .costs import CostModel
 
 
 @dataclass(frozen=True)
 class Costs:
+    """Fixed costs (tests, simple callers). ``CostModel`` has the same methods, price-scaled and with swap."""
+
     spread: float  # price units (ask - bid)
     slippage: float = 0.0  # price units per market/stop fill
+
+    def spread_at(self, price: float) -> float:
+        return self.spread
+
+    def slippage_at(self, price: float) -> float:
+        return self.slippage
+
+    def swap_for(self, side: str, entry_price: float, open_ts: int, close_ts: int) -> float:
+        return 0.0
+
+
+CostLike = Costs | CostModel
+
+
+class EntryGate:
+    """Whether an entry filling at the open of a bar may be taken: the Trading Window must be open
+    at the next tradable time, and that must fall within the fill limit (the bar, or the Strategy's
+    shorter ``fill_window_s``). Plain data only, so it pickles into an Optimizer Run process."""
+
+    def __init__(self, window: dict | None, bar_seconds: int, fill_window_s: int | None = None):
+        self.window_dict = window
+        self.bar_seconds = int(bar_seconds)
+        self.fill_window_s = fill_window_s
+        self._window = TradingWindow.from_dict(window) if window is not None else None
+
+    def for_strategy(self, key: str) -> "EntryGate":
+        return EntryGate(self.window_dict, self.bar_seconds, get_strategy(key).fill_window_s)
+
+    @property
+    def limit(self) -> int:
+        return min(self.bar_seconds, self.fill_window_s) if self.fill_window_s else self.bar_seconds
+
+    def __call__(self, t: int) -> bool:
+        if self._window is None or self._window.is_open(t):
+            return True
+        nt = next_tradable(t, self._window, horizon_days=self.limit / DAY)  # scans only while shut
+        return nt is not None and nt < t + self.limit
+
+    def __getstate__(self):
+        return {"window": self.window_dict, "bar_seconds": self.bar_seconds, "fill_window_s": self.fill_window_s}
+
+    def __setstate__(self, d):
+        self.__init__(d["window"], d["bar_seconds"], d["fill_window_s"])
 
 
 @dataclass(frozen=True)
@@ -104,9 +156,9 @@ FeatureFn = Callable[[str], tuple[list[float] | None, float | None]]
 
 @dataclass
 class PaperTrader:
-    costs: Costs
+    costs: CostLike
     rules: ExitRules = field(default_factory=ExitRules)
-    allow_entry: Callable[[int], bool] | None = None  # e.g. Trading Window, by entry time
+    allow_entry: Callable[[int], bool] | None = None  # judged at the fill time (e.g. an EntryGate)
     position: OpenPaper | None = None
     last_r: float = 0.0
     _close: str | None = None
@@ -120,14 +172,16 @@ class PaperTrader:
     def _settle(self, t: int, exit_price: float, reason: str) -> PaperTrade:
         p = self.position
         assert p is not None
-        r = self._r(p, exit_price)
+        swap = self.costs.swap_for(p.side, p.entry, p.open_time, t)  # signed price units, + earns
+        r = self._r(p, exit_price) + (swap / p.risk if p.risk > 0 else 0.0)
         self.position = None
         self.last_r = r
         return PaperTrade(p.side, p.open_time, t, p.signal_time, p.entry, exit_price, r, reason, p.features, p.p_win)
 
     def _market_exit(self, o: float) -> float:
         p = self.position
-        return o - self.costs.slippage if p.side == "long" else o + self.costs.spread + self.costs.slippage
+        slip = self.costs.slippage_at(o)
+        return o - slip if p.side == "long" else o + self.costs.spread_at(o) + slip
 
     # ------------------------------------------------------------ one bar
     def on_bar(
@@ -144,13 +198,13 @@ class PaperTrader:
         """Process bar t (just closed). Returns (position opened at this bar's open, trades closed)."""
         closed: list[PaperTrade] = []
         opened: OpenPaper | None = None
-        spread, slip = self.costs.spread, self.costs.slippage
+        spread, slip = self.costs.spread_at(o), self.costs.slippage_at(o)
 
         # 1. orders scheduled at the previous close fill at this open
         if self._close and self.position:
             closed.append(self._settle(t, self._market_exit(o), self._close))
         self._close = None
-        if self._entry and self.position is None:
+        if self._entry and self.position is None and (self.allow_entry is None or self.allow_entry(t)):
             e = self._entry
             if e.side == "long":
                 entry = o + spread + slip
@@ -213,8 +267,6 @@ class PaperTrader:
         sl_dist, tp_dist = float(sig["sl_dist"]), float(sig["tp_dist"])
         if not (sl_dist > 0 and np.isfinite(sl_dist)):
             return opened, closed
-        if self.allow_entry is not None and not self.allow_entry(t):
-            return opened, closed
         feats, pw = make_features(side) if make_features else (None, None)
         self._entry = _Pending(side, sl_dist, tp_dist if np.isfinite(tp_dist) else 0.0, t, feats, pw)
         return opened, closed
@@ -239,7 +291,7 @@ class PaperTrader:
 def backtest(
     bars: pd.DataFrame,
     candidate: Candidate,
-    costs: Costs,
+    costs: CostLike,
     rules: ExitRules | None = None,
     allow_entry: Callable[[int], bool] | None = None,
     features: pd.DataFrame | None = None,
@@ -256,6 +308,8 @@ def backtest(
     o, h, l, c = (bars[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
     atr = frame["info_atr"].to_numpy(dtype=float)
     cols = {k: frame[k].to_numpy() for k in ("long", "short", "exit_long", "exit_short", "sl_dist", "tp_dist")}
+    if isinstance(allow_entry, EntryGate):
+        allow_entry = allow_entry.for_strategy(candidate.strategy)
     trader = PaperTrader(costs, rules or ExitRules(), allow_entry)
     trades: list[PaperTrade] = []
     for i in range(len(bars)):
@@ -264,7 +318,7 @@ def backtest(
         if features is not None:
 
             def mf(side, i=i):  # evaluated only when an entry is actually scheduled
-                vec = vector(features.iloc[i], side, costs.spread, trader.last_r)
+                vec = vector(features.iloc[i], side, costs.spread_at(float(c[i])), trader.last_r)
                 return vec, (scorer(vec) if scorer else None)
 
         _, closed = trader.on_bar(int(t[i]), float(o[i]), float(h[i]), float(l[i]), float(c[i]), float(atr[i]) if atr[i] == atr[i] else 0.0, sig, mf)

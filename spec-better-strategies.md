@@ -436,10 +436,10 @@ New catalog entries only. The existing strategies' behaviour and golden rows are
 - [x] Tests: two GOLD positions at once, migration with legacy positions (no duplicate entry), Kill Switch, Orphans, Paper routing with the real Account's order method watched (edit + restart included), strategy edit with a position left open, no magic reuse. The Paper check on the real feed is still owed while the market is closed
 
 ### 4. Learning
-- [ ] `PaperTrader` uses `CostModel` and `next_tradable`
-- [ ] Retention keeps at least 200 closed Shadow Trades per Candidate per Arena
+- [x] `PaperTrader` uses `CostModel` and `next_tradable`: spread and slippage at the bar's price, swap per MT5 rollover (three nights on Wednesday), and the Trading Window judged when the entry fills (`EntryGate`: open within the bar, or the Strategy's shorter fill window). Shadow Trades and Optimizer Runs price with a typical spread: the median of recent fresh quotes outside 23:55–00:10, never a quote from the daily break. Until milestone 5 the live engine still judges the window at the signal, so Shadow Trades can take an entry live refuses (e.g. an H4 bar at 00:00). On real XM GOLD history the app reproduces the research: Reopen Drift exactly (3075 trades +0.0324R, sealed 247 +0.1475R); GOLD Trend exactly without swap and within 0.003R (research) / 0.012R (sealed year: 9 trades +0.357R vs +0.369R) with it, because the research counted calendar days (2016 nights) where MT5 charges 2002
+- [x] Retention keeps at least 200 closed Shadow Trades per Candidate per Arena (`KEEP_SHADOWS`); the 180-day rule applies only beyond them; open ones are never deleted
 - [x] Family-scoped candidate generation with optimizer search bounds (`Strategy.family`, `Param.search_min/search_max`). Done early in milestone 1 so the new strategies never leak into the classic Arenas
-- [ ] Re-pin the noise and planted-edge tests; Guardrail constants unchanged
+- [x] Re-pin the noise and planted-edge tests; Guardrail constants unchanged. Both pass unchanged on the new pricing (nothing to re-pin); the sim still charges no swap on its own positions, so an overnight live trade in the sim can differ from its Shadow Trade by the swap
 
 ### 5. Engine
 - [ ] `pending_entries` table and lifecycle: transient retries, per-strategy fill window, cancel events, survives Interrupted, journal once, outcome on the Signal record

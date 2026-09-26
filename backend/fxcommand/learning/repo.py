@@ -22,6 +22,8 @@ from ..store.models import (
 )
 from .candidate import Candidate
 
+KEEP_SHADOWS = 200  # closed Shadow Trades always kept per Candidate per Arena (spec D22)
+
 
 class LearningRepo:
     def __init__(self, store: Store):
@@ -268,11 +270,22 @@ class LearningRepo:
         self._update(PendingChangeRow, pending_id, **fields)
 
     # -------------------------------------------------------------- retention
-    def cleanup(self, older_than_ts: int, keep_runs: int = 20) -> dict:
+    def cleanup(self, older_than_ts: int, keep_runs: int = 20, keep_shadows: int = KEEP_SHADOWS) -> dict:
+        """Delete closed Shadow Trades and Signal records older than ``older_than_ts``, but always keep
+        the newest ``keep_shadows`` closed Shadow Trades of each Candidate in each Arena: an H4/D1
+        Candidate closes only a few trades in 180 days, too few for the Guardrails. Open ones stay."""
         from sqlmodel import delete
 
         with self._db() as db:
-            s = db.exec(delete(ShadowTradeRow).where(ShadowTradeRow.status != "open", ShadowTradeRow.open_ts < older_than_ts))
+            closed_old = (ShadowTradeRow.status != "open", ShadowTradeRow.open_ts < older_than_ts)
+            protected: set[int] = set()
+            groups = db.exec(select(ShadowTradeRow.symbol, ShadowTradeRow.timeframe, ShadowTradeRow.candidate_key).where(*closed_old).distinct())
+            for sym, tf, key in list(groups):
+                newest = select(ShadowTradeRow.id).where(
+                    ShadowTradeRow.symbol == sym, ShadowTradeRow.timeframe == tf, ShadowTradeRow.candidate_key == key, ShadowTradeRow.status != "open"
+                )
+                protected |= set(db.exec(newest.order_by(ShadowTradeRow.close_ts.desc(), ShadowTradeRow.id.desc()).limit(keep_shadows)))
+            s = db.exec(delete(ShadowTradeRow).where(*closed_old, ShadowTradeRow.id.not_in(protected)))
             g = db.exec(delete(SignalRecordRow).where(SignalRecordRow.ts < older_than_ts))
             removed_runs = 0
             arenas = {(r.symbol, r.timeframe) for r in db.exec(select(OptimizerRunRow))}

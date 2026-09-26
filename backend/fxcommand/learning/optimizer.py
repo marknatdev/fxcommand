@@ -16,7 +16,7 @@ import pandas as pd
 
 from .candidate import Candidate, generate, perturb
 from .objective import MIN_OOS_TRADES, ROBUST_SHARE, WalkForward, walk_forward
-from .paper import Costs, ExitRules, backtest
+from .paper import Costs, EntryGate, ExitRules, backtest
 
 MIN_BARS = 500
 IN_SAMPLE_SHARE = 0.6
@@ -129,11 +129,7 @@ def optimize_job(
     bar_seconds: int,
     exclude: set[str],
 ) -> OptimizeResult:
-    """Picklable entry point for running an Optimizer Run in a separate process (no lambdas)."""
-    from ..risk import TradingWindow
-
-    allow = None
-    if window is not None:
-        w = TradingWindow.from_dict(window)
-        allow = lambda ts: w.is_open(ts + bar_seconds)  # noqa: E731
+    """Picklable entry point for running an Optimizer Run in a separate process (no lambdas). The
+    Trading Window is judged at each entry's fill time, per Candidate's fill window (EntryGate)."""
+    allow = EntryGate(window, bar_seconds) if window is not None else None
     return optimize(bars, champion, costs, rules, n_candidates=n_candidates, seed=seed, allow_entry=allow, exclude=exclude)
