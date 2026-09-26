@@ -53,6 +53,7 @@ test("create a multi-symbol session through the editor", async ({ page }) => {
 });
 
 test("start, trade, pause, resume and stop (closing positions) from the dashboard", async ({ page, request }) => {
+  test.slow(); // ~130 simulated bars through the whole engine; 20-50 s depending on machine load
   const errors = watchErrors(page);
   const sessions = await api<any[]>(request, "GET", "/sessions");
   const s = sessions.find((x) => x.name === "E2E Majors");

@@ -19,6 +19,7 @@ class Config:
     sim_seed: int = 42
     sim_speed: float | None = None  # overrides the persisted setting at startup when set
     sim_start: int | None = None
+    sim_deep_days: int = 0  # H1 history before the sim's M1 history (FXC_SIM_DEEP_DAYS, 600 when run)
     mt5_path: str | None = None
     static_dir: Path | None = None
     run_engine: bool = True
@@ -39,6 +40,7 @@ class Config:
             sim_seed=int(os.environ.get("FXC_SIM_SEED", "42")),
             sim_speed=float(speed) if speed not in (None, "") else None,
             sim_start=int(start) if start else None,
+            sim_deep_days=int(os.environ.get("FXC_SIM_DEEP_DAYS", "600")),
             mt5_path=os.environ.get("MT5_PATH") or None,
             static_dir=Path(static) if Path(static).is_dir() else None,
             run_engine=os.environ.get("FXC_ENGINE", "1") != "0",

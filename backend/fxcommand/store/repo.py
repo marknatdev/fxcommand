@@ -38,7 +38,10 @@ DEFAULT_PROFILES = (
     RiskProfileRow(name="Conservative", risk_pct=0.5, max_spread_points=20, breakeven=True, breakeven_at_r=1.0),
     RiskProfileRow(name="Aggressive", risk_pct=2.0, max_spread_points=40, trailing=True, trailing_atr=2.0, trailing_start_r=1.0),
     RiskProfileRow(name="Gold", risk_pct=1.0, max_spread_points=60, breakeven=True, trailing=True, trailing_atr=2.5),
+    # GOLD Reopen Drift enters at the 01:00 reopen, where XM quotes ~70 points; its exit is by time
+    RiskProfileRow(name="Gold Reopen", risk_pct=1.0, max_spread_points=100),
 )
+FIRST_PROFILES = ("Default", "Conservative", "Aggressive", "Gold")  # seeded before profiles were tracked
 
 
 class NotFound(LookupError):
@@ -89,11 +92,24 @@ class Store:
         return DB(self.engine, expire_on_commit=False)
 
     def _seed(self) -> None:
+        """Add each default Risk Profile once. A default added in a later version reaches existing
+        databases too, but one the operator deleted or renamed is never brought back."""
         with self._db() as db:
-            if db.exec(select(RiskProfileRow)).first() is None:
-                for p in DEFAULT_PROFILES:
+            empty = db.exec(select(RiskProfileRow)).first() is None
+            seeded = [] if empty else list(self.get_setting("seeded_profiles") or FIRST_PROFILES)
+            names = set(db.exec(select(RiskProfileRow.name)).all())
+            added = False
+            for p in DEFAULT_PROFILES:
+                if p.name in seeded:
+                    continue
+                if p.name not in names:
                     db.add(RiskProfileRow.model_validate(p.model_dump(exclude={"id"})))
+                    added = True
+                seeded.append(p.name)
+            if added:
                 db.commit()
+        if self.get_setting("seeded_profiles") != seeded:
+            self.set_setting("seeded_profiles", seeded)
 
     # --------------------------------------------------------------- settings
     def get_setting(self, key: str, default: Any = None) -> Any:

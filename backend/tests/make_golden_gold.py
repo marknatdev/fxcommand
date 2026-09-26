@@ -4,7 +4,7 @@ behaviour change: uv run python tests/make_golden_gold.py"""
 import json
 from pathlib import Path
 
-from fxcommand.broker.sim import SimBroker
+from fxcommand.broker.sim import LEGACY_SYMBOLS, SimBroker
 from fxcommand.broker.types import Timeframe
 from fxcommand.strategies import STRATEGIES
 
@@ -17,7 +17,7 @@ SERIES = (("GOLD", Timeframe.H1), ("GOLD", Timeframe.H4))
 
 
 def series():
-    sim = SimBroker(seed=7, start=MON_08, history_days=60)
+    sim = SimBroker(seed=7, start=MON_08, history_days=60, symbols=LEGACY_SYMBOLS)
     return {(sym, tf.value): sim.closed_bars(sym, tf, 1500).reset_index(drop=True) for sym, tf in SERIES}
 
 

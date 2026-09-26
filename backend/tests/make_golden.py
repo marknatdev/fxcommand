@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from fxcommand.broker.sim import SimBroker
+from fxcommand.broker.sim import LEGACY_SYMBOLS, SimBroker
 from fxcommand.broker.types import Timeframe
 from fxcommand.strategies import STRATEGIES
 
@@ -16,7 +16,7 @@ PARAM_SETS = {
 
 
 def main() -> None:
-    sim = SimBroker(seed=5, start=MON_08, history_days=10)
+    sim = SimBroker(seed=5, start=MON_08, history_days=10, symbols=LEGACY_SYMBOLS)
     sim.step(600)
     out = []
     for sym, tf in (("EURUSD", Timeframe.M1), ("GOLD", Timeframe.M5)):

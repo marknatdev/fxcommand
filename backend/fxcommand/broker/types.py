@@ -82,6 +82,10 @@ class SymbolInfo:
     filling_mode: int = 0  # MT5 SYMBOL_FILLING_* bitmask
     trade_mode: str = "full"  # full | longonly | shortonly | closeonly | disabled
     freeze_level: int = 0  # no SL/TP change while price is within this many points of them
+    swap_long: float = 0.0  # overnight swap per lot, in the unit swap_mode names
+    swap_short: float = 0.0
+    swap_mode: int = 0  # MT5 SYMBOL_SWAP_MODE_* (0 = disabled, 1 = points, ...)
+    swap_rollover3days: int = 3  # MT5 day of week (0 = Sunday) that charges three nights
 
     def to_dict(self) -> dict:
         return asdict(self)

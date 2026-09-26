@@ -100,6 +100,7 @@ class SessionManager:
         self._account: AccountInfo | None = None
         self._positions: list[Position] = []
         self._missing: dict[int, int] = {}
+        self._modify_failed: dict[int, str] = {}  # ticket -> last failed SL move, journaled once
         self._task: asyncio.Task | None = None
         self._kill_seq = 0  # bumped by the Kill Switch; an entry prepared before it is refused
         self.close_attempts = 5
@@ -1096,11 +1097,14 @@ class SessionManager:
             if res is None:
                 continue
             if res.ok:
+                self._modify_failed.pop(p.ticket, None)
                 if tr:
                     self.store.update_trade(p.ticket, sl=new_sl)
                 self._j("modify", f"Moved SL of #{p.ticket} {p.symbol} {p.sl} → {new_sl}", s, p.symbol, data={"ticket": p.ticket, "old": p.sl, "new": new_sl})
-            else:
-                self._j("order_fail", f"SL move #{p.ticket} failed: {res.message}", s, p.symbol, level="warn")
+            elif self._modify_failed.get(p.ticket) != res.message:
+                # retried every pass (e.g. through GOLD's daily break), journaled once per reason
+                self._modify_failed[p.ticket] = res.message
+                self._j("order_fail", f"SL move #{p.ticket} failed: {res.message} (retrying every pass)", s, p.symbol, level="warn")
 
     # ============================================================== read side
     def snapshot_account(self) -> AccountInfo | None:

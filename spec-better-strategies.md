@@ -423,10 +423,10 @@ New catalog entries only. The existing strategies' behaviour and golden rows are
 - [x] `risk/costcheck.py` `estimate_cost`: (spread + 2 × slippage) ÷ stop; swap reported, not blocking
 
 ### 2. SimBroker
-- [ ] Daily break until 01:00 and a wider reopen spread
-- [ ] Swap fields on `SymbolInfo`, and in `fake_mt5`
-- [ ] At least 600 days of history; GOLD specs
-- [ ] Gold Reopen Risk Profile
+- [x] Daily break until 01:00 and a wider reopen spread. GOLD is shut 23:57–01:00 Mon–Fri: no bars, orders/modify/close answer market closed (10018), stops wait for the reopen and fill at the gap, the last quote ages. 70 points for the first 15 minutes after 01:00. Other Symbols' price paths are unchanged (same random draws). Behaviour change for all Symbols: orders at a weekend boundary (e.g. on the Friday 23:59 bar close) are now refused as market closed. A stop move refused in the break is retried every pass but journaled once
+- [x] Swap fields on `SymbolInfo` (`swap_long`, `swap_short`, `swap_mode`, `swap_rollover3days`), mapped in `Mt5Broker`, in `fake_mt5` and the sim; `CostModel.from_symbol` reads them. The sim does not charge swap on its own positions; the Paper book does from milestone 5
+- [x] At least 600 days of history: `deep_history_days` adds H1 history before the M1 history for H1/H4/D1 (`FXC_SIM_DEEP_DAYS`, 600 when the app runs, 0 in unit tests). GOLD specs: XM trading hours, reopen spread and swaps; base spread and price unchanged so existing GOLD tests keep their meaning. The golden fixtures are generated on `LEGACY_SYMBOLS`, so spec changes never move their inputs
+- [x] Gold Reopen Risk Profile (100-point cap, no breakeven or trailing). Seeded once into existing databases too; a profile the operator deletes is not brought back
 
 ### 3. Magic Number per Assignment
 - [ ] ADR 0009 superseding ADR 0003; update `CONTEXT.md`

@@ -75,7 +75,8 @@ class FakeMt5:
             return None
         return NS(name="EURUSD", description="Euro", digits=5, point=1e-5, trade_tick_size=1e-5, trade_tick_value=1.0,
                   trade_contract_size=100_000, volume_min=0.01, volume_max=50.0, volume_step=0.01, trade_stops_level=0,
-                  trade_freeze_level=3, filling_mode=self.filling, trade_mode=self.symbol_trade_mode, spread=12)
+                  trade_freeze_level=3, filling_mode=self.filling, trade_mode=self.symbol_trade_mode, spread=12,
+                  swap_long=-7.5, swap_short=1.9, swap_mode=1, swap_rollover3days=3)
 
     def symbol_info_tick(self, sym):
         return NS(time=self.now, bid=self.bid, ask=self.ask) if sym == "EURUSD" else None

@@ -51,6 +51,7 @@ def test_account_terminal_and_symbol_facts(broker, fake):
     assert t.connected and t.algo_trading and t.ping_ms == 42.0 and t.build == 6182
     info = broker.symbol_info("EURUSD")
     assert info.trade_mode == "full" and info.freeze_level == 3
+    assert (info.swap_long, info.swap_short, info.swap_mode, info.swap_rollover3days) == (-7.5, 1.9, 1, 3)
     fake.account.margin_mode = 0
     assert broker.account().margin_mode == "netting"
     fake.term.trade_allowed = False

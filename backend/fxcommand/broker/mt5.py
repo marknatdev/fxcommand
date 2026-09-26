@@ -159,6 +159,10 @@ class Mt5Broker:
             filling_mode=int(s.filling_mode),
             trade_mode=SYMBOL_TRADE_MODES.get(int(s.trade_mode), "disabled"),
             freeze_level=int(s.trade_freeze_level),
+            swap_long=float(s.swap_long),
+            swap_short=float(s.swap_short),
+            swap_mode=int(s.swap_mode),
+            swap_rollover3days=int(s.swap_rollover3days),
         )
 
     def tick(self, symbol: str) -> Tick:
