@@ -1,0 +1,359 @@
+{
+  "specName": "better-strategies",
+  "timestamp": "2026-09-26",
+  "status": "approved-v5",
+  "qaLog": [
+    {
+      "area": "Capital",
+      "question": "Which account should the strategies target?",
+      "answer": "i want strategies for 50 USD in cent account, so recommend me"
+    },
+    {
+      "area": "Capital",
+      "question": "Which small account (XM Micro / true cent / both)?",
+      "answer": "i can't provide micro account to you, so i want you to design strategies that work best on 50 USD"
+    },
+    {
+      "area": "Goal",
+      "question": "What should 'best strategies for $50' mean?",
+      "answer": "Prove on Paper first (Recommended)"
+    },
+    {
+      "area": "Families",
+      "question": "Which strategy families should ship?",
+      "answer": "Evidence-only + fix Learning (Recommended)"
+    },
+    {
+      "area": "Old strategies",
+      "question": "What to do with the 3 old strategies and cost-heavy setups?",
+      "answer": "Keep + blocking Cost Check (Recommended)"
+    },
+    {
+      "area": "Execution Timing",
+      "question": "How does a D1 signal at 00:00 become an order?",
+      "answer": "Deferred entry, re-gated (Recommended)"
+    },
+    {
+      "area": "Execution Timing",
+      "question": "Should Index Pullback hold through weekends?",
+      "answer": "Hold; per-Session choice (Recommended)"
+    },
+    {
+      "area": "Arenas",
+      "question": "Where may Index Pullback be assigned?",
+      "answer": "Anywhere, evidence shown (Recommended)"
+    },
+    {
+      "area": "Paper Account",
+      "question": "How should Paper sizing on a notional balance work?",
+      "answer": "One Paper Account (Recommended)"
+    },
+    {
+      "area": "Graduation",
+      "question": "What Paper evidence backs a later real-money decision?",
+      "answer": "Advisory scorecard (Recommended)"
+    },
+    {
+      "area": "Learning",
+      "question": "Should the optimizer tune Index Pullback?",
+      "answer": "Allow, swap-aware, narrow ranges (Recommended)"
+    },
+    {
+      "area": "Evidence",
+      "question": "Where does the Evidence table come from?",
+      "answer": "In-app Evidence Run (Recommended)"
+    },
+    {
+      "area": "Red Team",
+      "question": "Resolve the 12 red-team findings how?",
+      "answer": "Accept all recommended"
+    },
+    {
+      "area": "Instrument focus",
+      "question": "(user) focus on GOLD, make strategies to make most profit on GOLD",
+      "answer": "GOLD becomes primary"
+    },
+    {
+      "area": "Families",
+      "question": "Which strategies ship with GOLD as the focus?",
+      "answer": "Both GOLD + keep US500 (Recommended)"
+    },
+    {
+      "area": "Execution Timing",
+      "question": "How should GOLD Reopen Drift's entry execute?",
+      "answer": "Fill window + own spread cap (Recommended)"
+    },
+    {
+      "area": "Same symbol",
+      "question": "How do two GOLD strategies coexist given ADR 0003?",
+      "answer": "Magic per Assignment (Recommended)"
+    },
+    {
+      "area": "Approval",
+      "question": "Approve spec?",
+      "answer": "yeah, and write artifacts also"
+    },
+    {
+      "area": "Direction",
+      "question": "(user) focus on GOLD, create strategies with great algorithm for most profit",
+      "answer": "asked for pros/cons of each option"
+    },
+    {
+      "area": "Direction",
+      "question": "Which direction for GOLD?",
+      "answer": "Upgrade GOLD pair with multi-timeframe and self-learning system that Claude reviews from mistakes and creates or upgrades strategies"
+    },
+    {
+      "area": "Claude Review",
+      "question": "How much may the Claude reviewer change on its own?",
+      "answer": "Challengers + code as PRs (Recommended)"
+    },
+    {
+      "area": "Claude Review",
+      "question": "When should the Claude review run?",
+      "answer": "Weekly, weekend (Recommended)"
+    },
+    {
+      "area": "Claude Review",
+      "question": "How to guard against discovering luck?",
+      "answer": "Ledger + sealed holdout (Recommended)"
+    },
+    {
+      "area": "Claude Review",
+      "question": "Where are weekly reviews kept?",
+      "answer": "In-app Reviews page (Recommended)"
+    },
+    {
+      "area": "Claude Review",
+      "question": "How does the reviewer run backtests and hand results to the app?",
+      "answer": "Research CLI + 2 narrow MCP tools (Recommended)"
+    },
+    {
+      "area": "GOLD upgrade",
+      "question": "Allow pyramiding?",
+      "answer": "Only if research proves it (Recommended) -> research rejected it"
+    },
+    {
+      "area": "Scalping",
+      "question": "(user) design a GOLD scalping strategy on M1/M5/M15 multi-timeframe, split from the H4/H1 strategies",
+      "answer": "researched: 10 designs negative after costs"
+    },
+    {
+      "area": "Scalping",
+      "question": "How should the GOLD scalper go into the plan?",
+      "answer": "Research track in weekly review (Recommended), More history first (Recommended)"
+    },
+    {
+      "area": "Scalping",
+      "question": "(user) MT5 max bars set to unlimited",
+      "answer": "terminal restarted; MaxBars set to 10,000,000 in common.ini with operator consent; history re-pulled from 2020"
+    }
+  ],
+  "coverageMap": {
+    "Capital": "done",
+    "Goal": "done",
+    "Instrument focus": "done",
+    "Families": "done",
+    "Old strategies": "done",
+    "Execution Timing": "done",
+    "Arenas": "done",
+    "Same symbol": "done",
+    "Paper Account": "done",
+    "Graduation": "done",
+    "Learning": "done",
+    "Evidence": "done",
+    "Red Team": "done",
+    "Direction": "done",
+    "Claude Review": "done",
+    "GOLD upgrade": "done",
+    "MTF filters": "done",
+    "Scalping": "done"
+  },
+  "capturedAtCommit": "f0c9ecd",
+  "baseline": {
+    "derivedFrom": "codebase + read-only MT5 research",
+    "capturedAtCommit": "f0c9ecd",
+    "claims": [
+      {
+        "id": "C1",
+        "area": "Strategies",
+        "claim": "STRATEGIES registry holds ema_cross, donchian_breakout, rsi_reversion",
+        "path": "backend/fxcommand/strategies/catalog.py"
+      },
+      {
+        "id": "C2",
+        "area": "Learning",
+        "claim": "Costs has only spread and slippage (no swap)",
+        "path": "backend/fxcommand/learning/paper.py"
+      },
+      {
+        "id": "C3",
+        "area": "Learning",
+        "claim": "optimize_job gates entries with window.is_open(ts + bar_seconds)",
+        "path": "backend/fxcommand/learning/optimizer.py"
+      },
+      {
+        "id": "C4",
+        "area": "Learning",
+        "claim": "RETENTION_DAYS = 180",
+        "path": "backend/fxcommand/learning/service.py"
+      },
+      {
+        "id": "C5",
+        "area": "Execution Timing",
+        "claim": "Default TradingWindow blackout 23:55-00:10; Risk Gate rejects outside_window using now",
+        "path": "backend/fxcommand/risk/window.py"
+      },
+      {
+        "id": "C6",
+        "area": "Risk Profiles",
+        "claim": "Default profiles cap spread at 30/20/40/60 points",
+        "path": "backend/fxcommand/store/repo.py"
+      },
+      {
+        "id": "C7",
+        "area": "Same symbol",
+        "claim": "One magic per Session; SessionRow.magic unique (ADR 0003)",
+        "path": "backend/fxcommand/store/models.py"
+      },
+      {
+        "id": "C8",
+        "area": "Guardrails",
+        "claim": "MIN_SHADOW_TRADES = 30, MIN_OOS_TRADES = 30, DEFLATE_K = 0.5",
+        "path": "backend/fxcommand/learning/objective.py"
+      }
+    ]
+  },
+  "driftLedger": [],
+  "previewUrl": "https://claude.ai/artifact/JoQGPsktB9Wottx8H8afZs",
+  "sourceIssue": null,
+  "feedbackRounds": [
+    {
+      "round": 1,
+      "feedback": "focus on GOLD, make strategies to make most profit on GOLD",
+      "changes": "GOLD research with price-scaled costs; GOLD Trend + GOLD Reopen Drift primary; US500 secondary; magic per Assignment; D30-D39"
+    },
+    {
+      "round": 2,
+      "feedback": "GOLD only; upgrade GOLD pair with multi-timeframe and a Claude self-learning review loop",
+      "changes": "D40-D50; US500 dropped; Claude Strategy Review section; upgrade research (18 research trials + 5 pyramiding + 4 holdout evaluations); dip filter and exit 05:00 rejected on holdout"
+    },
+    {
+      "round": 3,
+      "feedback": "add a GOLD scalping strategy M1/M5/M15 multi-timeframe, separate from H4/H1",
+      "changes": "scalping research (10 designs, gross/net/low-cost runs); D51 research track on GOLD M5 Arena; D52 unlimited history then re-run"
+    },
+    {
+      "round": 4,
+      "feedback": "max bars unlimited, re-run scalping",
+      "changes": "full-history scalping research; D53 no scalper ships"
+    }
+  ],
+  "redTeamStatus": "completed",
+  "redTeamFindings": [
+    {
+      "dimension": "Failure Modes",
+      "severity": "critical",
+      "title": "Backtests/Shadow/Evidence never open a D1 trade (window checked at 00:00)",
+      "resolution": "D18",
+      "status": "resolved"
+    },
+    {
+      "dimension": "Contradictory Decisions",
+      "severity": "critical",
+      "title": "Paper Account still sized and limited from the real equity",
+      "resolution": "D19",
+      "status": "resolved"
+    },
+    {
+      "dimension": "Failure Modes",
+      "severity": "critical",
+      "title": "Pending Entry lifecycle undefined; a separate send path skips guards",
+      "resolution": "D20",
+      "status": "resolved"
+    },
+    {
+      "dimension": "Data Integrity",
+      "severity": "major",
+      "title": "Paper reset can reuse negative tickets",
+      "resolution": "D21",
+      "status": "resolved"
+    },
+    {
+      "dimension": "Scaling Cliffs",
+      "severity": "major",
+      "title": "180-day retention makes D1 promotion impossible",
+      "resolution": "D22",
+      "status": "resolved"
+    },
+    {
+      "dimension": "Data Integrity",
+      "severity": "major",
+      "title": "Evidence keyed by Arena ignores params, exit rules, weekend, window",
+      "resolution": "D23",
+      "status": "resolved"
+    },
+    {
+      "dimension": "Operational Concerns",
+      "severity": "major",
+      "title": "Evidence Run fetches block the BrokerThread",
+      "resolution": "D24",
+      "status": "resolved"
+    },
+    {
+      "dimension": "Dependency Risks",
+      "severity": "major",
+      "title": "New family leaks into cross-family candidate generation",
+      "resolution": "D25",
+      "status": "resolved"
+    },
+    {
+      "dimension": "Failure Modes",
+      "severity": "major",
+      "title": "Cost Check inputs unreliable; enforcement bypassable",
+      "resolution": "D26",
+      "status": "resolved"
+    },
+    {
+      "dimension": "Wildcard",
+      "severity": "major",
+      "title": "80-point US500 spread over every profile; SimBroker cannot exercise D1; D1 detection timing unverified",
+      "resolution": "D27",
+      "status": "resolved"
+    },
+    {
+      "dimension": "Data Integrity",
+      "severity": "minor",
+      "title": "Swap and catch-up for Paper positions",
+      "resolution": "D28",
+      "status": "resolved"
+    },
+    {
+      "dimension": "Security Gaps",
+      "severity": "minor",
+      "title": "Evidence storage location and MCP exposure",
+      "resolution": "D29",
+      "status": "resolved"
+    }
+  ],
+  "researchLedger": {
+    "arena": "GOLD",
+    "sealed_from": "2025-09-25",
+    "research_trials": 23,
+    "holdout_evaluations": 4,
+    "files": [
+      "docs/research/strategies-2026-09/results/ledger_gold6.json",
+      "docs/research/strategies-2026-09/results/pyramiding.jsonl",
+      "docs/research/strategies-2026-09/results/holdout_2025-09-25.jsonl"
+    ],
+    "scalping": {
+      "arena": "GOLD M5",
+      "research_window": "2019-12-31..2026-06-24",
+      "sealed_from": "2026-06-25",
+      "trials": 46,
+      "cost_scenarios": 3,
+      "holdout_evaluations": 0,
+      "result": "no finalist; NY ORB 30-min narrow peak (0/24 neighbours positive in every period)"
+    }
+  }
+}

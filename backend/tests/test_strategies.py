@@ -21,8 +21,9 @@ def bars_from_closes(closes, spread=0.0005):
     )
 
 
-def test_catalog_has_three_strategies_with_schemas():
-    assert set(STRATEGIES) == {"ema_cross", "donchian_breakout", "rsi_reversion"}
+def test_catalog_has_the_classic_three_and_the_gold_pair_with_schemas():
+    assert set(STRATEGIES) == {"ema_cross", "donchian_breakout", "rsi_reversion", "trend_breakout", "session_drift"}
+    assert {k for k, s in STRATEGIES.items() if s.family == "gold"} == {"trend_breakout", "session_drift"}
     for s in STRATEGIES.values():
         d = s.describe()
         assert d["params"] and all({"name", "type", "default"} <= set(p) for p in d["params"])

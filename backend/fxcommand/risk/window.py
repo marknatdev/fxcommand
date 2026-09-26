@@ -85,3 +85,54 @@ class TradingWindow:
         if self.blackouts:
             s += "; blackout " + ", ".join(f"{b.start}–{b.end}" for b in self.blackouts)
         return s + " (server time)"
+
+
+@dataclass(frozen=True)
+class TradingHours:
+    """When the broker quotes a symbol, per weekday (0 = Monday), as [start, end) minutes of the server day.
+    GOLD on XM, for example, is shut from 00:00 to 01:00 every day and all weekend. The default is
+    always open, which is what a symbol without known sessions is treated as."""
+
+    sessions: tuple[tuple[tuple[int, int], ...], ...] = tuple(((0, 1440),) for _ in range(7))
+
+    @classmethod
+    def daily(cls, start: str, end: str, weekdays: tuple[int, ...] = (0, 1, 2, 3, 4)) -> "TradingHours":
+        a, b = _hm(start), _hm(end)
+        return cls(tuple(((a, b),) if d in weekdays else () for d in range(7)))
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "TradingHours":
+        if not d:
+            return cls()
+        return cls(tuple(tuple((int(a), int(b)) for a, b in d.get(str(i), d.get(i, []))) for i in range(7)))
+
+    def to_dict(self) -> dict:
+        return {str(i): [list(s) for s in day] for i, day in enumerate(self.sessions)}
+
+    def is_open(self, server_ts: int) -> bool:
+        weekday = (server_ts // DAY + 3) % 7
+        minute = (server_ts % DAY) // 60
+        return any(a <= minute < b for a, b in self.sessions[weekday])
+
+
+def next_tradable(server_ts: int, window: TradingWindow | None = None, hours: TradingHours | None = None, horizon_days: int = 8) -> int | None:
+    """The first moment at or after ``server_ts`` when both the market (``hours``) and the Session's
+    Trading Window are open, to the minute; None when there is none within ``horizon_days``.
+
+    Live Pending Entries and every Backtest use this one function, so a D1 signal at the 00:00
+    close is judged at the 01:00 reopen in both (spec D18)."""
+    window = window or TradingWindow(enabled=False)
+    hours = hours or TradingHours()
+
+    def ok(ts: int) -> bool:
+        return hours.is_open(ts) and window.is_open(ts)
+
+    if ok(server_ts):
+        return server_ts
+    ts = (server_ts // 60 + 1) * 60
+    end = server_ts + horizon_days * DAY
+    while ts <= end:
+        if ok(ts):
+            return ts
+        ts += 60
+    return None

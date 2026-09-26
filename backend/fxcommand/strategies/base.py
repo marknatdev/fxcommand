@@ -52,6 +52,9 @@ class Param:
     max: float | None = None
     step: float | None = None
     help: str = ""
+    # optimizer search range (Learning); None = the generic default/3 .. default*3 inside min/max
+    search_min: float | None = None
+    search_max: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -70,6 +73,11 @@ class Strategy:
     lookback: Callable[[dict], int]  # closed bars needed for a valid evaluation
     compute: Callable[[pd.DataFrame, dict], pd.DataFrame]  # vectorised signals (SIGNAL_COLUMNS + info_* columns)
     explain: Explain
+    # Candidates are generated only within one family, so Learning never mixes the classic
+    # strategies with the GOLD strategies (spec D25)
+    family: str = "classic"
+    # how long a Pending Entry for this strategy may wait for a tradable tick; None = until the next bar close
+    fill_window_s: int | None = None
 
     def defaults(self) -> dict:
         return {p.name: p.default for p in self.params}
@@ -121,6 +129,8 @@ class Strategy:
             "title": self.title,
             "description": self.description,
             "params": [p.to_dict() for p in self.params],
+            "family": self.family,
+            "fill_window_s": self.fill_window_s,
         }
 
 

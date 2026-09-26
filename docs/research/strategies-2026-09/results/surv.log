@@ -1,0 +1,15 @@
+US500Cash  D1 connorsL   | x1 n= 149 R=+0.142 sqn=+3.52 dd=3.0 +swap R=+0.079 | x2 n= 149 R=+0.132 sqn=+3.29 dd=3.1 +swap R=+0.070 | x3 n= 149 R=+0.122 sqn=+3.06 dd=3.3 +swap R=+0.060
+US100Cash  D1 connorsL   | x1 n= 138 R=+0.102 sqn=+2.25 dd=2.8 +swap R=+0.016 | x2 n= 138 R=+0.085 sqn=+1.87 dd=2.9 +swap R=-0.000 | x3 n= 138 R=+0.072 sqn=+1.59 dd=2.9 +swap R=-0.013
+US30Cash   D1 connorsL   | x1 n= 150 R=+0.072 sqn=+1.69 dd=2.0 +swap R=+0.014 | x2 n= 150 R=+0.063 sqn=+1.49 dd=2.0 +swap R=+0.005 | x3 n= 150 R=+0.055 sqn=+1.29 dd=2.1 +swap R=-0.004
+JP225Cash  D1 connorsL   | x1 n= 123 R=+0.083 sqn=+1.91 dd=2.5 +swap R=+0.065 | x2 n= 123 R=+0.076 sqn=+1.76 dd=2.7 +swap R=+0.058 | x3 n= 123 R=+0.069 sqn=+1.61 dd=2.9 +swap R=+0.052
+GER40Cash  D1 connorsL   | x1 n= 123 R=+0.062 sqn=+1.41 dd=3.9 +swap R=+0.029 | x2 n= 123 R=+0.057 sqn=+1.30 dd=3.9 +swap R=+0.024 | x3 n= 123 R=+0.052 sqn=+1.18 dd=4.0 +swap R=+0.019
+UK100Cash  D1 connorsL   | x1 n= 115 R=-0.024 sqn=-0.55 dd=4.7 +swap R=-0.068 | x2 n= 115 R=-0.033 sqn=-0.77 dd=5.5 +swap R=-0.077 | x3 n= 115 R=-0.048 sqn=-1.11 dd=7.0 +swap R=-0.092
+GOLD       D1 connorsL   | x1 n=  98 R=+0.010 sqn=+0.21 dd=4.4 +swap R=-0.071 | x2 n=  99 R=+0.001 sqn=+0.02 dd=4.9 +swap R=-0.079 | x3 n=  99 R=-0.010 sqn=-0.20 dd=5.3 +swap R=-0.089
+BTCUSD     H4 ema50/200  | x1 n=  71 R=+2.549 sqn=+1.54 dd=12.5 +swap R=-0.800 | x2 n=  72 R=+2.469 sqn=+1.52 dd=12.6 +swap R=+1.241 | x3 n=  74 R=+2.233 sqn=+1.41 dd=14.0 +swap R=+1.162
+GOLD       H4 ema50/200  | x1 n=  93 R=+0.758 sqn=+1.53 dd=24.6 +swap R=+0.153 | x2 n=  95 R=+0.745 sqn=+1.54 dd=23.2 +swap R=+0.161 | x3 n=  96 R=+0.715 sqn=+1.49 dd=23.4 +swap R=+0.137
+US100Cash  H4 ema50/200  | x1 n=  63 R=+0.426 sqn=+1.18 dd=10.2 +swap R=-0.594 | x2 n=  64 R=+0.307 sqn=+0.88 dd=10.2 +swap R=-0.579 | x3 n=  65 R=+0.194 sqn=+0.57 dd=10.2 +swap R=-0.620
+OILCash    D1 turtle     | x1 n=  63 R=+0.412 sqn=+1.24 dd=7.5 +swap R=+0.412 | x2 n=  63 R=+0.404 sqn=+1.22 dd=7.6 +swap R=+0.404 | x3 n=  63 R=+0.394 sqn=+1.19 dd=7.7 +swap R=+0.394
+US500Cash  D1 pullback   | x1 n=  66 R=+0.223 sqn=+1.44 dd=6.7 +swap R=-0.057 | x2 n=  66 R=+0.224 sqn=+1.46 dd=6.7 +swap R=-0.056 | x3 n=  66 R=+0.224 sqn=+1.46 dd=6.7 +swap R=-0.055
+US100Cash  H4 pullback   | x1 n= 261 R=+0.130 sqn=+1.04 dd=14.5 +swap R=+0.007 | x2 n= 263 R=+0.112 sqn=+0.90 dd=14.5 +swap R=-0.015 | x3 n= 263 R=+0.084 sqn=+0.67 dd=14.5 +swap R=-0.042
+EURUSD     H4 ema50/200  | x1 n= 108 R=+0.343 sqn=+0.83 dd=18.1 +swap R=+0.253 | x2 n= 110 R=+0.150 sqn=+0.39 dd=32.1 +swap R=+0.074 | x3 n= 112 R=+0.113 sqn=+0.30 dd=35.3 +swap R=+0.040
+BTCUSD     D1 turtle     | x1 n=  76 R=+0.551 sqn=+0.84 dd=51.9 +swap R=-1.843 | x2 n= 100 R=-0.535 sqn=-1.03 dd=139.3 +swap R=-1.381 | x3 n= 104 R=-1.246 sqn=-2.28 dd=213.6 +swap R=-1.979

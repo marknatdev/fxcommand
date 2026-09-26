@@ -152,6 +152,27 @@ An optional per-Session rule that closes its positions at a set Friday server ti
 **Notifier**:
 Where Alerts are delivered outside the application (Telegram), so the operator hears about them when the dashboard is not open.
 
+### Strategy evidence
+
+**Strategy Family**:
+A group of Strategies that Learning may search across. A Candidate is only ever drawn from its Champion's family, so the classic Strategies and the GOLD Strategies never replace each other.
+
+**Trading Hours**:
+When the Broker quotes a Symbol, per weekday, in server time (GOLD is shut 00:00–01:00 every day and all weekend). Different from the Trading Window, which is the operator's choice of when a Session may open positions.
+
+**Next Tradable Time**:
+The first moment at or after a given time when both the Trading Hours and the Trading Window are open. A signal that arrives while either is shut is acted on then.
+
+**Fill Window**:
+How long after the Next Tradable Time a Strategy's entry may still be sent. Past it the entry is dropped, because the edge it was meant to capture has gone.
+
+**Cost Model**:
+The costs a Backtest charges a trade: spread, slippage and overnight swap, scaled to the price at the time so older, cheaper years are not overcharged.
+
+**Cost Check**:
+The cost of one round trip (spread and slippage) as a share of an Assignment's stop, in R. An Assignment above the limit cannot start unless the operator overrides it. Swap is shown beside it but never blocks.
+_Avoid_: spread filter (that is the Risk Profile's per-order maximum spread)
+
 ## Relationships
 
 - An **Account** has many **Sessions**; a **Session** belongs to exactly one **Account**.

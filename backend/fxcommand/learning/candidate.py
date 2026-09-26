@@ -45,7 +45,8 @@ class Candidate:
 
 
 def random_candidate(strategy: str, rng: np.random.Generator) -> Candidate:
-    """Log-uniform within [default/3, default*3], clipped to each parameter's bounds."""
+    """Log-uniform within the parameter's search range: its own search bounds when it declares them,
+    otherwise [default/3, default*3], always clipped to the parameter's bounds."""
     s = get_strategy(strategy)
     out = {}
     for p in s.params:
@@ -53,8 +54,14 @@ def random_candidate(strategy: str, rng: np.random.Generator) -> Candidate:
             out[p.name] = bool(rng.random() < 0.5)
             continue
         d = float(p.default)
-        lo = max(float(p.min if p.min is not None else 0), d / 3 if d > 0 else 0)
-        hi = min(float(p.max if p.max is not None else d * 3), d * 3 if d > 0 else 10)
+        if p.search_min is not None and p.search_max is not None:
+            lo, hi = float(p.search_min), float(p.search_max)
+            if lo == hi:
+                out[p.name] = int(round(lo)) if p.type == "int" else lo
+                continue
+        else:
+            lo = max(float(p.min if p.min is not None else 0), d / 3 if d > 0 else 0)
+            hi = min(float(p.max if p.max is not None else d * 3), d * 3 if d > 0 else 10)
         v = float(np.exp(rng.uniform(np.log(max(lo, 1e-3)), np.log(max(hi, lo + 1e-3)))))
         out[p.name] = int(round(v)) if p.type == "int" else round(v, 2)
     return _fix(strategy, out)
@@ -80,22 +87,33 @@ def perturb(c: Candidate, rng: np.random.Generator, scale: float = 0.4) -> Candi
 
 
 def _fix(strategy: str, params: dict) -> Candidate:
-    """Clamp to bounds and repair relations between params (e.g. fast < slow)."""
-    resolved = get_strategy(strategy).resolve(params)
+    """Clamp to bounds (and to declared search ranges) and repair relations between params (e.g. fast < slow)."""
+    s = get_strategy(strategy)
+    resolved = s.resolve(params)
+    for p in s.params:
+        if p.type != "bool" and p.search_min is not None and p.search_max is not None:
+            v = min(max(float(resolved[p.name]), float(p.search_min)), float(p.search_max))
+            resolved[p.name] = int(round(v)) if p.type == "int" else v
     if strategy == "ema_cross" and resolved["fast"] >= resolved["slow"]:
         resolved["slow"] = resolved["fast"] + max(2, resolved["fast"] // 2)
     if strategy == "donchian_breakout" and resolved["exit_period"] >= resolved["period"]:
         resolved["exit_period"] = max(0, resolved["period"] // 2)
     if strategy == "rsi_reversion" and resolved["oversold"] >= resolved["overbought"]:
         resolved["oversold"], resolved["overbought"] = 30.0, 70.0
+    if strategy == "trend_breakout" and resolved["exit"] >= resolved["entry"]:
+        resolved["exit"] = max(2, int(resolved["entry"] * 0.4))
+    if strategy == "session_drift" and resolved["exit_hour"] <= resolved["entry_hour"]:
+        resolved["exit_hour"] = min(23, resolved["entry_hour"] + 3)
     return Candidate.of(strategy, resolved)
 
 
 def generate(champion: Candidate, n: int, rng: np.random.Generator, local_share: float = 0.7) -> list[Candidate]:
-    """``n`` distinct Candidates: mostly neighbours of the Champion, the rest random across all Strategies."""
+    """``n`` distinct Candidates: mostly neighbours of the Champion, the rest random across the Strategies
+    of the Champion's family (the classic strategies and the GOLD strategies never mix)."""
     seen = {champion.key}
     out: list[Candidate] = []
-    families = list(STRATEGIES)
+    family = get_strategy(champion.strategy).family
+    families = [k for k, s in STRATEGIES.items() if s.family == family]
     attempts = 0
     while len(out) < n and attempts < n * 20:
         attempts += 1
