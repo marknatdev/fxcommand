@@ -138,8 +138,15 @@ async def test_paper_session_on_the_real_feed(tmp_path):
     mgr = SessionManager(thread, store, Journal(store, bus), bus)
     try:
         await mgr.tick_once()
-        if mgr.now - (await thread.run(lambda b: b.tick("EURUSD"))).time > 120:
-            pytest.skip("market closed: no fresh EURUSD quotes")
+        # MT5 has no server clock (server time is the latest tick), so a closed market looks fresh:
+        # wait for the EURUSD quote to move instead
+        first = (await thread.run(lambda b: b.tick("EURUSD"))).time
+        for _ in range(90):
+            if (await thread.run(lambda b: b.tick("EURUSD"))).time != first:
+                break
+            await asyncio.sleep(1.0)
+        else:
+            pytest.skip("market closed: the EURUSD quote did not move for 90 s")
         fast = {"fast": 2, "slow": 3, "atr_period": 5, "sl_atr": 3.0, "tp_atr": 6.0}
         names = await thread.run(lambda b: b.symbols())
         symbols = [x for x in ("EURUSD", "GBPUSD", "USDJPY") if x in names]  # three chances per bar close
