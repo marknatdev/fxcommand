@@ -37,7 +37,7 @@ export default function SessionDetail() {
   if (!s) return null;
   const live = snapshot?.sessions.find((x) => x.id === id);
   const status = live?.status ?? s.status;
-  const positions = snapshot ? snapshot.positions.filter((p) => p.magic === s.magic) : s.positions ?? [];
+  const positions = snapshot ? snapshot.positions.filter((p) => p.session_id === s.id) : s.positions ?? [];
   const sessionTrades = (bars.data?.trades ?? []).filter((t) => t.session_id === s.id);
 
   return (
@@ -50,7 +50,7 @@ export default function SessionDetail() {
         subtitle={
           <span className="flex flex-wrap items-center gap-2">
             <StatusBadge status={status} />
-            <span className="num">magic {s.magic}</span>·<span>{s.window_text}</span>
+            <span className="num">magic {(s.magics ?? [s.magic]).join(", ")}</span>·<span>{s.window_text}</span>
             {s.auto_resume && <Badge tone="info">auto-resume</Badge>}
             {s.execution === "paper" && <Badge tone="accent" testId="detail-paper">PAPER — nothing sent to the account</Badge>}
             {s.weekend_close && <Badge>closes Fri {s.weekend_close_time}</Badge>}

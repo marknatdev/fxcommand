@@ -229,7 +229,7 @@ async def test_no_auto_promotion_on_a_live_account(tmp_path):
     with pytest.raises(DomainError):
         h.L.set_auto_promote(s.id, "EURUSD", True, is_live=True)
     # even if the flag were set and an automatic change queued, the engine refuses it on a live account
-    h.L.repo.set_auto_promote(s.id, "EURUSD", True)
+    h.L.repo.set_auto_promote(s.id, "EURUSD", True, "M1")
     champ = h.L.champion_of(h.assignment(s))
     better = Candidate.of("donchian_breakout", {"period": 12})
     add_challenger(h, better, started=MON_08)
@@ -237,7 +237,7 @@ async def test_no_auto_promotion_on_a_live_account(tmp_path):
     add_shadows(h, champ.key, [0.2, -1, 0.5, -1] * 9, MON_08)
     await h.bars(5)
     assert h.L.pending(s.id, "EURUSD") is None  # never queued (is_demo False)
-    h.L.repo.add_pending(session_id=s.id, symbol="EURUSD", candidate_key=better.key, kind="auto_promotion")
+    h.L.repo.add_pending(session_id=s.id, symbol="EURUSD", timeframe="M1", candidate_key=better.key, kind="auto_promotion")
     await h.bars(60)
     assert h.assignment(s).strategy == "ema_cross"
     assert all(v.kind != "auto_promotion" for v in h.L.repo.versions(s.id, "EURUSD"))
@@ -256,7 +256,7 @@ async def test_auto_rollback_after_bad_live_run(lh):
 
     for i in range(20):
         rec = lh.L.repo.add_signal(session_id=s.id, symbol="EURUSD", timeframe="M1", strategy="donchian_breakout", candidate_key=new.key, ts=MON_08 + 60 * i, side="long", ticket=900_000 + i)
-        tr = TradeRow(ticket=900_000 + i, session_id=s.id, magic=s.magic, symbol="EURUSD", side="long", volume=0.1, open_time=MON_08, open_price=1, status="closed", profit=-50.0, risk_amount=50.0)
+        tr = TradeRow(ticket=900_000 + i, session_id=s.id, magic=s.magic, symbol="EURUSD", timeframe="M1", side="long", volume=0.1, open_time=MON_08, open_price=1, status="closed", profit=-50.0, risk_amount=50.0)
         lh.L.on_live_close(tr, s)
         assert rec.id
     p = lh.L.pending(s.id, "EURUSD")
@@ -271,7 +271,7 @@ async def test_active_filter_blocks_live_entries_but_shadow_continues(lh):
     await lh.mgr.start(s.id)
     await lh.bars(80)
     assert "filter" in lh.kinds(s.id) and "order" not in lh.kinds(s.id)
-    assert lh.sim.positions(s.magic) == []
+    assert lh.positions(s) == []
     champ = lh.L.champion_of(lh.assignment(s))
     assert lh.L.repo.shadow_closed("EURUSD", "M1", champ.key)  # counterfactual evidence keeps accruing
     assert {r.decision for r in lh.L.repo.signals("EURUSD", "M1")} == {"blocked"}
@@ -348,7 +348,7 @@ async def test_promotion_applies_even_for_an_always_in_market_champion(lh):
     await lh.mgr.start(s.id)
     for _ in range(100):
         await lh.bars(1)
-        if lh.sim.positions(s.magic):
+        if lh.positions(s):
             break
     challenger = Candidate.of("donchian_breakout", {"period": 8, "exit_period": 4, "atr_period": 5, "sl_atr": 3, "tp_atr": 6})
     ch = add_challenger(lh, challenger)
@@ -405,7 +405,7 @@ async def test_auto_rollback_applies_on_a_live_account(tmp_path):
     add_shadows(h, old.key, [0.5, -1, 1.0] * 5, MON_08)
     for i in range(20):
         h.L.repo.add_signal(session_id=s.id, symbol="EURUSD", timeframe="M1", strategy=new.strategy, candidate_key=new.key, ts=MON_08 + 60 * i, side="long", ticket=800_000 + i)
-        h.L.on_live_close(TradeRow(ticket=800_000 + i, session_id=s.id, magic=s.magic, symbol="EURUSD", side="long", volume=0.1, open_time=MON_08, open_price=1, status="closed", profit=-50.0, risk_amount=50.0), s)
+        h.L.on_live_close(TradeRow(ticket=800_000 + i, session_id=s.id, magic=s.magic, symbol="EURUSD", timeframe="M1", side="long", volume=0.1, open_time=MON_08, open_price=1, status="closed", profit=-50.0, risk_amount=50.0), s)
     assert h.L.pending(s.id, "EURUSD").kind == "auto_rollback"
     for _ in range(100):
         await h.bars(1)

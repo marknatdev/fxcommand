@@ -24,7 +24,7 @@ A named, configured run of the engine against one Account, trading a set of Assi
 _Avoid_: bot, run, market session (London/New York — see Trading Window)
 
 **Assignment**:
-One Symbol inside a Session, bound to one Strategy (with its parameters), one Timeframe and one Risk Profile. A Symbol appears at most once per Session.
+One Symbol inside a Session, bound to one Strategy (with its parameters), one Timeframe and one Risk Profile. A Symbol appears at most once per Timeframe in a Session, so GOLD may trade on H4 and H1 side by side.
 _Avoid_: leg, slot, pair config
 
 **Timeframe**:
@@ -51,7 +51,7 @@ The hours of the Broker's server time during which a Session may open new positi
 _Avoid_: market session, trading hours
 
 **Magic Number**:
-The unique number stamped on every order a Session sends. It is how the system tells which positions belong to which Session, and which positions it owns at all.
+The unique number stamped on every order an Assignment sends. Each Assignment has its own, kept for the same Session, Symbol, Strategy and Timeframe across edits and never reused. A Session's positions are those carrying any of its Assignments' Magic Numbers, and a position carrying none of them is not the system's.
 
 **Position**:
 An open trade on the Account. An **owned position** carries a Magic Number of some Session; any other position is **foreign** and is never touched.
@@ -177,8 +177,8 @@ _Avoid_: spread filter (that is the Risk Profile's per-order maximum spread)
 
 - An **Account** has many **Sessions**; a **Session** belongs to exactly one **Account**.
 - A **Session** has one or more **Assignments**; each **Assignment** has exactly one **Symbol**, **Strategy**, **Timeframe** and **Risk Profile**.
-- A **Symbol** can be in at most one *running or paused* **Session** at a time.
-- A **Session** has exactly one **Magic Number**, never reused.
+- An **Arena** (a Symbol on one Timeframe) can be in at most one *running or paused* **Session** at a time; the same Symbol on another Timeframe can run elsewhere.
+- An **Assignment** has exactly one **Magic Number**, never reused; a **Session** has one per **Assignment**.
 - An **Assignment** holds at most one open **Position** at a time.
 - Every **Signal** passes the **Signal Filter** (once it is active) and then the **Risk Gate**; only approved ones become orders.
 - An **Assignment** trades in exactly one **Arena** and has exactly one **Champion**; an **Arena** has at most three **Challengers**.

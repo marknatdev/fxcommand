@@ -67,9 +67,11 @@ class LearningRepo:
             return {r.key: Candidate.of(r.strategy, r.params) for r in rows}
 
     # ------------------------------------------------------ champion versions
-    def versions(self, session_id: int, symbol: str) -> list[ChampionVersionRow]:
+    def versions(self, session_id: int, symbol: str, timeframe: str | None = None) -> list[ChampionVersionRow]:
         with self._db() as db:
             q = select(ChampionVersionRow).where(ChampionVersionRow.session_id == session_id, ChampionVersionRow.symbol == symbol)
+            if timeframe is not None:
+                q = q.where(ChampionVersionRow.timeframe == timeframe)
             return list(db.exec(q.order_by(ChampionVersionRow.version)))
 
     def arena_versions(self, symbol: str, timeframe: str, limit: int = 50) -> list[ChampionVersionRow]:
@@ -78,24 +80,27 @@ class LearningRepo:
             return list(db.exec(q.order_by(ChampionVersionRow.id.desc()).limit(limit)))
 
     def add_version(self, **fields: Any) -> ChampionVersionRow:
-        prior = self.versions(fields["session_id"], fields["symbol"])
+        prior = self.versions(fields["session_id"], fields["symbol"], fields.get("timeframe"))
         fields.setdefault("version", (prior[-1].version + 1) if prior else 1)
         fields.setdefault("previous_key", prior[-1].candidate_key if prior else None)
         return self._save(ChampionVersionRow(wall=time.time(), **fields))
 
     # ----------------------------------------------------------------- slots
-    def slot(self, session_id: int, symbol: str) -> LearningSlotRow:
+    def slot(self, session_id: int, symbol: str, timeframe: str) -> LearningSlotRow:
+        """Per Assignment slot, keyed (session, symbol, timeframe): a Symbol may appear once per
+        Timeframe in a Session (ADR 0009)."""
         with self._db() as db:
-            row = db.exec(select(LearningSlotRow).where(LearningSlotRow.session_id == session_id, LearningSlotRow.symbol == symbol)).first()
+            q = select(LearningSlotRow).where(LearningSlotRow.session_id == session_id, LearningSlotRow.symbol == symbol)
+            row = db.exec(q.where(LearningSlotRow.timeframe == timeframe)).first()
             if row is None:
-                row = LearningSlotRow(session_id=session_id, symbol=symbol)
+                row = LearningSlotRow(session_id=session_id, symbol=symbol, timeframe=timeframe)
                 db.add(row)
                 db.commit()
                 db.refresh(row)
             return row
 
-    def set_auto_promote(self, session_id: int, symbol: str, enabled: bool) -> LearningSlotRow:
-        row = self.slot(session_id, symbol)
+    def set_auto_promote(self, session_id: int, symbol: str, enabled: bool, timeframe: str) -> LearningSlotRow:
+        row = self.slot(session_id, symbol, timeframe)
         return self._update(LearningSlotRow, row.id, auto_promote=bool(enabled))
 
     # ----------------------------------------------------------- challengers
@@ -218,11 +223,12 @@ class LearningRepo:
             q = select(SignalRecordRow).where(SignalRecordRow.symbol == symbol, SignalRecordRow.timeframe == timeframe)
             return list(db.exec(q.order_by(SignalRecordRow.id.desc()).limit(limit)))
 
-    def live_rs(self, session_id: int, symbol: str, since: int) -> list[float]:
+    def live_rs(self, session_id: int, symbol: str, since: int, timeframe: str) -> list[float]:
         with self._db() as db:
             q = select(SignalRecordRow).where(
                 SignalRecordRow.session_id == session_id,
                 SignalRecordRow.symbol == symbol,
+                SignalRecordRow.timeframe == timeframe,
                 SignalRecordRow.ts >= since,
                 SignalRecordRow.r != None,  # noqa: E711
             )
@@ -235,6 +241,7 @@ class LearningRepo:
                 select(PendingChangeRow).where(
                     PendingChangeRow.session_id == fields["session_id"],
                     PendingChangeRow.symbol == fields["symbol"],
+                    PendingChangeRow.timeframe == fields["timeframe"],
                     PendingChangeRow.status == "pending",
                 )
             ):
@@ -243,11 +250,14 @@ class LearningRepo:
             db.commit()
         return self._save(PendingChangeRow(created_wall=time.time(), **fields))
 
-    def pending(self, session_id: int, symbol: str) -> PendingChangeRow | None:
+    def pending(self, session_id: int, symbol: str, timeframe: str | None = None) -> PendingChangeRow | None:
+        """None = any timeframe (only unambiguous while the Symbol appears once in the Session)."""
         with self._db() as db:
             q = select(PendingChangeRow).where(
                 PendingChangeRow.session_id == session_id, PendingChangeRow.symbol == symbol, PendingChangeRow.status == "pending"
             )
+            if timeframe is not None:
+                q = q.where(PendingChangeRow.timeframe == timeframe)
             return db.exec(q).first()
 
     def all_pending(self) -> list[PendingChangeRow]:

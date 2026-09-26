@@ -15,7 +15,19 @@ from sqlmodel import Session as DB
 from sqlmodel import SQLModel, create_engine, select
 
 from ..risk import RiskLimits, RiskProfile, TradingWindow
-from .models import AssignmentRow, EquityRow, JournalRow, PaperPositionRow, RiskProfileRow, SessionRow, SettingRow, TradeRow
+from .models import (
+    AssignmentRow,
+    EquityRow,
+    JournalRow,
+    LearningSlotRow,
+    MagicIdentityRow,
+    PaperPositionRow,
+    PendingChangeRow,
+    RiskProfileRow,
+    SessionRow,
+    SettingRow,
+    TradeRow,
+)
 
 FIRST_MAGIC = 770_001
 
@@ -64,6 +76,7 @@ class Store:
         SQLModel.metadata.create_all(self.engine)
         self._add_missing_columns()
         self._seed()
+        self._migrate_magics()
 
     def _add_missing_columns(self) -> None:
         """``create_all`` never alters an existing table. Add columns that newer models declare, with
@@ -178,10 +191,74 @@ class Store:
     def allocate_magic(self) -> int:
         magic = int(self.get_setting("next_magic", FIRST_MAGIC))
         with self._db() as db:
-            used = db.exec(select(func.max(SessionRow.magic))).one()
-        magic = max(magic, (used or 0) + 1)
+            used = max(db.exec(select(func.max(SessionRow.magic))).one() or 0, db.exec(select(func.max(MagicIdentityRow.magic))).one() or 0)
+        magic = max(magic, used + 1)
         self.set_setting("next_magic", magic + 1)
         return magic
+
+    # ------------------------------------------------ magic identities (ADR 0009)
+    def magic_for(self, session_id: int, symbol: str, strategy: str, timeframe: str, prefer: int | None = None) -> int:
+        """The Magic Number of an Assignment identity, created on first use. ``prefer`` (a Session's
+        own magic) is taken when no identity holds it yet: a new Session's first Assignment and the
+        migration of Sessions from before ADR 0009."""
+        with self._db() as db:
+            row = db.exec(
+                select(MagicIdentityRow).where(
+                    MagicIdentityRow.session_id == session_id,
+                    MagicIdentityRow.symbol == symbol,
+                    MagicIdentityRow.strategy == strategy,
+                    MagicIdentityRow.timeframe == timeframe,
+                )
+            ).first()
+            if row is not None:
+                return row.magic
+            taken = prefer is not None and db.exec(select(MagicIdentityRow).where(MagicIdentityRow.magic == prefer)).first() is not None
+        magic = prefer if prefer is not None and not taken else self.allocate_magic()
+        with self._db() as db:
+            db.add(MagicIdentityRow(session_id=session_id, symbol=symbol, strategy=strategy, timeframe=timeframe, magic=magic, created_wall=time.time()))
+            db.commit()
+        return magic
+
+    def magic_identities(self) -> dict[int, MagicIdentityRow]:
+        """magic -> identity, for every identity ever created."""
+        with self._db() as db:
+            return {r.magic: r for r in db.exec(select(MagicIdentityRow))}
+
+    def session_magics(self, session_id: int) -> set[int]:
+        """Every magic the Session's positions may carry: its own and each identity it ever had."""
+        with self._db() as db:
+            own = db.get(SessionRow, session_id)
+            ids = set(db.exec(select(MagicIdentityRow.magic).where(MagicIdentityRow.session_id == session_id)))
+        return ids | ({own.magic} if own else set())
+
+    def _bind_magics(self, session: SessionRow) -> None:
+        """Stamp each Assignment with its identity's magic. The first Assignment gets the Session's own
+        magic, unless an identity already holds it."""
+        for i, a in enumerate(self.assignments(session.id)):
+            m = self.magic_for(session.id, a.symbol, a.strategy, a.timeframe, prefer=session.magic if i == 0 else None)
+            if a.magic != m:
+                self.update_assignment(a.id, magic=m)
+
+    def _migrate_magics(self) -> None:
+        """Sessions from before ADR 0009 had one magic: it moves to their first Assignment and the
+        others get new ones. Learning slots and pending changes gain the Assignment's timeframe
+        (a Symbol appeared once per Session then, so it is unambiguous). Idempotent."""
+        with self._db() as db:
+            unbound = {a.session_id for a in db.exec(select(AssignmentRow).where(AssignmentRow.magic == 0))}
+            sessions = [db.get(SessionRow, sid) for sid in sorted(unbound)]
+            tf = {(a.session_id, a.symbol): a.timeframe for a in db.exec(select(AssignmentRow))}
+            changed = False
+            for model in (LearningSlotRow, PendingChangeRow):
+                for row in db.exec(select(model).where(model.timeframe == "")):
+                    if (row.session_id, row.symbol) in tf:
+                        row.timeframe = tf[(row.session_id, row.symbol)]
+                        db.add(row)
+                        changed = True
+            if changed:
+                db.commit()
+        for sess in sessions:
+            if sess is not None:
+                self._bind_magics(sess)
 
     # ---------------------------------------------------------------- sessions
     def list_sessions(self) -> list[SessionRow]:
@@ -200,9 +277,15 @@ class Store:
             return db.exec(select(SessionRow).where(SessionRow.name == name)).first()
 
     def all_magics(self) -> dict[int, int]:
-        """magic -> session id, for every Session ever created (ownership test)."""
+        """magic -> session id for every existing Session: its own magic and every Assignment magic
+        it ever had (ownership test: the Kill Switch, global counts, Orphans)."""
         with self._db() as db:
-            return {m: i for i, m in db.exec(select(SessionRow.id, SessionRow.magic))}
+            out = {m: i for i, m in db.exec(select(SessionRow.id, SessionRow.magic))}
+            ids = set(out.values())
+            for r in db.exec(select(MagicIdentityRow)):
+                if r.session_id in ids:
+                    out[r.magic] = r.session_id
+            return out
 
     def save_session(self, row: SessionRow, assignments: list[AssignmentRow] | None = None) -> SessionRow:
         with self._db() as db:
@@ -218,7 +301,9 @@ class Store:
                     db.add(a)
             db.commit()
             db.refresh(row)
-            return row
+        if assignments is not None:
+            self._bind_magics(row)
+        return row
 
     def update_session_fields(self, session_id: int, **fields: Any) -> SessionRow:
         with self._db() as db:
@@ -239,6 +324,11 @@ class Store:
                 raise NotFound(f"session {session_id} not found")
             for a in db.exec(select(AssignmentRow).where(AssignmentRow.session_id == session_id)):
                 db.delete(a)
+            # SQLite may give a later Session this id again: its identities must not match that one.
+            # They stay (their magics are never reused) under the negated id.
+            for ident in db.exec(select(MagicIdentityRow).where(MagicIdentityRow.session_id == session_id)):
+                ident.session_id = -session_id
+                db.add(ident)
             db.delete(row)
             db.commit()
 
@@ -252,7 +342,11 @@ class Store:
             db.add(row)
             db.commit()
             db.refresh(row)
-            return row
+        if {"symbol", "strategy", "timeframe"} & fields.keys():  # a new identity (e.g. a Promotion)
+            m = self.magic_for(row.session_id, row.symbol, row.strategy, row.timeframe)
+            if m != row.magic:
+                return self.update_assignment(assignment_id, magic=m)
+        return row
 
     def assignments(self, session_id: int) -> list[AssignmentRow]:
         with self._db() as db:

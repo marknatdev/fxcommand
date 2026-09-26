@@ -35,7 +35,7 @@ test("a Paper session trades on real prices without touching the account", async
   await expect(dialog).toContainText("PAPER — nothing is sent to the account");
   await dialog.getByTestId("confirm-button").click();
   await expect(page.getByTestId("session-status").first()).toHaveText(/running/i);
-  await untilPosition(request, s.magic);
+  await untilPosition(request, s.id);
   await page.goto("/positions");
   await expect(page.getByTestId("paper-badge").first()).toBeVisible();
   const after = await api<any>(request, "GET", "/sim/state");
@@ -43,7 +43,7 @@ test("a Paper session trades on real prices without touching the account", async
   expect(after.open_positions).toBe(before.open_positions);
   // stopping a Paper session always closes its paper positions
   await api(request, "POST", `/sessions/${id}/stop`, { close_positions: false });
-  const left = (await api<any[]>(request, "GET", "/positions")).filter((p) => p.magic === s.magic);
+  const left = (await api<any[]>(request, "GET", "/positions")).filter((p) => p.session_id === s.id);
   expect(left).toEqual([]);
   expect(errors).toEqual([]);
 });
@@ -52,11 +52,11 @@ test("an uncertain order is not retried and the resulting position is adopted", 
   const s = await createSession(request, "E2E Uncertain", ["EURUSD"], { daily_loss_pct: 50 });
   await api(request, "POST", `/sessions/${s.id}/start`);
   await api(request, "POST", "/sim/fault", { kind: "timeout_filled" });
-  await untilPosition(request, s.magic);
+  await untilPosition(request, s.id);
   await page.goto(`/sessions/${s.id}`);
   await page.getByTestId("tab-journal").click();
   await expect(page.getByTestId("session-journal")).toContainText("UNCERTAIN");
-  const pos = (await api<any[]>(request, "GET", "/positions")).filter((p) => p.magic === s.magic);
+  const pos = (await api<any[]>(request, "GET", "/positions")).filter((p) => p.session_id === s.id);
   expect(pos).toHaveLength(1);
   const trades = (await api<any>(request, "GET", `/trades?session_id=${s.id}`)).trades;
   expect(trades.find((t: any) => t.ticket === pos[0].ticket).adopted).toBe(true);

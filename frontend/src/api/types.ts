@@ -91,6 +91,7 @@ export interface SessionSummary {
   name: string;
   status: SessionStatus;
   magic: number;
+  magics: number[]; // one per Assignment (ADR 0009); magic is the first one
   open_positions: number;
   day_pnl: number;
   stop_reason: string;
@@ -218,6 +219,7 @@ export interface Session {
   name: string;
   status: SessionStatus;
   magic: number;
+  magics?: number[]; // one per Assignment (ADR 0009); magic is the first one
   auto_resume: boolean;
   window: TradingWindow;
   window_text: string;

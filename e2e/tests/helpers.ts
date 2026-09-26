@@ -25,15 +25,16 @@ export async function createSession(
 export const advance = (request: APIRequestContext, bars: number) => api(request, "POST", "/sim/advance", { bars });
 export const shock = (request: APIRequestContext, symbol: string, pct: number) => api(request, "POST", "/sim/shock", { symbol, pct });
 
-/** Advance bar by bar until the session holds a position (fast EMA on M1 trades within a few bars). */
-export async function untilPosition(request: APIRequestContext, magic: number, maxBars = 150) {
+/** Advance bar by bar until the session holds a position (fast EMA on M1 trades within a few bars).
+ *  Positions belong to a Session by any of its Assignment magics (ADR 0009), so match on session_id. */
+export async function untilPosition(request: APIRequestContext, sessionId: number, maxBars = 150) {
   for (let i = 0; i < maxBars; i++) {
     await advance(request, 1);
     const positions = await api<any[]>(request, "GET", "/positions");
-    const mine = positions.filter((p) => p.magic === magic);
+    const mine = positions.filter((p) => p.session_id === sessionId);
     if (mine.length) return mine;
   }
-  throw new Error(`no position for magic ${magic} after ${maxBars} bars`);
+  throw new Error(`no position for session ${sessionId} after ${maxBars} bars`);
 }
 
 export async function stopAllSessions(request: APIRequestContext) {

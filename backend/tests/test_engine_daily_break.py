@@ -30,7 +30,7 @@ async def gold_position(tmp_path):
                   assignments=[AssignmentIn(symbol="GOLD", timeframe="M1", strategy="ema_cross", params=FAST, risk_profile_id=gold.id)])
     )
     await h.mgr.start(s.id)
-    while not h.sim.positions(s.magic):
+    while not h.positions(s):
         assert clock(h) < 23 * 60 + 54, "no GOLD position before the rollover"
         await h.bars(1)
     return h, s
@@ -43,7 +43,7 @@ def entries(h, sid, since, kinds):
 async def test_a_stop_move_refused_in_the_break_is_journaled_once_and_done_after_the_reopen(tmp_path):
     h, s = await gold_position(tmp_path)
     await until(h, 23, 56)
-    [p] = h.sim.positions(s.magic)
+    [p] = h.positions(s)
     r = abs(p.price_open - p.sl)
     move = 1.5 * r / p.price_current * (1 if p.side == "long" else -1)
     await h.shock("GOLD", move)  # the last bar before the break: breakeven/trailing now wants to act
@@ -55,7 +55,7 @@ async def test_a_stop_move_refused_in_the_break_is_journaled_once_and_done_after
     assert all("market closed" in j.message for j in noisy if j.kind == "order_fail")
     reopen = h.sim.now
     await h.bars(10)
-    if h.sim.positions(s.magic):  # still open: it was managed after the reopen
+    if h.positions(s):  # still open: it was managed after the reopen
         assert entries(h, s.id, reopen, {"modify"}), "the stop was not moved after the reopen"
     h.close()
 
@@ -67,6 +67,6 @@ async def test_kill_switch_in_the_break_raises_one_alert_per_position(tmp_path):
     await h.mgr.kill_all()
     await h.bars(10)
     fails = [j for j in entries(h, s.id, t0, {"order_fail"}) if j.message.startswith("Close #")]
-    assert len(fails) == len(h.sim.positions(s.magic)) == 1  # left protected by its server-side stop
+    assert len(fails) == len(h.positions(s)) == 1  # left protected by its server-side stop
     await until(h, 1, 5)
     h.close()

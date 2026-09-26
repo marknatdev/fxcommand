@@ -293,27 +293,28 @@ class LearningService:
         self.repo.update_signal(rec.id, r=round(trade.profit / trade.risk_amount, 5))
         if s is None:
             return
-        versions = self.repo.versions(s.id, trade.symbol)
+        tf = trade.timeframe
+        versions = self.repo.versions(s.id, trade.symbol, tf)
         last = versions[-1] if versions else None
         if not last or last.kind not in ("promotion", "auto_promotion") or not last.previous_key:
             return
-        if self.repo.pending(s.id, trade.symbol):
+        if self.repo.pending(s.id, trade.symbol, tf):
             return
-        live = self.repo.live_rs(s.id, trade.symbol, last.server_ts)
+        live = self.repo.live_rs(s.id, trade.symbol, last.server_ts, tf)
         old = self.repo.shadow_closed(trade.symbol, last.timeframe, last.previous_key, since=last.server_ts)
         if len(old) < 5:
             old = self.repo.shadow_closed(trade.symbol, last.timeframe, last.previous_key)[-50:]
         baseline = r_stats(x.r for x in old).mean if old else 0.0
         if should_rollback(live, baseline):
             self.repo.add_pending(
-                session_id=s.id, symbol=trade.symbol, candidate_key=last.previous_key, kind="auto_rollback",
+                session_id=s.id, symbol=trade.symbol, timeframe=tf, candidate_key=last.previous_key, kind="auto_rollback",
                 reason=f"last {len(live)} live trades averaged {sum(live[-20:]) / 20:+.2f}R vs previous champion {baseline:+.2f}R",
             )
             self._j("rollback", f"Auto-rollback queued for {trade.symbol}: promotion underperformed", s, trade.symbol, level="warn", alert=True)
 
     # ---------------------------------------------------- promotions & rollback
-    def pending(self, session_id: int, symbol: str) -> PendingChangeRow | None:
-        return self.repo.pending(session_id, symbol)
+    def pending(self, session_id: int, symbol: str, timeframe: str | None = None) -> PendingChangeRow | None:
+        return self.repo.pending(session_id, symbol, timeframe)
 
     def cancel(self, change: PendingChangeRow, reason: str) -> None:
         self.repo.update_pending(change.id, status="cancelled", reason=f"{change.reason} — cancelled: {reason}")
@@ -372,7 +373,7 @@ class LearningService:
         }
 
     def _consider_auto_promotion(self, s: SessionRow, a: AssignmentRow, champion: Candidate, is_demo: bool) -> None:
-        if not is_demo or not self.repo.slot(s.id, a.symbol).auto_promote or self.repo.pending(s.id, a.symbol):
+        if not is_demo or not self.repo.slot(s.id, a.symbol, a.timeframe).auto_promote or self.repo.pending(s.id, a.symbol, a.timeframe):
             return  # never automatic on a live account (checked again when applying)
         best = None
         for ch in self.repo.challengers(a.symbol, a.timeframe):
@@ -384,24 +385,32 @@ class LearningService:
         if best:
             ch, rep = best
             self.repo.add_pending(
-                session_id=s.id, symbol=a.symbol, candidate_key=ch.candidate_key, kind="auto_promotion", challenger_id=ch.id,
+                session_id=s.id, symbol=a.symbol, timeframe=a.timeframe, candidate_key=ch.candidate_key, kind="auto_promotion", challenger_id=ch.id,
                 reason=f"all Guardrails passed: shadow {rep['shadow']['mean']:+.2f}R/trade over {rep['shadow']['n']} trades vs champion {rep['champion_shadow']['mean']:+.2f}R",
             )
             self._j("promotion", f"Auto-promotion queued for {a.symbol} {a.timeframe} (applies when flat)", s, a.symbol)
 
     # ------------------------------------------------------------ operator commands
-    def _slot_assignment(self, session_id: int, symbol: str) -> tuple[SessionRow, AssignmentRow]:
+    def _slot_assignment(self, session_id: int, symbol: str, timeframe: str | None = None) -> tuple[SessionRow, AssignmentRow]:
+        """The Assignment for (symbol, timeframe). The timeframe may be left out while the Symbol
+        appears only once in the Session."""
         s = self.store.get_session(session_id)
-        a = next((x for x in self.store.assignments(session_id) if x.symbol == symbol), None)
-        if a is None:
+        same = [x for x in self.store.assignments(session_id) if x.symbol == symbol]
+        exact = [x for x in same if x.timeframe == timeframe]
+        if exact:
+            return s, exact[0]
+        if not same:
             raise DomainError("not_found", f"session {s.name!r} does not trade {symbol}", 404)
-        return s, a
+        if len(same) > 1:
+            tfs = ", ".join(x.timeframe for x in same)
+            raise DomainError("ambiguous_slot", f"session {s.name!r} trades {symbol} on {tfs}: say which timeframe", 422)
+        return s, same[0]
 
     def promote(self, challenger_id: int, session_id: int, force: bool = False) -> PendingChangeRow:
         ch = self.repo.challenger(challenger_id)
         if ch is None or ch.status != "active":
             raise DomainError("not_found", f"challenger {challenger_id} is not active", 404)
-        s, a = self._slot_assignment(session_id, ch.symbol)
+        s, a = self._slot_assignment(session_id, ch.symbol, ch.timeframe)
         if a.timeframe != ch.timeframe:
             raise DomainError("wrong_arena", f"{s.name} trades {a.symbol} on {a.timeframe}, the challenger is for {ch.timeframe}", 422)
         rep = self.challenger_report(ch, self.champion_of(a))
@@ -410,29 +419,29 @@ class LearningService:
             raise DomainError("guardrails_failed", "Guardrails not passed: " + "; ".join(failed), 409)
         cand = self.repo.candidate(ch.candidate_key)
         row = self.repo.add_pending(
-            session_id=s.id, symbol=a.symbol, candidate_key=ch.candidate_key, kind="promotion", challenger_id=ch.id,
+            session_id=s.id, symbol=a.symbol, timeframe=a.timeframe, candidate_key=ch.candidate_key, kind="promotion", challenger_id=ch.id,
             reason=("operator override of failed Guardrails" if not rep["promotable"] else "operator, all Guardrails passed"),
         )
         self._j("promotion", f"Promotion queued for {a.symbol} {a.timeframe}: {cand.label()} (applies when flat)", s, a.symbol)
         return row
 
-    def rollback(self, session_id: int, symbol: str) -> PendingChangeRow:
-        s, a = self._slot_assignment(session_id, symbol)
-        versions = self.repo.versions(session_id, symbol)
+    def rollback(self, session_id: int, symbol: str, timeframe: str | None = None) -> PendingChangeRow:
+        s, a = self._slot_assignment(session_id, symbol, timeframe)
+        versions = self.repo.versions(session_id, symbol, a.timeframe)
         target = next((v.previous_key for v in reversed(versions) if v.previous_key), None)
         if not target:
             raise DomainError("nothing_to_roll_back", f"{symbol} has no earlier Champion Version", 409)
-        row = self.repo.add_pending(session_id=s.id, symbol=symbol, candidate_key=target, kind="rollback", reason="operator")
+        row = self.repo.add_pending(session_id=s.id, symbol=symbol, timeframe=a.timeframe, candidate_key=target, kind="rollback", reason="operator")
         self._j("rollback", f"Rollback queued for {symbol}: back to {self.repo.candidate(target).label()} (applies when flat)", s, symbol)
         return row
 
-    def set_auto_promote(self, session_id: int, symbol: str, enabled: bool, is_live: bool) -> dict:
-        s, a = self._slot_assignment(session_id, symbol)
+    def set_auto_promote(self, session_id: int, symbol: str, enabled: bool, is_live: bool, timeframe: str | None = None) -> dict:
+        s, a = self._slot_assignment(session_id, symbol, timeframe)
         if enabled and is_live:
             raise DomainError("live_account", "auto-promotion is never allowed on a live account; promote manually", 409)
-        self.repo.set_auto_promote(session_id, symbol, enabled)
-        self._j("learning", f"Auto-promotion {'enabled' if enabled else 'disabled'} for {symbol}", s, symbol)
-        return {"session_id": session_id, "symbol": symbol, "auto_promote": enabled}
+        self.repo.set_auto_promote(session_id, symbol, enabled, a.timeframe)
+        self._j("learning", f"Auto-promotion {'enabled' if enabled else 'disabled'} for {symbol} {a.timeframe}", s, symbol)
+        return {"session_id": session_id, "symbol": symbol, "timeframe": a.timeframe, "auto_promote": enabled}
 
     # -------------------------------------------------------- session lifecycle
     def on_session_started(self, s: SessionRow, assigns: list[AssignmentRow], now: int) -> None:
@@ -440,8 +449,8 @@ class LearningService:
         for a in assigns:
             champ = self.champion_of(a)
             self.repo.ensure_candidate(champ)
-            self.repo.slot(s.id, a.symbol)
-            versions = self.repo.versions(s.id, a.symbol)
+            self.repo.slot(s.id, a.symbol, a.timeframe)
+            versions = self.repo.versions(s.id, a.symbol, a.timeframe)
             if not versions or versions[-1].candidate_key != champ.key:
                 kind = "initial" if not versions else "manual"
                 self.repo.add_version(session_id=s.id, symbol=a.symbol, timeframe=a.timeframe, candidate_key=champ.key, kind=kind, server_ts=now, reason="session start" if kind == "initial" else "edited in the session editor")
@@ -597,7 +606,7 @@ class LearningService:
             challengers.append({"id": ch.id, "candidate": c.to_dict(), "started_ts": ch.started_ts, "note": ch.note, "oos": ch.oos, "robust": ch.robust, **self.challenger_report(ch, champion)})
         runs = self.repo.runs(a.symbol, a.timeframe, limit=1)
         fstate = self._filter(a.symbol, a.timeframe, a.strategy)
-        pend = self.repo.pending(s.id, a.symbol)
+        pend = self.repo.pending(s.id, a.symbol, a.timeframe)
         return {
             "symbol": a.symbol,
             "timeframe": a.timeframe,
@@ -607,9 +616,9 @@ class LearningService:
             "filter": {k: v for k, v in fstate.to_dict().items() if k not in ("mean", "std")},
             "last_run": runs[0].model_dump(exclude={"result"}) if runs else None,
             "pending": pend.model_dump() if pend else None,
-            "auto_promote": self.repo.slot(s.id, a.symbol).auto_promote,
+            "auto_promote": self.repo.slot(s.id, a.symbol, a.timeframe).auto_promote,
             "auto_promote_allowed": not is_live,
-            "versions": len(self.repo.versions(s.id, a.symbol)),
+            "versions": len(self.repo.versions(s.id, a.symbol, a.timeframe)),
         }
 
     def arena(self, symbol: str, timeframe: str, is_live: bool) -> dict:

@@ -37,6 +37,11 @@ class Harness:
         await self.thread.run(lambda b: b.shock(symbol, pct))
         await self.mgr.tick_once()
 
+    def positions(self, s):
+        """The Session's positions on the sim Account, whichever Assignment magic they carry (ADR 0009)."""
+        magics = self.store.session_magics(s.id)
+        return [p for p in self.sim.positions() if p.magic in magics]
+
     def journal_kinds(self, session_id=None):
         return [j.kind for j in self.store.journal(session_id=session_id, limit=10_000)]
 

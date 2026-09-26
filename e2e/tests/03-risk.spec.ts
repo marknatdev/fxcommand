@@ -12,7 +12,7 @@ test("session daily-loss limit auto-stops the session and raises an alert", asyn
   const errors = watchErrors(page);
   const s = await createSession(request, "Loss Limit", ["EURUSD"], { daily_loss_pct: 2 });
   await api(request, "POST", `/sessions/${s.id}/start`);
-  const [p] = await untilPosition(request, s.magic);
+  const [p] = await untilPosition(request, s.id);
   // gap the market through the stop-loss: the fill at the gap costs far more than the 1% risk
   await shock(request, p.symbol, p.side === "long" ? -0.004 : 0.004);
 
@@ -21,7 +21,7 @@ test("session daily-loss limit auto-stops the session and raises an alert", asyn
   await expect(page.getByTestId("stop-reason")).toContainText("AUTO-STOP");
   await page.goto("/");
   await expect(page.getByTestId("alerts-card")).toContainText("AUTO-STOP");
-  const left = (await api<any[]>(request, "GET", "/positions")).filter((x) => x.magic === s.magic);
+  const left = (await api<any[]>(request, "GET", "/positions")).filter((x) => x.session_id === s.id);
   expect(left).toEqual([]); // close_on_auto_stop defaults to on
   expect(errors).toEqual([]);
 });
@@ -40,7 +40,7 @@ test("risk rejections are journaled with the reason", async ({ page, request }) 
   await page.getByTestId("journal-session").selectOption(String(s.id));
   await page.getByTestId("kind-risk_reject").click();
   await expect(page.getByTestId("journal-entry").first()).toContainText("spread");
-  expect((await api<any[]>(request, "GET", "/positions")).filter((x) => x.magic === s.magic)).toEqual([]);
+  expect((await api<any[]>(request, "GET", "/positions")).filter((x) => x.session_id === s.id)).toEqual([]);
   await api(request, "POST", `/sessions/${s.id}/stop`, {});
 });
 

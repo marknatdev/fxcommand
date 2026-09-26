@@ -60,7 +60,7 @@ async def test_two_requotes_give_up_without_a_position(h):
     assert await until(h, lambda: attempts(h, s.id))
     fail = attempts(h, s.id)[-1]
     assert fail.kind == "order_fail" and fail.alert and "retried once" in fail.message
-    assert not h.sim.positions(s.magic) and not h.store.trades(session_id=s.id)
+    assert not h.positions(s) and not h.store.trades(session_id=s.id)
 
 
 async def test_uncertain_filled_is_never_retried_and_is_adopted(h):
@@ -69,7 +69,7 @@ async def test_uncertain_filled_is_never_retried_and_is_adopted(h):
     assert await until(h, lambda: attempts(h, s.id))
     fail = attempts(h, s.id)[-1]
     assert fail.kind == "order_fail" and "UNCERTAIN" in fail.message and "found and adopted" in fail.message
-    pos = h.sim.positions(s.magic)
+    pos = h.positions(s)
     assert len(pos) == 1  # exactly one position: no second send
     row = h.store.trade_by_ticket(pos[0].ticket)
     assert row is not None and row.adopted and row.session_id == s.id
@@ -80,7 +80,7 @@ async def test_uncertain_not_filled_leaves_nothing_and_no_retry(h):
     h.sim.inject("timeout_none")
     assert await until(h, lambda: attempts(h, s.id))
     assert "no position found" in attempts(h, s.id)[-1].message
-    assert not h.sim.positions(s.magic) and not h.store.trades(session_id=s.id)
+    assert not h.positions(s) and not h.store.trades(session_id=s.id)
 
 
 async def test_partial_fill_records_the_real_volume(h):
@@ -88,7 +88,7 @@ async def test_partial_fill_records_the_real_volume(h):
     h.sim.inject("partial")
     assert await until(h, lambda: h.store.trades(session_id=s.id))
     t = h.store.trades(session_id=s.id)[0]
-    p = next(p for p in h.sim.positions(s.magic) if p.ticket == t.ticket)
+    p = next(p for p in h.positions(s) if p.ticket == t.ticket)
     assert t.volume == p.volume
     assert "partial fill" in attempts(h, s.id)[-1].message
 
@@ -116,7 +116,7 @@ async def test_orphan_is_adopted_on_the_next_pass(h):
 # ------------------------------------------------------------------ closes and Kill Switch
 async def _with_position(h, **kw):
     s = await started(h, symbols=("EURUSD", "GBPUSD", "USDJPY"), **kw)
-    assert await until(h, lambda: h.sim.positions(s.magic)), "no position opened"
+    assert await until(h, lambda: h.positions(s)), "no position opened"
     return s
 
 
@@ -124,14 +124,14 @@ async def test_close_is_retried_until_confirmed(h):
     s = await _with_position(h)
     h.sim.inject("close_fail", 3)
     await h.mgr.stop(s.id, close_positions=True)
-    assert not h.sim.positions(s.magic)
+    assert not h.positions(s)
 
 
 async def test_close_that_answers_uncertain_is_confirmed_by_the_account(h):
     s = await _with_position(h)
     h.sim.inject("close_timeout_done")
     await h.mgr.stop(s.id, close_positions=True)
-    assert not h.sim.positions(s.magic)
+    assert not h.positions(s)
     assert not [j for j in h.store.journal(kinds=["order_fail"], limit=100) if "Close #" in j.message]
 
 
@@ -149,7 +149,7 @@ async def test_failed_close_never_reverses(h):
     h.sim.inject("close_fail", 500)
     await h.bars(80)
     sides = {}  # the opposite side is never opened next to a position that could not be closed
-    for p in h.sim.positions(s.magic):
+    for p in h.positions(s):
         sides.setdefault(p.symbol, set()).add(p.side)
     assert all(len(v) == 1 for v in sides.values())
     h.sim.faults.clear()
@@ -186,7 +186,7 @@ async def test_kill_switch_stops_sessions_while_the_broker_hangs(h):
     h.sim.faults.clear()
     await h.mgr.tick_once()
     await h.mgr.kill_all()
-    assert not h.sim.positions(s.magic)
+    assert not h.positions(s)
 
 
 # ------------------------------------------------------------------ account safety
@@ -234,11 +234,11 @@ async def test_equity_floor_kills_and_blocks_until_reset(tmp_path):
     s = await started(h, symbols=("EURUSD", "GBPUSD", "USDJPY"))
     floor = h.store.equity_floor(h.sim.login)
     assert floor and floor["floor"] == pytest.approx(h.sim.account().equity * 0.8, abs=0.01)
-    assert await until(h, lambda: h.sim.positions(s.magic))
+    assert await until(h, lambda: h.positions(s))
     h.store.set_equity_floor(h.sim.login, {**floor, "floor": h.sim.account().equity + 1_000})
     await h.mgr.tick_once()
     assert h.store.get_session(s.id).status == "stopped"
-    assert not h.sim.positions(s.magic)
+    assert not h.positions(s)
     assert h.store.equity_floor(h.sim.login)["breached_at"]
     with pytest.raises(DomainError) as e:
         await h.mgr.start(s.id)
@@ -330,10 +330,10 @@ async def test_weekend_close_closes_and_blocks_entries(tmp_path):
     h.store.set_global_limits(RiskLimits(max_positions_global=10, daily_loss_pct_global=90))
     await h.mgr.tick_once()
     s = await started(h, symbols=("EURUSD", "GBPUSD", "USDJPY"), weekend_close=True, weekend_close_time="22:00", daily_loss_pct=90)
-    assert await until(h, lambda: h.sim.positions(s.magic), limit=85)
+    assert await until(h, lambda: h.positions(s), limit=85)
     while h.sim.now < FRI_22 + 120:  # step past Friday 22:00
         await h.bars(1)
-    assert not h.sim.positions(s.magic)
+    assert not h.positions(s)
     assert any("Weekend Close" in j.message for j in h.store.journal(session_id=s.id, limit=500))
     orders_before = len(h.store.journal(session_id=s.id, kinds=["order"], limit=1000))
     await h.bars(30)  # still Friday evening: signals come, entries are skipped
@@ -347,7 +347,7 @@ async def test_switching_accounts_keeps_each_accounts_records(h):
     'unknown' nor mixed into the other account's daily P&L."""
     s = await _with_position(h, daily_loss_pct=90)
     login_a = h.sim.login
-    ticket = h.sim.positions(s.magic)[0].ticket
+    ticket = h.positions(s)[0].ticket
     assert h.store.trade_by_ticket(ticket).login == login_a
     await h.mgr.stop(s.id, close_positions=False)
     realized_a = h.store.realized_since(0, login=login_a)

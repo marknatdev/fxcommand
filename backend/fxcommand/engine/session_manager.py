@@ -155,8 +155,43 @@ class SessionManager:
         return [p for p in self._positions if p.magic in magics and p.ticket > 0]
 
     def _session_pnl(self, s: SessionRow, day_ts: int) -> float:
-        floating = sum(p.profit for p in self._positions if p.magic == s.magic)
+        magics = self.store.session_magics(s.id)
+        floating = sum(p.profit for p in self._positions if p.magic in magics)
         return self.store.realized_since(day_ts, s.id, self._login) + floating
+
+    def _session_positions(self, s: SessionRow, positions: list[Position] | None = None) -> list[Position]:
+        """Every position of the Session, whichever of its Assignment magics it carries (ADR 0009)."""
+        magics = self.store.session_magics(s.id)
+        return [p for p in (self._positions if positions is None else positions) if p.magic in magics]
+
+    def _owner(self, s: SessionRow, p: Position, assigns: list[AssignmentRow], idents: dict | None = None) -> AssignmentRow | None:
+        """The Assignment of ``s`` that manages position ``p`` (ADR 0009):
+        1. the Assignment whose magic ``p`` carries, if the Symbol matches;
+        2. else the Assignment in the Arena of the identity ``p``'s magic belongs to (the strategy
+           changed by an edit or a Promotion, the position stayed);
+        3. else, for a position carrying the Session's own magic with another Symbol (opened before
+           magics were per Assignment), the Session's first Assignment on that Symbol."""
+        same = [a for a in assigns if a.symbol == p.symbol]
+        if not same:
+            return None
+        for a in same:
+            if a.magic == p.magic:
+                return a
+        ident = (self.store.magic_identities() if idents is None else idents).get(p.magic)
+        if ident is not None and ident.session_id == s.id and ident.symbol == p.symbol:
+            return next((a for a in same if a.timeframe == ident.timeframe), None)
+        if p.magic == s.magic:
+            return same[0]
+        return None
+
+    def _position_of(self, s: SessionRow, a: AssignmentRow, positions: list[Position] | None = None) -> Position | None:
+        assigns = self.store.assignments(s.id)
+        idents = self.store.magic_identities()
+        for p in self._session_positions(s, positions):
+            o = self._owner(s, p, assigns, idents)
+            if o is not None and o.id == a.id:
+                return p
+        return None
 
     def _global_pnl(self, day_ts: int, magics: dict[int, int]) -> float:
         return self.store.realized_since(day_ts, login=self._login) + sum(p.profit for p in self._owned(magics))
@@ -165,7 +200,7 @@ class SessionManager:
         """Tell the PaperRouter which Magic Numbers are Paper Sessions (ADR 0007)."""
         router = self.broker.broker
         if hasattr(router, "paper_magics"):
-            router.paper_magics = {s.magic for s in self.store.list_sessions() if s.execution == "paper"}
+            router.paper_magics = set().union(*(self.store.session_magics(s.id) for s in self.store.list_sessions() if s.execution == "paper"))
 
     def _has_paper(self) -> bool:
         return hasattr(self.broker.broker, "paper_magics")
@@ -178,14 +213,17 @@ class SessionManager:
         other = self.store.session_by_name(spec.name)
         if other is not None and other.id != session_id:
             raise DomainError("name_taken", f"a session named {spec.name!r} already exists")
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
         profiles = {p.id: p for p in self.store.risk_profiles()}
         default_profile = next(iter(profiles))
         rows = []
         for a in spec.assignments:
-            if a.symbol in seen:
-                raise DomainError("duplicate_symbol", f"{a.symbol} appears twice; a Symbol may appear only once per Session", 422)
-            seen.add(a.symbol)
+            arena = (a.symbol, a.timeframe.value)
+            if arena in seen:
+                raise DomainError(
+                    "duplicate_symbol", f"{a.symbol} {a.timeframe.value} appears twice; a Symbol may appear once per Timeframe in a Session", 422
+                )
+            seen.add(arena)
             try:
                 strat = get_strategy(a.strategy)
             except KeyError as e:
@@ -238,7 +276,8 @@ class SessionManager:
             row = self.store.save_session(row, rows)
             self._sync_paper()
             mode = " — PAPER" if row.execution == "paper" else ""
-            self._j("state", f"Session '{row.name}' created (magic {row.magic}, {len(rows)} assignments){mode}", row)
+            magics = ", ".join(str(a.magic) for a in self.store.assignments(row.id))
+            self._j("state", f"Session '{row.name}' created (magics {magics}, {len(rows)} assignments){mode}", row)
             return row
 
     async def update_session(self, session_id: int, spec: SessionIn) -> SessionRow:
@@ -249,7 +288,7 @@ class SessionManager:
             rows = self._validate_spec(spec, session_id)
             self._check_execution(spec)
             if spec.execution != s.execution:
-                if any(p.magic == s.magic for p in self._positions):
+                if self._session_positions(s):
                     raise DomainError("has_positions", "close the session's positions before changing its execution mode")
                 if spec.execution == "broker" and self._is_live() and spec.confirm_login != self._account.login:
                     raise DomainError(
@@ -270,7 +309,7 @@ class SessionManager:
             s = self.store.get_session(session_id)
             if s.status in ACTIVE:
                 raise DomainError("session_active", "stop the session before deleting it")
-            if any(p.magic == s.magic for p in self._positions):
+            if self._session_positions(s):
                 raise DomainError("has_positions", "the session still has open positions; close them first")
             self.store.delete_session(session_id)
             self._j("state", f"Session '{s.name}' deleted")
@@ -288,13 +327,15 @@ class SessionManager:
         if not assigns:
             raise DomainError("no_assignments", "session has no enabled assignments", 422)
         symbols = {a.symbol for a in assigns}
+        arenas = {(a.symbol, a.timeframe) for a in assigns}
         for other in self.store.list_sessions():
             if other.id == s.id or other.status not in ACTIVE:
                 continue
-            clash = symbols & {a.symbol for a in self.store.assignments(other.id) if a.enabled}
+            clash = arenas & {(a.symbol, a.timeframe) for a in self.store.assignments(other.id) if a.enabled}
             if clash:
                 raise DomainError(
-                    "symbol_conflict", f"{', '.join(sorted(clash))} already traded by running session '{other.name}'"
+                    "symbol_conflict",
+                    f"{', '.join(f'{sym} {tf}' for sym, tf in sorted(clash))} already traded by running session '{other.name}'",
                 )
         if not await self._ensure_connected():
             raise DomainError("broker_offline", f"broker not connected: {self.status.last_error}", 503)
@@ -347,7 +388,7 @@ class SessionManager:
                 continue
             sessions = sessions or {x.id: x for x in self.store.list_sessions()}
             s = sessions.get(sid)
-            a = next((x for x in self.store.assignments(sid) if x.symbol == p.symbol), None)
+            a = self._owner(s, p, self.store.assignments(sid)) if s else None
             self.store.add_trade(
                 TradeRow(
                     ticket=p.ticket,
@@ -419,8 +460,8 @@ class SessionManager:
             self._states.pop(a.id, None)
         closed = 0
         if close_positions:
-            closed = await self._close_all({s.magic}, reason)
-        left = sum(1 for p in self._positions if p.magic == s.magic)
+            closed = await self._close_all(self.store.session_magics(s.id), reason)
+        left = len(self._session_positions(s))
         tail = f"closed {closed} positions" if close_positions else f"left {left} positions open (server SL/TP protect them)"
         self._j("alert" if alert else "state", f"Session '{s.name}' stopped: {reason}; {tail}", s, level="warn" if alert else "info", alert=alert)
         return s
@@ -653,7 +694,7 @@ class SessionManager:
         for s in self.store.list_sessions():
             if s.status not in ACTIVE or not s.weekend_close or not in_weekend_close(self.now, s.weekend_close_time):
                 continue
-            mine = [p.ticket for p in self._positions if p.magic == s.magic]
+            mine = [p.ticket for p in self._session_positions(s)]
             if mine:
                 self._j("state", f"Weekend Close: closing {len(mine)} positions of '{s.name}' (Friday {s.weekend_close_time} server time)", s)
                 await self._close_confirmed(mine, "weekend close")
@@ -806,7 +847,7 @@ class SessionManager:
         bars, tick, info = await self.broker.run(lambda b: (b.closed_bars(a.symbol, tf, need), b.tick(a.symbol), b.symbol_info(a.symbol)))
         a_series = atr_series(bars, params["atr_period"]) if len(bars) > params["atr_period"] else None
         st.atr = float(a_series.iloc[-1]) if a_series is not None else 0.0
-        pos = next((p for p in self._positions if p.magic == s.magic and p.symbol == a.symbol), None)
+        pos = self._position_of(s, a)
         sig = strat.run(bars, params, pos.side if pos else None)
         st.last_eval = self.now
         st.last_signal = sig.to_dict()
@@ -820,7 +861,7 @@ class SessionManager:
         await self._act(s, a, sig, pos, bars, tick)
 
     async def _apply_pending(self, s: SessionRow, a: AssignmentRow) -> AssignmentRow:
-        change = self._learn(lambda L: L.pending(s.id, a.symbol))
+        change = self._learn(lambda L: L.pending(s.id, a.symbol, a.timeframe))
         if change is None:
             return a
         if change.kind == "auto_promotion":
@@ -830,8 +871,8 @@ class SessionManager:
                 self._j("learning", f"Automatic promotion for {a.symbol} cancelled: account is live", s, a.symbol, level="warn")
                 return a
         # an auto_rollback is allowed on live: it only restores a Champion the operator already approved
-        mine = await self.broker.run(lambda b: b.positions(s.magic))
-        if any(p.symbol == a.symbol for p in mine):
+        now_open = await self.broker.run(lambda b: b.positions())
+        if self._position_of(s, a, now_open) is not None:
             return a  # not flat yet: try again at the next bar close
         cand = self._learn(lambda L: L.apply(change, s, a, self.now))
         if cand is None:
@@ -840,7 +881,9 @@ class SessionManager:
             params = get_strategy(cand.strategy).resolve(cand.param_dict)
         except KeyError:
             return a
-        return self.store.update_assignment(a.id, strategy=cand.strategy, params=params)
+        a = self.store.update_assignment(a.id, strategy=cand.strategy, params=params)
+        self._sync_paper()  # a new strategy is a new identity with its own magic (ADR 0009)
+        return a
 
     async def _act(self, s: SessionRow, a: AssignmentRow, sig: Signal, pos: Position | None, bars=None, tick=None) -> None:
         if sig.action == "none":
@@ -891,6 +934,7 @@ class SessionManager:
             return  # stopped meanwhile (Kill Switch / Auto-stop)
         # Everything that comes from our own database is read up front...
         magics = self.store.all_magics()
+        mine_magics = self.store.session_magics(s.id)
         day_ts, day_equity = self._day_start()
         realized_session = self.store.realized_since(day_ts, s.id, self._login)
         realized_global = self.store.realized_since(day_ts, login=self._login)
@@ -912,7 +956,7 @@ class SessionManager:
                 info, tick, acct, positions = b.symbol_info(sym), b.tick(sym), b.account(), b.positions()
                 if self._kill_seq != kill_seq:
                     return Rejected("kill_switch", "the Kill Switch fired while this entry was being prepared"), None, acct, positions, notes
-                mine = [p for p in positions if p.magic == s.magic]
+                mine = [p for p in positions if p.magic in mine_magics]
                 owned = mine if paper else [p for p in positions if p.magic in magics and p.ticket > 0]
                 exposure = Exposure(
                     session_positions=len(mine),
@@ -942,13 +986,13 @@ class SessionManager:
                 )
                 if isinstance(decision, Rejected):
                     return decision, None, acct, positions, notes
-                if paper and s.magic not in getattr(b, "paper_magics", ()):
+                if paper and a.magic not in getattr(b, "paper_magics", ()):
                     return Rejected("paper_routing", "Paper Session is not routed to the Paper book; order refused"), None, acct, positions, notes
                 if not paper:
                     margin_rej = check_margin(b.margin_required(sym, side, decision.volume), acct)
                     if margin_rej is not None:
                         return margin_rej, None, acct, positions, notes
-                res = b.market_order(sym, side, decision.volume, decision.sl, decision.tp, s.magic, comment)
+                res = b.market_order(sym, side, decision.volume, decision.sl, decision.tp, a.magic, comment)
                 if res.ok or res.uncertain or attempt == 2 or res.retcode not in RETRY_ONCE:
                     break
                 notes.append(f"retried once after: {res.message} ({res.retcode})")
@@ -962,7 +1006,7 @@ class SessionManager:
             self._learn(lambda L: L.signal_outcome(record_id, rejected=True))
             return
         if res.uncertain:
-            appeared = next((p for p in self._positions if p.magic == s.magic and p.symbol == sym and p.ticket not in before), None)
+            appeared = next((p for p in self._positions if p.magic == a.magic and p.symbol == sym and p.ticket not in before), None)
             self._j(
                 "order_fail",
                 f"{side.upper()} {decision.volume} {sym}: outcome UNCERTAIN ({res.message}, {res.retcode}) — not retried; "
@@ -984,7 +1028,7 @@ class SessionManager:
         # filled: trust the position, not the reply (some servers report price 0 on market execution)
         pos = next((p for p in self._positions if p.ticket == res.ticket), None)
         if pos is None:
-            pos = next((p for p in self._positions if p.magic == s.magic and p.symbol == sym and p.ticket not in before), None)
+            pos = next((p for p in self._positions if p.magic == a.magic and p.symbol == sym and p.ticket not in before), None)
         ticket = pos.ticket if pos else res.ticket
         price = pos.price_open if pos else (res.price or decision.entry)
         volume = pos.volume if pos else (res.volume or decision.volume)
@@ -998,7 +1042,7 @@ class SessionManager:
                 ticket=ticket,
                 session_id=s.id,
                 assignment_id=a.id,
-                magic=s.magic,
+                magic=a.magic,
                 symbol=sym,
                 side=side,
                 volume=volume,
@@ -1046,12 +1090,13 @@ class SessionManager:
                 break
             if attempt < self.close_attempts:
                 await asyncio.sleep(self.close_retry_delay)
-        sessions = {x.magic: x for x in self.store.list_sessions()}
+        owners = self.store.all_magics()
+        sessions = {x.id: x for x in self.store.list_sessions()}
         failed = {t: last.get(t, "unknown") for t in remaining}
         for t, msg in failed.items():
             p = next((x for x in self._positions if x.ticket == t), None)
             self._j("order_fail", f"Close #{t} failed after {self.close_attempts} attempts: {msg} — close it in the terminal",
-                    sessions.get(p.magic) if p else None, p.symbol if p else None, level="error", alert=True)
+                    sessions.get(owners.get(p.magic)) if p else None, p.symbol if p else None, level="error", alert=True)
         return len(tickets) - len(failed), failed
 
     async def _close(self, s: SessionRow, pos: Position, reason: str) -> bool:
@@ -1072,9 +1117,9 @@ class SessionManager:
         return closed
 
     async def _manage_positions(self, s: SessionRow, assigns: list[AssignmentRow]) -> None:
-        by_symbol = {a.symbol: a for a in assigns}
-        for p in [p for p in self._positions if p.magic == s.magic]:
-            a = by_symbol.get(p.symbol)
+        idents = self.store.magic_identities()
+        for p in self._session_positions(s):
+            a = self._owner(s, p, assigns, idents)
             if a is None:
                 continue
             profile = self.store.to_profile(self.store.risk_profile(a.risk_profile_id))
@@ -1141,7 +1186,8 @@ class SessionManager:
                     "name": s.name,
                     "status": s.status,
                     "magic": s.magic,
-                    "open_positions": sum(1 for p in self._positions if p.magic == s.magic),
+                    "magics": sorted(self.store.session_magics(s.id)),
+                    "open_positions": len(self._session_positions(s)),
                     "day_pnl": round(self._session_pnl(s, day_ts), 2),
                     "stop_reason": s.stop_reason,
                     "execution": s.execution,

@@ -41,6 +41,7 @@ def session_dict(r, s: SessionRow, with_detail: bool = False) -> dict:
     trades = store.trades(session_id=s.id, limit=5000)
     d = {
         **s.model_dump(),
+        "magics": snap.get("magics", [s.magic]),
         "window_text": TradingWindow.from_dict(s.window).describe(),
         "assignments": [
             {**a.model_dump(), "risk_profile_name": profiles.get(a.risk_profile_id), "state": states.get(a.id)} for a in assigns
@@ -50,7 +51,7 @@ def session_dict(r, s: SessionRow, with_detail: bool = False) -> dict:
         "stats": trade_stats(trades),
     }
     if with_detail:
-        d["positions"] = [p for p in mgr.positions_view() if p["magic"] == s.magic]
+        d["positions"] = [p for p in mgr.positions_view() if p["session_id"] == s.id]
         d["trades"] = [trade_dict(t) for t in trades[:300]]
         d["journal"] = [journal_dict(j) for j in store.journal(session_id=s.id, limit=150)]
         d["equity"] = _pnl_curve(trades)
@@ -595,14 +596,14 @@ async def learning_promote(request: Request, challenger_id: int, body: PromoteIn
 
 
 @router.post("/learning/slots/{session_id}/{symbol}/rollback")
-async def learning_rollback(request: Request, session_id: int, symbol: str):
-    return rt(request).learning.rollback(session_id, symbol).model_dump()
+async def learning_rollback(request: Request, session_id: int, symbol: str, timeframe: str | None = None):
+    return rt(request).learning.rollback(session_id, symbol, timeframe).model_dump()
 
 
 @router.put("/learning/slots/{session_id}/{symbol}/auto-promote")
-async def learning_auto_promote(request: Request, session_id: int, symbol: str, body: AutoPromoteIn):
+async def learning_auto_promote(request: Request, session_id: int, symbol: str, body: AutoPromoteIn, timeframe: str | None = None):
     r = rt(request)
-    return r.learning.set_auto_promote(session_id, symbol, body.enabled, _is_live(r))
+    return r.learning.set_auto_promote(session_id, symbol, body.enabled, _is_live(r), timeframe)
 
 
 @router.delete("/learning/pending/{pending_id}", status_code=204)

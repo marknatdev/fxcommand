@@ -174,6 +174,7 @@ async def test_paper_session_on_the_real_feed(tmp_path):
         assert all(t.paper and t.ticket < 0 for t in trades)
         assert all(t.status == "closed" and t.profit is not None and t.close_price for t in trades)
         assert not store.paper_open()
-        assert not [p for p in real.positions() if p.magic == s.magic]  # nothing on the real Account
+        magics = store.session_magics(s.id)
+        assert not [p for p in real.positions() if p.magic in magics]  # nothing on the real Account, under any Assignment magic
     finally:
         thread.shutdown()

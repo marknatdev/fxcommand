@@ -42,6 +42,22 @@ class AssignmentRow(SQLModel, table=True):
     risk_profile_id: int = Field(foreign_key="risk_profiles.id")
     reverse_on_opposite: bool = True
     enabled: bool = True
+    magic: int = 0  # from magic_identities; set whenever the row is written (ADR 0009)
+
+
+class MagicIdentityRow(SQLModel, table=True):
+    """One Magic Number per (Session, Symbol, Strategy, Timeframe), never reused (ADR 0009). Rows
+    outlive Assignment edits and Session deletion, so an identity always gets its magic back."""
+
+    __tablename__ = "magic_identities"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: int = Field(index=True)
+    symbol: str
+    strategy: str
+    timeframe: str
+    magic: int = Field(unique=True)
+    created_wall: float = 0
 
 
 class RiskProfileRow(SQLModel, table=True):
@@ -180,6 +196,7 @@ class LearningSlotRow(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     session_id: int = Field(index=True)
     symbol: str
+    timeframe: str = ""  # "" = written before a Symbol could appear twice in a Session
     auto_promote: bool = False
 
 
@@ -273,6 +290,7 @@ class PendingChangeRow(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     session_id: int = Field(index=True)
     symbol: str
+    timeframe: str = ""  # "" = written before a Symbol could appear twice in a Session
     candidate_key: str
     kind: str  # promotion | auto_promotion | rollback | auto_rollback
     reason: str = ""

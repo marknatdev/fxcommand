@@ -429,11 +429,11 @@ New catalog entries only. The existing strategies' behaviour and golden rows are
 - [x] Gold Reopen Risk Profile (100-point cap, no breakeven or trailing). Seeded once into existing databases too; a profile the operator deletes is not brought back
 
 ### 3. Magic Number per Assignment
-- [ ] ADR 0009 superseding ADR 0003; update `CONTEXT.md`
-- [ ] Magic identity keyed by `(session_id, symbol, strategy, timeframe)`, stable across edits; migrate existing Sessions
-- [ ] An Arena is unique among running Assignments; the same Symbol is allowed on different timeframes
-- [ ] Ownership, Orphan adoption, Kill Switch, `PaperRouter`, Live Caps counts, trade history
-- [ ] Tests: two GOLD positions at once, migration, Kill Switch, Orphans, Paper routing
+- [x] ADR 0009 superseding ADR 0003; update `CONTEXT.md` and `CLAUDE.md`
+- [x] Magic identity keyed by `(session_id, symbol, strategy, timeframe)` in `magic_identities`, stable across edits, never reused (a deleted Session's identities stay reserved under its negated id, because SQLite reuses ids); `AssignmentRow.magic`; existing Sessions migrated (their magic moves to the first Assignment). A position whose Strategy changed underneath it (stop leaving positions, edit, restart) stays with the Assignment in its Arena
+- [x] An Arena is unique within a Session and among running Sessions; the same Symbol is allowed on different timeframes. Learning slots and pending changes are keyed `(session_id, symbol, timeframe)`; the `/learning/slots/...` routes take an optional `?timeframe=` and refuse an ambiguous call. The Session editor still refuses a Symbol twice: milestone 8
+- [x] Ownership through one rule (`SessionManager._owner`), Orphan adoption, Kill Switch, stop-and-close, Weekend Close, `PaperRouter` (every magic of every Paper Session, refreshed after a Promotion), Live Caps and global counts, trade history (`TradeRow.magic` = the Assignment's)
+- [x] Tests: two GOLD positions at once, migration with legacy positions (no duplicate entry), Kill Switch, Orphans, Paper routing with the real Account's order method watched (edit + restart included), strategy edit with a position left open, no magic reuse. The Paper check on the real feed is still owed while the market is closed
 
 ### 4. Learning
 - [ ] `PaperTrader` uses `CostModel` and `next_tradable`
