@@ -27,6 +27,7 @@ from dataclasses import asdict, dataclass, field
 from ..broker import BrokerError, BrokerThread, BrokerTimeout, OrderResult, Position, Timeframe
 from ..broker.types import AccountInfo
 from ..journal import EventBus, Journal
+from ..tasks import cancel_and_wait
 from ..risk import Exposure, GateInput, LiveCaps, Rejected, RiskLimits, TradingWindow, check, check_margin, manage
 from ..store import AssignmentRow, SessionRow, Store, TradeRow
 from ..strategies import Signal, get_strategy
@@ -519,12 +520,7 @@ class SessionManager:
             self._task = asyncio.create_task(self.run_forever(interval), name="engine")
 
     async def stop_loop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
+        await cancel_and_wait(self._task)
 
     async def tick_once(self) -> None:
         async with self._lock:

@@ -18,6 +18,7 @@ from .config import Config
 from .engine import DomainError, SessionManager
 from .journal import EventBus, Journal, LogBuffer
 from .learning.service import LearningService
+from .tasks import cancel_and_wait
 from .notify import AlertDispatcher, telegram_from_settings
 from .store import NotFound, Store
 
@@ -131,8 +132,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         try:
             yield
         finally:
-            if rt.clock_task:
-                rt.clock_task.cancel()
+            await cancel_and_wait(rt.clock_task)  # it steps the sim through the broker thread too
             await rt.manager.stop_loop()
             await rt.learning.stop()
             await rt.notifier.stop()

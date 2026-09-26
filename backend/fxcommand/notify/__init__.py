@@ -18,6 +18,8 @@ import urllib.error
 import urllib.request
 from typing import Callable, Protocol
 
+from ..tasks import cancel_and_wait
+
 log = logging.getLogger("fxcommand.notify")
 
 RATE_LIMIT = 20  # messages per RATE_WINDOW seconds
@@ -100,11 +102,7 @@ class AlertDispatcher:
 
     async def stop(self) -> None:
         if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
+            await cancel_and_wait(self._task)
             self._task = None
         if self._queue is not None:
             self.bus.unsubscribe(self._queue)

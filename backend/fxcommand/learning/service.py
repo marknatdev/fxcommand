@@ -34,6 +34,7 @@ from ..store import AssignmentRow, SessionRow, Store, TradeRow
 from ..store.models import ChallengerRow, PendingChangeRow
 from ..strategies import Signal, get_strategy
 from ..strategies.base import WARMUP_BARS
+from ..tasks import cancel_and_wait
 from . import signal_filter as sf
 from .candidate import Candidate
 from .features import market_frame, vector
@@ -111,14 +112,7 @@ class LearningService:
         self._worker = asyncio.create_task(self._work(), name="learner")
 
     async def stop(self) -> None:
-        if self._worker:
-            # Python 3.10's wait_for (inside BrokerThread.run) can swallow a cancel that lands as the
-            # broker call returns; the worker then waits on its queue again. Cancel until it has ended.
-            while not self._worker.done():
-                self._worker.cancel()
-                await asyncio.wait({self._worker}, timeout=0.5)
-            if not self._worker.cancelled():
-                self._worker.exception()  # retrieved, so it is never reported as unhandled
+        await cancel_and_wait(self._worker)
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _j(self, kind: str, msg: str, s: SessionRow | None = None, symbol: str | None = None, **kw) -> None:
