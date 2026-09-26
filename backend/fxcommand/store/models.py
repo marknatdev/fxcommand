@@ -161,7 +161,7 @@ class PaperPositionRow(SQLModel, table=True):
 
 
 # ------------------------------------------------------------------ learning
-# All learning records are keyed by Arena (symbol, timeframe) or by (session_id, symbol) — never by
+# All learning records are keyed by Arena (symbol, timeframe) or by (session_id, symbol, timeframe) — never by
 # assignment id, which changes whenever a Session is edited.
 
 

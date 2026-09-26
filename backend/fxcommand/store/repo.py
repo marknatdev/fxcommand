@@ -287,7 +287,23 @@ class Store:
                     out[r.magic] = r.session_id
             return out
 
+    def allocate_session_id(self) -> int:
+        """A Session id never used before. SQLite hands out max(id) + 1, so deleting the newest
+        Session would give its id, and with it its trades, Journal, Learning records and that day's
+        realized P&L, to the next Session. Ids are therefore allocated above every session_id any
+        table has ever recorded (deleted Sessions' magic identities hold the negated id)."""
+        top = int(self.get_setting("next_session_id", 1)) - 1
+        with self._db() as db:
+            for table in SQLModel.metadata.sorted_tables:
+                col = table.c.get("id") if table.name == SessionRow.__tablename__ else table.c.get("session_id")
+                if col is not None:
+                    top = max(top, int(db.exec(select(func.max(func.abs(col)))).one() or 0))
+        self.set_setting("next_session_id", top + 2)
+        return top + 1
+
     def save_session(self, row: SessionRow, assignments: list[AssignmentRow] | None = None) -> SessionRow:
+        if row.id is None:
+            row.id = self.allocate_session_id()
         with self._db() as db:
             db.add(row)
             db.flush()

@@ -142,3 +142,20 @@ async def test_magics_are_never_reused(h):
     await h.mgr.delete_session(s.id)
     t = await h.mgr.create_session(gold_twice("Again"))
     assert not ({a.magic for a in h.store.assignments(t.id)} | {t.magic}) & used
+
+
+async def test_a_deleted_sessions_id_is_never_given_to_a_new_session(h):
+    """SQLite would reuse the newest deleted id; the new Session would inherit its trades, Journal
+    and that day's realized P&L (and so its daily-loss limit)."""
+    from fxcommand.store import TradeRow
+
+    a = await h.session("A")
+    b = await h.session("B", symbols=("GBPUSD",))
+    h.store.add_trade(TradeRow(ticket=4242, session_id=b.id, magic=b.magic, symbol="GBPUSD", side="long", volume=0.1,
+                               open_time=MON_08, open_price=1.27, status="closed", profit=-500.0, close_time=MON_08 + 60))
+    await h.mgr.delete_session(b.id)
+    c = await h.session("C", symbols=("GBPUSD",))
+    assert c.id not in (a.id, b.id) and c.id > b.id
+    assert h.store.trades(session_id=c.id) == []
+    assert h.store.realized_since(0, c.id) == 0
+    assert not [j for j in h.store.journal(session_id=c.id, limit=1000) if "'B'" in j.message]
