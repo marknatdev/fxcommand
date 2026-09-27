@@ -181,7 +181,7 @@ The cost of one round trip (spread and slippage) as a share of an Assignment's s
 _Avoid_: spread filter (that is the Risk Profile's per-order maximum spread)
 
 **Evidence Run**:
-A read-only Backtest of one Candidate on an Arena's full history from the connected feed, priced at twice the typical spread and run with an Assignment's exit rules, Trading Window and Weekend Close. Evidence belongs to exactly those settings: an Assignment whose settings differ has no matching Evidence.
+A read-only Backtest of one Candidate on an Arena's Trusted History from the connected feed, priced at twice the typical spread and run with an Assignment's exit rules, Trading Window and Weekend Close. Evidence belongs to exactly those settings: an Assignment whose settings differ has no matching Evidence.
 _Avoid_: backtest result (a Backtest is also what an Optimizer Run does many times)
 
 **Scorecard**:
@@ -194,6 +194,10 @@ A weekly research pass by Claude over the week's trades, Evidence and Scorecards
 **Sealed Holdout**:
 The most recent year of an Arena's history (three months for M1/M5), rolling forward monthly, that research never sees. A finalist is scored on it once; a failure there is final.
 _Avoid_: test set, out-of-sample (the Optimizer's out-of-sample part is research data)
+
+**Trusted History**:
+The part of a Symbol's history whose bars are real quotes, and so may be judged: Evidence Runs and research count only trades signalled inside it. Older bars only warm indicators up. BTCUSD's starts in 2018, because its earlier intraday bars are daily bars copied down.
+_Avoid_: full history (the feed's full history includes untrusted bars)
 
 **Research Snapshot**:
 An Arena's history up to the start of its Sealed Holdout, exported read-only for research.
