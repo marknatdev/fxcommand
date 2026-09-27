@@ -27,7 +27,7 @@ import itertools
 import logging
 import time
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import pandas as pd
 
@@ -754,28 +754,47 @@ class LearningService:
         )
         return {**row.model_dump(), "arena_trials": self.repo.trial_count(symbol, tf.value)}
 
-    async def snapshot(self, symbol: str, timeframe: str, tail: int | None = None) -> dict:
+    async def snapshot(self, symbol: str, timeframe: str, tail: int | None = None, arena_timeframe: str | None = None) -> dict:
         """The research snapshot of an Arena: every closed bar before its sealed holdout, with the costs
-        today's typical spread implies. Read-only."""
+        today's typical spread implies. Read-only. ``arena_timeframe``: these bars are context for another
+        Arena (e.g. M15 bars for the GOLD M5 Arena) and end where *that* Arena's holdout starts."""
         tf = Timeframe(timeframe)
         now = await self._server_now()
-        cutoff = research.holdout_from(now, tf.value)
+        cutoff = research.holdout_from(now, Timeframe(arena_timeframe or tf).value)
         tick, info = await self.broker.run(lambda b: (b.tick(symbol), b.symbol_info(symbol)), timeout=ev.CHUNK_TIMEOUT)
         spread = self.spreads.spread_for(symbol, tick, now)
-        bars, note, complete = await self._read_history(symbol, tf)
-        bars = research.research_bars(bars, cutoff, tf.seconds)
-        total = len(bars)
-        first_ts = int(bars["time"].iloc[0]) if total else None
-        if tail is not None:
-            bars = bars.iloc[-tail:] if tail > 0 else bars.iloc[:0]
-        costs = CostModel.from_symbol(info, spread=spread, ref_price=float(bars["close"].iloc[-1])) if spread is not None and len(bars) else None
+        if tail == 0:  # metadata only (the CLI's check of its cache): no history read
+            bars, note, complete = pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"]), "", True
+            total, first_ts = None, None
+        else:
+            bars, note, complete = await self._read_history(symbol, tf)
+            bars = research.research_bars(bars, cutoff, tf.seconds)
+            total = len(bars)
+            first_ts = int(bars["time"].iloc[0]) if total else None
+            if tail is not None:
+                bars = bars.iloc[-tail:]
+        # today's spread at today's price: older bars are priced by scaling from here (the Cost Model)
+        costs = CostModel.from_symbol(info, spread=spread, ref_price=float(tick.bid)) if spread is not None and tick.bid > 0 else None
         return {
             "symbol": symbol, "timeframe": tf.value, "server_time": now, "holdout_from": cutoff,
             "bars_total": total, "first_ts": first_ts,
             "complete": complete, "note": note,
             "costs": costs.to_dict() if costs else None, "evidence_spread_multiplier": ev.SPREAD_MULTIPLIER,
             "arena_trials": self.repo.trial_count(symbol, tf.value),
+            "arena": self._research_arena(symbol, tf.value),
             "bars": {k: bars[k].tolist() for k in ("time", "open", "high", "low", "close", "volume")},
+        }
+
+    def _research_arena(self, symbol: str, timeframe: str) -> dict | None:
+        """The Champion and the settings research must use for an Arena a Session trades (None: a research-only
+        Arena, e.g. GOLD M5 scalping, judged against zero)."""
+        found = self._arena_assignment(symbol, timeframe)
+        if found is None:
+            return None
+        spec = self.spec_for(*found)
+        return {
+            "session": found[0].name, "champion": self.champion_of(found[1]).to_dict(),
+            "rules": asdict(spec.rules), "window": spec.window, "weekend_close": spec.weekend_close,
         }
 
     async def evaluate_holdout(self, symbol: str, timeframe: str, strategy: str, params: dict | None, hypothesis: str) -> dict:

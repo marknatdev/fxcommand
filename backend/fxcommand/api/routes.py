@@ -794,9 +794,12 @@ class ChallengerIn(BaseModel):
 
 
 @router.get("/research/snapshot")
-async def research_snapshot(request: Request, symbol: str, timeframe: Timeframe, tail: int | None = Query(None, ge=0, le=1_000_000)):
-    """Closed bars of an Arena before its sealed holdout (read-only), with today's costs."""
-    return await rt(request).learning.snapshot(symbol, timeframe.value, tail)
+async def research_snapshot(
+    request: Request, symbol: str, timeframe: Timeframe, tail: int | None = Query(None, ge=0, le=1_000_000), arena_timeframe: Timeframe | None = None
+):
+    """Closed bars of an Arena before its sealed holdout (read-only), with today's costs. With
+    ``arena_timeframe`` the bars are another Arena's context and end at that Arena's holdout."""
+    return await rt(request).learning.snapshot(symbol, timeframe.value, tail, arena_timeframe.value if arena_timeframe else None)
 
 
 @router.get("/research/trials")

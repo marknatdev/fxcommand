@@ -79,3 +79,80 @@ def holdout_job(
     champ = _stats(backtest(bars, champion, costs, rules, gate, weekend=weekend), cutoff) if champion is not None else None
     passed = cand["trades"] >= HOLDOUT_MIN_TRADES and cand["mean_r"] > 0 and (champ is None or cand["mean_r"] >= champ["mean_r"])
     return {"candidate": cand, "champion": champ, "passed": bool(passed), "rule": HOLDOUT_RULE, "bars": int(len(bars))}
+
+
+# ------------------------------------------------------------ research evaluation (the CLI)
+MIN_RESEARCH_TRADES = 30
+RESEARCH_NEIGHBOURS = 4
+NEIGHBOUR_SCALE = 0.12  # the Optimizer's own neighbourhood (optimizer._judge_robustness)
+
+
+def _summary(trades, first: int, last: int) -> dict:
+    from .evidence import periods
+
+    rs = np.array([t.r for t in trades], dtype=float)
+    close = np.array([t.close_time for t in trades], dtype=np.int64)
+    st = r_stats(rs)
+    years = max((last - first) / (365.25 * 86400), 1e-9)
+    return {
+        "trades": st.n, "mean_r": round(st.mean, 4), "sqn": round(st.sqn, 3), "win_rate": round(st.win_rate, 4),
+        "total_r": round(st.total, 3), "max_dd_r": round(st.max_dd, 3), "trades_per_year": round(st.n / years, 1),
+        "periods": periods(close, rs, first, last),
+    }
+
+
+def evaluate_hypothesis(
+    bars: pd.DataFrame,
+    candidate: Candidate,
+    champion: Candidate | None,
+    costs: CostModel,
+    rules: ExitRules,
+    gate: EntryGate,
+    weekend: WeekendClose | None,
+    trials: int,
+    seed: int = 0,
+) -> dict:
+    """The Strategy Review's bar for a finalist (spec: Claude Strategy Review, step 5), on research bars:
+
+    - enough trades to judge;
+    - a positive mean R in **every** research period, and above the Champion's in each;
+    - an SQN above max(Champion's, 0) plus the selection penalty for ``trials`` ledger trials;
+    - every neighbouring parameter set (the Optimizer's neighbourhood) still positive.
+
+    Win rate is reported, never optimised (D48)."""
+    from .objective import deflation
+    from .candidate import perturb
+
+    first, last = int(bars["time"].iloc[0]), int(bars["time"].iloc[-1])
+    run = lambda c: _summary(backtest(bars, c, costs, rules, gate, weekend=weekend), first, last)  # noqa: E731
+    cand = run(candidate)
+    champ = run(champion) if champion is not None else None
+    rng = np.random.default_rng(seed)
+    neigh = []
+    if cand["trades"]:
+        for _ in range(RESEARCH_NEIGHBOURS):
+            n = perturb(candidate, rng, NEIGHBOUR_SCALE)
+            neigh.append({"params": n.param_dict, "mean_r": run(n)["mean_r"]})
+    penalty = deflation(max(trials, 1))
+    need_sqn = max(champ["sqn"] if champ else 0.0, 0.0) + penalty
+    champ_periods = {p["label"]: p for p in champ["periods"]} if champ else {}
+    weak = [
+        p["label"] for p in cand["periods"]
+        if p["n"] and (p["mean"] <= 0 or (p["label"] in champ_periods and p["mean"] <= champ_periods[p["label"]]["mean"]))
+    ]
+    empty = [p["label"] for p in cand["periods"] if not p["n"]]
+    checks = [
+        {"name": "trades", "ok": cand["trades"] >= MIN_RESEARCH_TRADES, "detail": f"{cand['trades']} trades (needs {MIN_RESEARCH_TRADES})"},
+        {"name": "every_period", "ok": not weak and not empty,
+         "detail": "positive and above the Champion in every period" if not weak and not empty
+         else f"fails in {', '.join(weak + [f'{e} (no trades)' for e in empty])}"},
+        {"name": "selection_penalty", "ok": cand["sqn"] > need_sqn,
+         "detail": f"SQN {cand['sqn']:.2f} vs max(Champion {champ['sqn'] if champ else 0:.2f}, 0) + penalty {penalty:.2f} for {trials} ledger trials"},
+        {"name": "neighbours", "ok": bool(neigh) and all(n["mean_r"] > 0 for n in neigh),
+         "detail": "neighbouring parameters " + ", ".join(f"{n['mean_r']:+.3f}R" for n in neigh) if neigh else "no trades"},
+    ]
+    return {
+        "candidate": cand, "champion": champ, "neighbours": neigh, "checks": checks,
+        "finalist": all(c["ok"] for c in checks), "trials": trials, "penalty": round(penalty, 3),
+        "bars": int(len(bars)), "first_ts": first, "last_ts": last,
+    }

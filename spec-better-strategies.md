@@ -370,6 +370,7 @@ New catalog entries only. The existing strategies' behaviour and golden rows are
 | D52 | History depth | The operator sets MT5 "Max bars in chart" to Unlimited. M1/M5 are then re-pulled read-only and the scalping research is re-run over years | 100k-bar cap gives only 3 months of M1 | Interview | 2026-09-26 |
 | D53 | Scalping result | No GOLD scalping strategy ships. The NY opening-range breakout stays a watched hypothesis in the weekly review; the sealed scalping holdout (2026-06-25 onwards) is still unused | Fails every-period rule and neighbourhood robustness at XM costs | Interview | 2026-09-26 |
 | D54 | Reviewer tool boundary | The weekly review's scheduled task gets an allowed-tools list without the operator MCP tools (start/pause/resume/stop Session, Kill Switch, run learning), and its Bash is limited to the research CLI; the MCP server keeps its full tool set for the operator | The local HTTP API has no authentication, so hiding MCP tools alone would not stop a free Bash call | Interview | 2026-09-27 |
+| D55 | Reviewer tests and git | The scheduled review may also run pytest and the review-branch git/gh steps (extends D54). Hypothesis scripts cannot import MetaTrader5; the allow-list stops direct operator actions but is not a sandbox for code the reviewer writes, so its PRs are reviewed before merge | The reviewer must test and propose code; running its PR tests elsewhere would slow the loop | Interview | 2026-09-27 |
 
 ## Dependency Graph & Implementation Order
 
@@ -420,7 +421,7 @@ New catalog entries only. The existing strategies' behaviour and golden rows are
 - [x] `CostModel.swap_for(side, entry_price, open_ts, close_ts)` with MT5-style rollovers (triple day). It is wired into `PaperTrader`, `PaperBook`, the Evidence Run and Shadow Trades in milestones 4–6
 - [x] `risk/window.py`: `TradingHours` and `next_tradable(ts, window, hours)`
 - [x] Strategies `trend_breakout` and `session_drift` (declares `fill_window_s`), in `strategies/gold.py`, pinned by `tests/fixtures/golden_gold_signals.json`. Old golden rows unchanged. On real XM history they reproduce the research: GOLD Trend's sealed year matches exactly (9 trades, +0.369R). Reopen's research mean matches exactly (+0.032R). Its sealed year has ~4% fewer trades (247 against 257), because days after an irregular closure are skipped
-- [~] `strategies/mtf.py` `align_closed` (last closed higher-timeframe bar, never a forming one). Passing higher-timeframe bars into a Strategy is wired with the reviewer (milestone 9), when a filter first passes the evidence bar
+- [x] `strategies/mtf.py` `align_closed` (last closed higher-timeframe bar, never a forming one). Research wiring came with the reviewer (milestone 9: `--script` with `CONTEXT` + `prepare`); the live engine gets other-timeframe bars with the first multi-timeframe filter that passes, as new code in its PR
 - [x] `risk/costcheck.py` `estimate_cost`: (spread + 2 × slippage) ÷ stop; swap reported, not blocking
 
 ### 2. SimBroker
@@ -472,12 +473,12 @@ New catalog entries only. The existing strategies' behaviour and golden rows are
 ### 9. Claude Strategy Review
 - [x] `research_trials` ledger table (built in milestone 7); the per-Arena count feeds the selection penalty of reviewer Challengers, read again whenever their Guardrails are judged and never below an Optimizer pick's (`TOP_K`)
 - [x] Research snapshot export with the rolling 12-month sealed holdout cut out (built in milestone 7): `research.holdout_from` — the first of the month 12 months back (3 for M1/M5), server time; a bar is research data only if it closed by then, and a trial whose data reaches it is refused
-- [ ] `fxcommand-research` CLI: backtest a hypothesis on the snapshot and append to the ledger
+- [x] `fxcommand-research` CLI: backtest a hypothesis on the snapshot and append to the ledger (every run, pass or fail). It judges the finalist bar in one place (`research.evaluate_hypothesis`): at least 30 trades; positive and above the Champion in every research period at 2× spread with swap; SQN above max(Champion, 0) + `DEFLATE_K·sqrt(2 ln N)` for the Arena's ledger count N (this run included); every Optimizer-style neighbour positive. Champion, exit rules, window and Weekend Close come from the Arena's Session (a research-only Arena is judged against zero). New code runs as `--script` with optional `CONTEXT` timeframes aligned by `align_closed`; `holdout` needs `--confirm`
 - [x] One-shot holdout evaluation, recorded in the ledger; failure is final (built in milestone 7). The ledger row is reserved before the backtest, keyed by Arena and Candidate. Pass rule: at least 5 trades opened in the holdout, positive mean R at Evidence pricing (2× spread, the Arena's rules, window and Weekend Close), and at least the Champion's mean R on the same bars
-- [ ] `.claude/skills/gold-review/SKILL.md`: loop, mistake categories, every-period rule, objective, authority limits, PR format with no P&L
-- [ ] Weekly Saturday scheduled task, plus on-demand invocation — its allowed tools exclude the operator MCP tools and its Bash is limited to the research CLI (D54)
-- [ ] CLAUDE.md reviewer rules
-- [ ] GOLD M5 scalping research Arena (M15 context, M1 trigger inputs; 3-month holdout); scalping hypotheses are counted in the same ledger
+- [x] `.claude/skills/gold-review/SKILL.md`: loop, mistake categories, every-period rule, objective, authority limits, PR format with no P&L
+- [x] Weekly Saturday scheduled task, plus on-demand invocation — its allowed tools exclude the operator MCP tools and its Bash is limited to the research CLI (D54). The desktop app's scheduled tasks cannot restrict tools, so the task is a Windows scheduled task (`scripts/install-review-task.ps1`, run by the operator) that starts `scripts/run-gold-review.ps1`: headless `claude -p /gold-review` with `--permission-mode dontAsk`, an allow-list (read-only MCP tools, `submit_review`, `submit_challenger`, the research CLI, pytest and the review-branch git/gh steps), the operator tools denied, only the fxcommand MCP server loaded, a budget cap, in its own git worktree. On demand: run the script, or `/gold-review` in an interactive session
+- [x] CLAUDE.md reviewer rules
+- [x] GOLD M5 scalping research Arena (M15 context, M1 trigger inputs; 3-month holdout); scalping hypotheses are counted in the same ledger. It needs no Session: `fxcommand-research backtest GOLD M5 --script …` with `CONTEXT = ["M15", "M1"]`, judged against zero, holdout from `holdout_from` (3 months for M1/M5)
 - [x] After "Max bars in chart" was raised (2026-09-26): M1/M5/M15 re-pulled read-only from 2020 and the scalping research re-run (`scalp2.py`, `scalp3.py`). No design passed (D53)
 
 ### 10. Verify
