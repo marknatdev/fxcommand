@@ -2,7 +2,9 @@
 
 It is a thin client of the running app's HTTP API (``FXC_URL``, default
 http://127.0.0.1:8000), so it obeys exactly the same rules as the dashboard.
-Deliberately absent: any tool that enables live trading, edits risk limits, or promotes/rolls back a Champion.
+Deliberately absent: any tool that enables live trading, edits risk limits, or promotes/rolls back a Champion,
+and any tool that overrides the Cost Check, resets the Paper Account or starts an Evidence Run.
+The registered tool names are pinned by tests/test_mcp_tools.py.
 """
 
 from __future__ import annotations
@@ -170,6 +172,76 @@ def run_learning() -> dict:
     """Queue an Optimizer Run for every Arena of every running/paused Session. Promotions still need
     the dashboard (or all Guardrails passing with auto-promotion on a demo account)."""
     return _call("POST", "/learning/run")
+
+
+# ------------------------------------------------------------- Strategy Review
+# Read-only views, plus exactly two narrow writes (submit_review, submit_challenger) that touch only
+# the review, ledger and learning tables. Deliberately absent: Evidence runs, Cost Check overrides,
+# Paper Account reset, trial or holdout writes (the research CLI records those over HTTP).
+EVIDENCE_FIELDS = ("id", "key", "symbol", "timeframe", "strategy", "label", "params", "weekend_close", "status", "bars", "first_ts", "last_ts",
+                   "trades", "mean_r", "sqn", "win_rate", "total_r", "max_dd_r", "periods", "run_ts", "note")
+
+
+@mcp.tool()
+def get_evidence(symbol: str | None = None, timeframe: str | None = None, strategy: str | None = None) -> list[dict] | dict:
+    """Evidence Runs (read-only): each Candidate's full-history backtest on an Arena at 2x the typical
+    spread, with mean R per period. The latest result per settings key."""
+    params = {k: v for k, v in (("symbol", symbol), ("timeframe", timeframe), ("strategy", strategy)) if v}
+    r = _call("GET", "/evidence", params=params)
+    return r if isinstance(r, dict) else [{k: e.get(k) for k in EVIDENCE_FIELDS} for e in r]
+
+
+@mcp.tool()
+def get_scorecard() -> list[dict] | dict:
+    """Per Arena (read-only): the Paper Account's record against the band its Evidence predicts, and
+    what one minimum lot would risk on the real Account. Advisory."""
+    return _call("GET", "/scorecard")
+
+
+@mcp.tool()
+def get_research_snapshot(symbol: str, timeframe: str, tail: int = 200) -> dict:
+    """The research snapshot of an Arena (read-only): bars that closed before its sealed holdout, the
+    holdout start, today's cost model and the Arena's ledger count. Returns at most 500 of the newest
+    bars; the research CLI reads the full snapshot over HTTP."""
+    return _call("GET", "/research/snapshot", params={"symbol": symbol, "timeframe": timeframe, "tail": max(0, min(tail, 500))})
+
+
+@mcp.tool()
+def get_trials(symbol: str | None = None, timeframe: str | None = None, limit: int = 50) -> dict:
+    """The trial ledger (read-only): trials and holdout uses per Arena, and the newest trials."""
+    params: dict[str, Any] = {"limit": max(1, min(limit, 500))}
+    if symbol:
+        params["symbol"] = symbol
+    if timeframe:
+        params["timeframe"] = timeframe
+    return _call("GET", "/research/trials", params=params)
+
+
+@mcp.tool()
+def submit_review(
+    title: str,
+    summary: str,
+    report: str = "",
+    arenas: list[str] | None = None,
+    finalists: list[dict] | None = None,
+    actions: list[dict] | None = None,
+    period_from: int | None = None,
+    period_to: int | None = None,
+) -> dict:
+    """Store a weekly Strategy Review report (local DB, Reviews page); the summary goes to Telegram.
+    No account numbers or balances in the text."""
+    body = {"title": title, "summary": summary, "report": report, "arenas": arenas or [], "finalists": finalists or [],
+            "actions": actions or [], "period_from": period_from, "period_to": period_to}
+    r = _call("POST", "/reviews", body)
+    return r if "error" in r else {k: r[k] for k in ("id", "title", "ts", "ledger")}
+
+
+@mcp.tool()
+def submit_challenger(symbol: str, timeframe: str, strategy: str, params: dict | None = None, note: str = "") -> dict:
+    """Submit a Candidate (an existing Strategy with parameters, in the Champion's family) as a
+    Challenger for an Arena. It is judged by walk-forward, then Shadow Trades under the same
+    Guardrails; it never promotes and never touches a Session."""
+    return _call("POST", "/learning/challengers", {"symbol": symbol, "timeframe": timeframe, "strategy": strategy, "params": params or {}, "note": note})
 
 
 def main() -> None:

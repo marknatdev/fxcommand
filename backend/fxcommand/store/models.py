@@ -262,6 +262,7 @@ class ChallengerRow(SQLModel, table=True):
     trials: int = 10
     robust: Optional[bool] = None
     note: str = ""
+    source: str = "optimizer"  # optimizer | reviewer (a Claude Strategy Review submission)
 
 
 class ShadowTradeRow(SQLModel, table=True):
@@ -383,3 +384,45 @@ class EvidenceRow(SQLModel, table=True):
     periods: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # [{label, from_ts, to_ts, n, mean}]
     rs: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # every trade's R (rounded), for the scorecard band
     note: str = ""
+
+
+class ResearchTrialRow(SQLModel, table=True):
+    """The trial ledger (spec D44): every research backtest of a hypothesis, whatever its result, and
+    every one-time evaluation on the sealed holdout. The per-Arena count feeds the selection penalty."""
+
+    __tablename__ = "research_trials"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    symbol: str = Field(index=True)
+    timeframe: str = Field(index=True)
+    hypothesis: str
+    strategy: str = ""
+    params: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    params_hash: str = Field(index=True)  # the Candidate key (or a hash of the hypothesis without parameters)
+    data_from: Optional[int] = None
+    data_to: Optional[int] = None
+    result: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    holdout_used: bool = Field(default=False, index=True)
+    status: str = "recorded"  # recorded | evaluating | passed | failed (holdout rows)
+    source: str = "cli"  # cli | reviewer | holdout
+    ts: int = 0  # server time
+    wall: float = 0
+
+
+class ReviewRow(SQLModel, table=True):
+    """A Claude Strategy Review report (spec D45): local DB only, shown on the Reviews page."""
+
+    __tablename__ = "reviews"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str
+    summary: str  # a few lines: the Telegram message
+    report: str = ""  # markdown
+    period_from: Optional[int] = None
+    period_to: Optional[int] = None
+    arenas: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # ["GOLD H4", ...]
+    finalists: list[Any] = Field(default_factory=list, sa_column=Column(JSON))
+    actions: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # challengers submitted, PR links
+    ledger: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))  # trials per Arena when submitted
+    ts: int = 0
+    wall: float = 0

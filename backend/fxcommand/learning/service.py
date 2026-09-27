@@ -46,8 +46,9 @@ from . import signal_filter as sf
 from .candidate import Candidate
 from .features import market_frame, vector
 from .objective import RStats, guardrails, r_stats, should_rollback
-from .optimizer import optimize_job
+from .optimizer import TOP_K, evaluate_job, optimize_job
 from . import evidence as ev
+from . import research
 from .costs import CostModel
 from .paper import Costs, EntryGate, ExitRules, PaperTrader
 from .repo import LearningRepo
@@ -97,6 +98,7 @@ class LearningService:
         self._queue: asyncio.PriorityQueue | None = None
         self._seq = itertools.count()
         self._evidence_queued: dict[str, int] = {}  # evidence key -> row id (queued or running)
+        self._submitted: dict[tuple[str, str], dict[str, int]] = {}  # arena -> reviewer Candidate key -> run id (queued)
         self.order_busy = lambda: False  # set by the engine: True while an entry or close is in flight
         self._queued: dict[tuple[str, str], int] = {}  # arena -> run id (queued or running)
         self._worker: asyncio.Task | None = None
@@ -394,7 +396,10 @@ class LearningService:
         champ = self._shadow(ch.symbol, ch.timeframe, champion.key, ch.started_ts)
         oos = RStats(**ch.oos) if ch.oos else None
         champ_oos = RStats(**ch.champion_oos) if ch.champion_oos else None
-        checks = guardrails(mine, champ, oos, champ_oos, ch.trials, ch.robust)
+        trials = ch.trials
+        if ch.source == "reviewer":  # trials logged after the submission still raise its penalty
+            trials = max(trials, self.repo.trial_count(ch.symbol, ch.timeframe), TOP_K)
+        checks = guardrails(mine, champ, oos, champ_oos, trials, ch.robust)
         return {
             "shadow": mine.to_dict(),
             "champion_shadow": champ.to_dict(),
@@ -512,7 +517,7 @@ class LearningService:
         run = self.repo.add_run(symbol=symbol, timeframe=timeframe, trigger=trigger)
         self._queued[key] = run.id
         if self._queue is not None:
-            self._queue.put_nowait((OPTIMIZE, next(self._seq), (symbol, timeframe, run.id)))
+            self._queue.put_nowait((OPTIMIZE, next(self._seq), ("optimize", (symbol, timeframe, run.id))))
         return run.id
 
     async def drain(self) -> None:
@@ -532,14 +537,25 @@ class LearningService:
 
     async def _work(self) -> None:
         while True:
-            prio, _, job = await self._queue.get()
+            _, _, (kind, job) = await self._queue.get()
             try:
-                if prio == OPTIMIZE:
+                if kind == "optimize":
                     await self._work_optimize(*job)
+                elif kind == "challenger":
+                    await self._work_submission(*job)
                 else:
                     await self._work_evidence(job)
             finally:
                 self._queue.task_done()
+
+    async def _work_submission(self, symbol: str, timeframe: str, run_id: int, cand: Candidate, note: str) -> None:
+        try:
+            await self._run_submission(symbol, timeframe, run_id, cand, note)
+        except Exception as e:
+            log.exception("reviewer submission %s failed", run_id)
+            self.repo.update_run(run_id, status="failed", note=str(e)[:500], finished_wall=time.time())
+        finally:
+            self._submitted.get((symbol, timeframe), {}).pop(cand.key, None)
 
     async def _work_optimize(self, symbol: str, timeframe: str, run_id: int) -> None:
         try:
@@ -581,7 +597,7 @@ class LearningService:
         row = self.repo.add_evidence(**spec.row_fields(), trigger=trigger)
         self._evidence_queued[spec.key] = row.id
         if self._queue is not None:
-            self._queue.put_nowait((EVIDENCE, next(self._seq), row.id))
+            self._queue.put_nowait((EVIDENCE, next(self._seq), ("evidence", row.id)))
         return ev.summary(row)
 
     async def _wait_for_orders(self) -> None:
@@ -590,13 +606,16 @@ class LearningService:
             await asyncio.sleep(0.2)
             waited += 0.2
 
-    async def _read_history(self, symbol: str, tf: Timeframe) -> tuple[pd.DataFrame, str, bool]:
+    async def _read_history(self, symbol: str, tf: Timeframe, warm_before: tuple[int, int] | None = None) -> tuple[pd.DataFrame, str, bool]:
         """Every closed bar the feed has (up to ``MAX_EVIDENCE_BARS``, newest kept), read newest page
         first. Returns (bars, note, complete): a page that fails or times out ends the read, and the
-        run is marked incomplete with the bars received."""
+        run is marked incomplete with the bars received. ``warm_before=(ts, n)`` stops once ``n`` bars
+        older than ``ts`` have been read."""
         pages: list[pd.DataFrame] = []
-        got, note, complete = 0, "", True
+        got, note, complete, older = 0, "", True, 0
         while True:
+            if warm_before is not None and older >= warm_before[1]:
+                break
             if got >= ev.MAX_EVIDENCE_BARS:
                 note = f"history capped at the most recent {ev.MAX_EVIDENCE_BARS:,} bars"
                 break
@@ -611,6 +630,8 @@ class LearningService:
                 break
             pages.append(page)
             got += len(page)
+            if warm_before is not None:
+                older += int((page["time"].to_numpy() < warm_before[0]).sum())
             if len(page) < n:
                 break
         if not pages:
@@ -678,6 +699,225 @@ class LearningService:
             out["without_weekend_close"] = self.evidence_for(spec.with_weekend_close(None))
         return out
 
+    # ================================================= Claude Strategy Review
+    async def _server_now(self) -> int:
+        now = await self.broker.run(lambda b: b.server_time(), timeout=ev.CHUNK_TIMEOUT)
+        self._server_time = now
+        return now
+
+    def spec_from(
+        self, symbol: str, timeframe: str, strategy: str, params: dict | None = None, session_id: int | None = None,
+        risk_profile_id: int | None = None, reverse_on_opposite: bool = True, window: dict | None = None, weekend_close: str | None = None,
+    ) -> ev.EvidenceSpec:
+        """Evidence settings from an editor form or a request. A Session supplies its Trading Window and
+        Weekend Close; a Risk Profile its exit rules. Default: no breakeven, no trailing stop."""
+        try:
+            get_strategy(strategy)
+        except KeyError:
+            raise DomainError("unknown_strategy", f"unknown strategy {strategy!r}", 422) from None
+        if session_id is not None:
+            s = self.store.get_session(session_id)
+            window, weekend_close = s.window, (s.weekend_close_time if s.weekend_close else None)
+        rules = ExitRules(reverse_on_opposite=reverse_on_opposite)
+        if risk_profile_id is not None:
+            rules = ExitRules.from_profile(self.store.to_profile(self.store.risk_profile(risk_profile_id)), reverse_on_opposite)
+        return ev.EvidenceSpec.of(symbol, timeframe, strategy, params, rules, window, weekend_close)
+
+    def trial_summary(self) -> list[dict]:
+        now = self._server_time or int(time.time())
+        return [
+            {"symbol": k[0], "timeframe": k[1], **v, "holdout_from": research.holdout_from(now, k[1])}
+            for k, v in sorted(self.repo.trial_counts().items())
+        ]
+
+    async def record_trial(
+        self, symbol: str, timeframe: str, hypothesis: str, data_from: int, data_to: int, result: dict,
+        strategy: str | None = None, params: dict | None = None, source: str = "cli",
+    ) -> dict:
+        """Append a research trial to the ledger, whatever its result. Refused when its data reaches the
+        sealed holdout: research runs on the snapshot, which ends before it."""
+        tf = Timeframe(timeframe)
+        now = await self._server_now()
+        cutoff = research.holdout_from(now, tf.value)
+        if data_to + tf.seconds > cutoff:
+            raise DomainError("holdout", f"the trial's data reaches the sealed holdout (from {_day(cutoff)}): research only on the snapshot", 422)
+        if data_from > data_to:
+            raise DomainError("invalid", "data_from is after data_to", 422)
+        try:
+            ph = research.hypothesis_hash(strategy, params, hypothesis)
+        except KeyError:
+            raise DomainError("unknown_strategy", f"unknown strategy {strategy!r}", 422) from None
+        row = self.repo.add_trial(
+            symbol=symbol, timeframe=tf.value, hypothesis=hypothesis, strategy=strategy or "",
+            params=Candidate.of(strategy, params).param_dict if strategy else (params or {}), params_hash=ph,
+            data_from=data_from, data_to=data_to, result=result, source=source, ts=now,
+        )
+        return {**row.model_dump(), "arena_trials": self.repo.trial_count(symbol, tf.value)}
+
+    async def snapshot(self, symbol: str, timeframe: str, tail: int | None = None) -> dict:
+        """The research snapshot of an Arena: every closed bar before its sealed holdout, with the costs
+        today's typical spread implies. Read-only."""
+        tf = Timeframe(timeframe)
+        now = await self._server_now()
+        cutoff = research.holdout_from(now, tf.value)
+        tick, info = await self.broker.run(lambda b: (b.tick(symbol), b.symbol_info(symbol)), timeout=ev.CHUNK_TIMEOUT)
+        spread = self.spreads.spread_for(symbol, tick, now)
+        bars, note, complete = await self._read_history(symbol, tf)
+        bars = research.research_bars(bars, cutoff, tf.seconds)
+        total = len(bars)
+        first_ts = int(bars["time"].iloc[0]) if total else None
+        if tail is not None:
+            bars = bars.iloc[-tail:] if tail > 0 else bars.iloc[:0]
+        costs = CostModel.from_symbol(info, spread=spread, ref_price=float(bars["close"].iloc[-1])) if spread is not None and len(bars) else None
+        return {
+            "symbol": symbol, "timeframe": tf.value, "server_time": now, "holdout_from": cutoff,
+            "bars_total": total, "first_ts": first_ts,
+            "complete": complete, "note": note,
+            "costs": costs.to_dict() if costs else None, "evidence_spread_multiplier": ev.SPREAD_MULTIPLIER,
+            "arena_trials": self.repo.trial_count(symbol, tf.value),
+            "bars": {k: bars[k].tolist() for k in ("time", "open", "high", "low", "close", "volume")},
+        }
+
+    async def evaluate_holdout(self, symbol: str, timeframe: str, strategy: str, params: dict | None, hypothesis: str) -> dict:
+        """Score a finalist on the sealed holdout, once. The ledger row is written before the backtest, so
+        a second request — or a retry after a crash — is refused and the first result stands."""
+        tf = Timeframe(timeframe)
+        try:
+            cand = Candidate.of(strategy, params)
+        except KeyError:
+            raise DomainError("unknown_strategy", f"unknown strategy {strategy!r}", 422) from None
+        earlier = self.repo.holdout_trial(symbol, tf.value, cand.key)
+        if earlier is not None:
+            raise DomainError("holdout_used", f"{cand.label()} was already scored on the {symbol} {tf.value} holdout on {_day(earlier.ts)}: "
+                              f"{earlier.status} — the result is final", 409)
+        now = await self._server_now()
+        cutoff = research.holdout_from(now, tf.value)
+        tick = await self.broker.run(lambda b: b.tick(symbol), timeout=ev.CHUNK_TIMEOUT)
+        spread = self.spreads.spread_for(symbol, tick, now)
+        if spread is None:
+            raise DomainError("market_shut", "no typical spread is known yet and the market is shut: evaluate when it is open", 409)
+        found = self._arena_assignment(symbol, tf.value)
+        spec = self.spec_for(*found) if found else ev.EvidenceSpec.of(symbol, tf.value, strategy, params)
+        champion = self.champion_of(found[1]) if found else None
+        # reserve the one use before anything can fail — checked again with no await in between, so
+        # two concurrent requests can never both pass
+        if self.repo.holdout_trial(symbol, tf.value, cand.key) is not None:
+            raise DomainError("holdout_used", f"{cand.label()} is already being scored on the {symbol} {tf.value} holdout", 409)
+        row = self.repo.add_trial(
+            symbol=symbol, timeframe=tf.value, hypothesis=hypothesis, strategy=strategy, params=cand.param_dict, params_hash=cand.key,
+            data_from=cutoff, data_to=now, holdout_used=True, status="evaluating", source="holdout", ts=now,
+        )
+        try:
+            warm = max(get_strategy(c.strategy).lookback(get_strategy(c.strategy).resolve(c.param_dict)) for c in (cand, champion) if c) + WARMUP_BARS
+            bars, note, complete = await self._read_history(symbol, tf, warm_before=(cutoff, warm))
+            before = int((bars["time"].to_numpy() < cutoff).sum()) if len(bars) else 0
+            bars = bars.iloc[max(0, before - warm):].reset_index(drop=True)
+            info = await self.broker.run(lambda b: b.symbol_info(symbol), timeout=ev.CHUNK_TIMEOUT)
+            costs = CostModel.from_symbol(info, spread=ev.SPREAD_MULTIPLIER * spread, ref_price=float(bars["close"].iloc[-1]))
+            weekend = WeekendClose(spec.weekend_close, tf.seconds) if spec.weekend_close else None
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                self._pool, research.holdout_job, bars, cand, champion, costs, spec.rules, EntryGate(spec.window, tf.seconds), weekend, cutoff
+            )
+            result.update(note=note, complete=complete, champion_key=champion.key if champion else None)
+            status = "passed" if result["passed"] else "failed"
+        except Exception as e:
+            log.exception("holdout evaluation failed")
+            self.repo.update_trial(row.id, status="error", result={"error": str(e)[:500]})
+            raise
+        row = self.repo.update_trial(row.id, status=status, result=result)
+        c = result["candidate"]
+        self._j("learning", f"Holdout {symbol} {tf.value} {cand.label()}: {status} ({c['trades']} trades, {c['mean_r']:+.3f}R)", symbol=symbol)
+        return row.model_dump()
+
+    def submit_challenger(self, symbol: str, timeframe: str, strategy: str, params: dict | None, note: str = "") -> dict:
+        """A reviewer's Candidate for an Arena. It is judged like an Optimizer finalist (walk-forward,
+        neighbours) and then Shadow Trades under the same Guardrails. It never promotes, never touches
+        a Session and never retires another Challenger to make room."""
+        tf = Timeframe(timeframe).value
+        found = self._arena_assignment(symbol, tf)
+        if found is None:
+            raise DomainError("not_found", f"no session trades {symbol} {tf}", 404)
+        try:
+            cand = Candidate.of(strategy, params)
+        except KeyError:
+            raise DomainError("unknown_strategy", f"unknown strategy {strategy!r}", 422) from None
+        champion = self.champion_of(found[1])
+        if get_strategy(cand.strategy).family != get_strategy(champion.strategy).family:
+            raise DomainError("cross_family", f"{cand.label()} is not in the Champion's family ({champion.label()}): new families arrive as code for review", 422)
+        if cand.key == champion.key:
+            raise DomainError("is_champion", "that is the Champion already", 409)
+        # the review's loop: finalist, one score on the sealed holdout, and only a pass is submitted
+        # (its walk-forward reads the newest bars, which overlap the holdout: a failure must stay final)
+        held = self.repo.holdout_trial(symbol, tf, cand.key)
+        if held is None:
+            raise DomainError("holdout_required", f"score {cand.label()} on the {symbol} {tf} holdout first (POST /api/research/holdout)", 409)
+        if held.status == "evaluating":
+            raise DomainError("holdout_pending", "its holdout evaluation has not finished", 409)
+        if held.status != "passed":
+            raise DomainError("holdout_failed", f"{cand.label()} {held.status} the {symbol} {tf} holdout on {_day(held.ts)}: the result is final", 409)
+        active = self.repo.challengers(symbol, tf)
+        if any(c.candidate_key == cand.key for c in active) or cand.key in self._submitted.get((symbol, tf), {}):
+            raise DomainError("duplicate", "that Candidate is already a Challenger (or queued)", 409)
+        if len(active) + len(self._submitted.get((symbol, tf), {})) >= MAX_CHALLENGERS:
+            raise DomainError("full", f"{symbol} {tf} already has {MAX_CHALLENGERS} Challengers: submit again when one retires", 409)
+        run = self.repo.add_run(symbol=symbol, timeframe=tf, trigger="reviewer", champion_key=champion.key,
+                                note=f"reviewer: {note}"[:500], result={"candidate": cand.to_dict()})
+        self._submitted.setdefault((symbol, tf), {})[cand.key] = run.id
+        if self._queue is not None:
+            self._queue.put_nowait((OPTIMIZE, next(self._seq), ("challenger", (symbol, tf, run.id, cand, note))))
+        return {"run_id": run.id, "status": "queued", "candidate": cand.to_dict()}
+
+    async def _run_submission(self, symbol: str, timeframe: str, run_id: int, cand: Candidate, note: str) -> None:
+        found = self._arena_assignment(symbol, timeframe)
+        if found is None:
+            self.repo.update_run(run_id, status="failed", note="no session trades this arena any more", finished_wall=time.time())
+            return
+        s, a = found
+        champion = self.champion_of(a)
+        self.repo.update_run(run_id, status="running", started_wall=time.time())
+        tf = Timeframe(timeframe)
+        n_bars = int(self.store.app_settings()["learning_bars"])
+        bars, tick, info, now = await self.broker.run(
+            lambda b: (b.closed_bars(symbol, tf, n_bars), b.tick(symbol), b.symbol_info(symbol), b.server_time())
+        )
+        spec = self.spec_for(s, a)
+        costs = CostModel.from_symbol(info, spread=self._typical_spread(symbol, tick, now), ref_price=float(bars["close"].iloc[-1]) if len(bars) else None)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            self._pool, evaluate_job, bars, champion, cand, costs, spec.rules, spec.window, tf.seconds, spec.weekend_close or None, run_id
+        )
+        self._server_time = now
+        if result.insufficient:
+            self.repo.update_run(run_id, status="insufficient", note=result.insufficient, result=result.to_dict(), finished_wall=time.time())
+            return
+        if len(self.repo.challengers(symbol, timeframe)) >= MAX_CHALLENGERS:
+            self.repo.update_run(run_id, status="failed", note="the Arena filled up with Challengers meanwhile", result=result.to_dict(), finished_wall=time.time())
+            return
+        judged = result.finalists[0]
+        self.repo.ensure_candidate(cand)
+        self.repo.add_challenger(
+            symbol=symbol, timeframe=timeframe, candidate_key=cand.key, started_ts=now, run_id=run_id,
+            oos=judged.wf.oos.to_dict(), champion_oos=result.champion.wf.oos.to_dict(),
+            trials=max(self.repo.trial_count(symbol, timeframe), TOP_K), robust=judged.robust,
+            note=f"submitted by the Strategy Review: {note}"[:500], source="reviewer",
+        )
+        verdict = "qualifies" if result.picks else "does not qualify on walk-forward yet"
+        self.repo.update_run(run_id, status="done", note=f"reviewer Challenger {cand.label()} installed; {verdict}", result=result.to_dict(), finished_wall=time.time())
+        self._j("learning", f"Strategy Review Challenger for {symbol} {timeframe}: {cand.label()} ({verdict})", symbol=symbol)
+
+    def add_review(self, title: str, summary: str, report: str = "", arenas: list | None = None, finalists: list | None = None,
+                   actions: list | None = None, period_from: int | None = None, period_to: int | None = None) -> dict:
+        """Store a review report and send its summary to Telegram (one Alert)."""
+        counts = self.repo.trial_counts()
+        ledger = {f"{k[0]} {k[1]}": v for k, v in counts.items()}
+        row = self.repo.add_review(
+            title=title, summary=summary, report=report, arenas=arenas or [], finalists=finalists or [], actions=actions or [],
+            period_from=period_from, period_to=period_to, ledger=ledger, ts=self._server_time or int(time.time()),
+        )
+        self._j("alert", f"Strategy Review: {title} — {summary}", level="info", alert=True, data={"review_id": row.id})
+        return row.model_dump()
+
     async def scorecard(self) -> list[dict]:
         """Per Arena: the Paper Account's record against the band the backtest says it should fall in,
         and what one minimum lot would risk on the real Account. Advisory; it never blocks."""
@@ -695,7 +935,7 @@ class LearningService:
             paper_rs = [self._trade_r(t) for t in self.store.paper_closed_trades(symbol, timeframe, a.strategy)]
             n = len(paper_rs)
             mean = sum(paper_rs) / n if n else 0.0
-            rng = ev.band(rs, n) if rs else None
+            rng = ev.band(rs, n) if rs and n else None
             strat = get_strategy(a.strategy)
             p = strat.resolve(a.params)
             tf = Timeframe(timeframe)
@@ -718,12 +958,22 @@ class LearningService:
                 "paper": {"trades": n, "mean_r": round(mean, 4), "total_r": round(sum(paper_rs), 3), "epoch": self.store.paper_epoch()},
                 "band": list(rng) if rng else None,
                 "band_level": ev.BAND_LEVEL,
-                "verdict": "the backtest took no trades" if badge["status"] == "match" and not rs else ev.verdict(n, mean, rng),
+                "verdict": self._verdict(badge["status"] == "match", rs, n, mean, rng),
                 "min_lot_risk_pct": risk,
                 "stop": stop if stop == stop else None,
                 "note": "counts every Paper trade of this Strategy on the Arena in this Paper epoch, whatever its parameters",
             })
         return out
+
+    @staticmethod
+    def _verdict(matched: bool, rs: list, n: int, mean: float, rng) -> str:
+        if not matched:
+            return "no evidence"
+        if not rs:
+            return "the backtest took no trades"
+        if n < ev.MIN_SCORECARD_TRADES:
+            return "too few trades"
+        return ev.verdict(n, mean, rng)
 
     @staticmethod
     def _trade_r(t: TradeRow) -> float:
@@ -866,3 +1116,7 @@ class LearningService:
         runs = [r.model_dump() for r in self.repo.runs(symbol, timeframe, limit=10)]
         signals = [r.model_dump(exclude={"features"}) for r in self.repo.signals(symbol, timeframe, limit=30)]
         return {**summary, "curves": curves, "history": versions, "runs": runs, "signals": signals}
+
+
+def _day(ts: int) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(ts))

@@ -188,6 +188,19 @@ _Avoid_: backtest result (a Backtest is also what an Optimizer Run does many tim
 Per Arena, the Paper Account's record set against the range the Evidence says a record of that many trades should fall in, beside what one minimum lot would risk on the real Account. It advises the operator; it never blocks.
 _Avoid_: graduation check (nothing is checked or gated)
 
+**Strategy Review**:
+A weekly research pass by Claude over the week's trades, Evidence and Scorecards. It may submit Challengers and reports, and propose new Strategy code only as pull requests; it never controls Sessions, risk or money.
+
+**Sealed Holdout**:
+The most recent year of an Arena's history (three months for M1/M5), rolling forward monthly, that research never sees. A finalist is scored on it once; a failure there is final.
+_Avoid_: test set, out-of-sample (the Optimizer's out-of-sample part is research data)
+
+**Research Snapshot**:
+An Arena's history up to the start of its Sealed Holdout, exported read-only for research.
+
+**Trial Ledger**:
+The record of every hypothesis tested on an Arena, whatever its result, and every use of its Sealed Holdout. The more trials an Arena has seen, the higher the bar a Challenger from the Strategy Review must clear.
+
 ## Relationships
 
 - An **Account** has many **Sessions**; a **Session** belongs to exactly one **Account**.

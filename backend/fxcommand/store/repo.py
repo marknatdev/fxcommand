@@ -384,6 +384,10 @@ class Store:
             )
             return db.exec(q).first()
 
+    def cost_overrides(self, session_id: int) -> list[CostOverrideRow]:
+        with self._db() as db:
+            return list(db.exec(select(CostOverrideRow).where(CostOverrideRow.session_id == session_id).order_by(CostOverrideRow.id)))
+
     def set_cost_override(self, session_id: int, symbol: str, timeframe: str, enabled: bool, reason: str = "", ts: int = 0) -> None:
         with self._db() as db:
             for row in db.exec(select(CostOverrideRow).where(

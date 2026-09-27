@@ -15,6 +15,8 @@ from ..store.models import (
     ChampionVersionRow,
     EvidenceRow,
     FilterStateRow,
+    ResearchTrialRow,
+    ReviewRow,
     LearningSlotRow,
     OptimizerRunRow,
     PendingChangeRow,
@@ -208,6 +210,56 @@ class LearningRepo:
         for r in rows:
             self.update_evidence(r.id, status="failed", note=note, finished_wall=time.time())
         return len(rows)
+
+    # --------------------------------------------------------- research ledger
+    def add_trial(self, **fields: Any) -> ResearchTrialRow:
+        return self._save(ResearchTrialRow(wall=time.time(), **fields))
+
+    def update_trial(self, trial_id: int, **fields: Any) -> ResearchTrialRow | None:
+        return self._update(ResearchTrialRow, trial_id, **fields)
+
+    def trials(self, symbol: str | None = None, timeframe: str | None = None, limit: int = 100) -> list[ResearchTrialRow]:
+        """Newest first."""
+        with self._db() as db:
+            q = select(ResearchTrialRow)
+            if symbol:
+                q = q.where(ResearchTrialRow.symbol == symbol)
+            if timeframe:
+                q = q.where(ResearchTrialRow.timeframe == timeframe)
+            return list(db.exec(q.order_by(ResearchTrialRow.id.desc()).limit(limit)))
+
+    def trial_counts(self) -> dict[tuple[str, str], dict]:
+        """Per Arena: every ledger row (research trials and holdout uses) — the selection penalty's N."""
+        out: dict[tuple[str, str], dict] = {}
+        with self._db() as db:
+            for r in db.exec(select(ResearchTrialRow)):
+                c = out.setdefault((r.symbol, r.timeframe), {"trials": 0, "holdout_uses": 0})
+                c["trials"] += 1
+                c["holdout_uses"] += int(r.holdout_used)
+        return out
+
+    def trial_count(self, symbol: str, timeframe: str) -> int:
+        return self.trial_counts().get((symbol, timeframe), {"trials": 0})["trials"]
+
+    def holdout_trial(self, symbol: str, timeframe: str, params_hash: str) -> ResearchTrialRow | None:
+        with self._db() as db:
+            q = select(ResearchTrialRow).where(
+                ResearchTrialRow.symbol == symbol, ResearchTrialRow.timeframe == timeframe,
+                ResearchTrialRow.params_hash == params_hash, ResearchTrialRow.holdout_used == True,  # noqa: E712
+            )
+            return db.exec(q).first()
+
+    # ------------------------------------------------------------------ reviews
+    def add_review(self, **fields: Any) -> ReviewRow:
+        return self._save(ReviewRow(wall=time.time(), **fields))
+
+    def reviews(self, limit: int = 50) -> list[ReviewRow]:
+        with self._db() as db:
+            return list(db.exec(select(ReviewRow).order_by(ReviewRow.id.desc()).limit(limit)))
+
+    def review(self, review_id: int) -> ReviewRow | None:
+        with self._db() as db:
+            return db.get(ReviewRow, review_id)
 
     # ------------------------------------------------------------------ runs
     def add_run(self, **fields: Any) -> OptimizerRunRow:

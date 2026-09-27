@@ -195,17 +195,46 @@ class SessionManager:
     def _paper_global_pnl(self, day_ts: int) -> float:
         return self.store.realized_paper(since=day_ts) + sum(p.profit for p in self._positions if p.ticket < 0)
 
+    def paper_account_view(self) -> dict:
+        cfg = self.store.paper_account()
+        acct = self._paper_account()
+        _, day_equity = self._paper_day_start()
+        return {
+            "start_balance": float(cfg["start_balance"]), "epoch": int(cfg["epoch"]), "currency": acct.currency,
+            "balance": acct.balance, "equity": acct.equity, "open_pnl": round(acct.equity - acct.balance, 2),
+            "realized": round(acct.balance - float(cfg["start_balance"]), 2),
+            "day_start_equity": round(day_equity, 2), "day_pnl": round(acct.equity - day_equity, 2),
+            "open_positions": sum(1 for p in self._positions if p.ticket < 0),
+            "active_sessions": [s.name for s in self.store.list_sessions() if s.execution == "paper" and s.status in ACTIVE],
+        }
+
+    def _paper_idle(self) -> None:
+        active = [s.name for s in self.store.list_sessions() if s.execution == "paper" and s.status in ACTIVE]
+        if active:
+            raise DomainError("paper_active", f"stop the Paper Sessions first: {', '.join(active)}")
+        if self.store.paper_open():
+            raise DomainError("paper_open", "close the open Paper Positions first")
+
+    async def set_paper_start_balance(self, start_balance: float) -> dict:
+        """Change the notional start balance within the epoch. Same guards as a reset, and the Paper day
+        start moves with it (otherwise today's loss limit would see a phantom loss or gain)."""
+        async with self._lock:
+            if not start_balance > 0:
+                raise DomainError("invalid", "the start balance must be positive", 422)
+            self._paper_idle()
+            cfg = self.store.set_paper_account(start_balance=float(start_balance))
+            equity = self._paper_account().equity
+            self.store.set_setting("day_start:paper", {"day": self.now // DAY, "equity": equity})
+            self._j("state", f"Paper Account start balance set to {start_balance:.2f} (equity {equity:.2f})", level="warn")
+            return cfg
+
     async def reset_paper_account(self, confirm: str, start_balance: float | None = None) -> dict:
         """Start a new Paper Account epoch. Typed confirmation; refused while a Paper Session is active
         or a Paper Position is open. Old rows stay (archived by epoch); tickets are never reused."""
         async with self._lock:
             if confirm != "RESET PAPER":
                 raise DomainError("confirm_required", "type RESET PAPER to reset the Paper Account", 422)
-            active = [s.name for s in self.store.list_sessions() if s.execution == "paper" and s.status in ACTIVE]
-            if active:
-                raise DomainError("paper_active", f"stop the Paper Sessions first: {', '.join(active)}")
-            if self.store.paper_open():
-                raise DomainError("paper_open", "close the open Paper Positions first")
+            self._paper_idle()
             cfg = self.store.paper_account()
             start = float(start_balance) if start_balance is not None else float(cfg["start_balance"])
             if not start > 0:
@@ -339,8 +368,10 @@ class SessionManager:
                 weekend_close=spec.weekend_close,
                 weekend_close_time=spec.weekend_close_time,
             )
+            self._check_cost_overrides(spec)
             row = self.store.save_session(row, rows)
             self._sync_paper()
+            self._sync_cost_overrides(row, spec.cost_overrides)
             mode = " — PAPER" if row.execution == "paper" else ""
             magics = ", ".join(str(a.magic) for a in self.store.assignments(row.id))
             self._j("state", f"Session '{row.name}' created (magics {magics}, {len(rows)} assignments){mode}", row)
@@ -353,6 +384,7 @@ class SessionManager:
                 raise DomainError("session_active", "stop the session before editing it")
             rows = self._validate_spec(spec, session_id)
             self._check_execution(spec)
+            self._check_cost_overrides(spec)
             if spec.execution != s.execution:
                 if self._session_positions(s):
                     raise DomainError("has_positions", "close the session's positions before changing its execution mode")
@@ -365,6 +397,7 @@ class SessionManager:
             s.execution, s.weekend_close, s.weekend_close_time = spec.execution, spec.weekend_close, spec.weekend_close_time
             s = self.store.save_session(s, rows)
             self._sync_paper()
+            self._sync_cost_overrides(s, spec.cost_overrides)
             for a in self.store.assignments(session_id):
                 self._states.pop(a.id, None)
             self._j("state", f"Session '{s.name}' updated", s)
@@ -475,6 +508,34 @@ class SessionManager:
                 "override": override is not None, "allowed": not est.blocked or override is not None,
             })
         return out
+
+    @staticmethod
+    def _check_cost_overrides(spec: SessionIn) -> None:
+        if spec.cost_overrides is None:
+            return
+        arenas = {(a.symbol, Timeframe(a.timeframe).value) for a in spec.assignments}
+        for o in spec.cost_overrides:
+            if (o.symbol, o.timeframe.value) not in arenas:
+                raise DomainError("invalid_override", f"a Cost Check override for {o.symbol} {o.timeframe.value} needs that Assignment", 422)
+
+    def _sync_cost_overrides(self, s: SessionRow, wanted: list | None) -> None:
+        """Keep overrides only for the Session's Arenas; with ``wanted`` (the editor's full set) add and
+        remove to match it. Every change is journaled."""
+        arenas = {(a.symbol, a.timeframe) for a in self.store.assignments(s.id)}
+        current = {(o.symbol, o.timeframe): o for o in self.store.cost_overrides(s.id)}
+        if wanted is None:
+            target = {k: o.reason for k, o in current.items() if k in arenas}
+        else:
+            target = {(o.symbol, o.timeframe.value): o.reason for o in wanted}
+        for (symbol, tf), o in current.items():
+            if (symbol, tf) not in target:
+                self.store.set_cost_override(s.id, symbol, tf, False, ts=self.now)
+                why = "" if (symbol, tf) in arenas else " (Assignment removed)"
+                self._j("state", f"Cost Check override removed for {symbol} {tf}{why}", s, symbol)
+        for (symbol, tf), reason in target.items():
+            if (symbol, tf) not in current or current[(symbol, tf)].reason != reason:
+                self.store.set_cost_override(s.id, symbol, tf, True, reason, self.now)
+                self._j("state", f"Cost Check overridden for {symbol} {tf}" + (f": {reason}" if reason else ""), s, symbol, level="warn")
 
     async def set_cost_override(self, session_id: int, symbol: str, timeframe: str, enabled: bool, reason: str = "") -> None:
         s = self.store.get_session(session_id)

@@ -369,6 +369,7 @@ New catalog entries only. The existing strategies' behaviour and golden rows are
 | D51 | Scalping | GOLD scalping (M1/M5/M15 multi-timeframe) is a research track in the weekly Claude review, on its own Arena, separate from the H4/H1 strategies. No scalper engine work until a design passes | 10 designs lose after costs; the signal is smaller than the spread | Interview | 2026-09-26 |
 | D52 | History depth | The operator sets MT5 "Max bars in chart" to Unlimited. M1/M5 are then re-pulled read-only and the scalping research is re-run over years | 100k-bar cap gives only 3 months of M1 | Interview | 2026-09-26 |
 | D53 | Scalping result | No GOLD scalping strategy ships. The NY opening-range breakout stays a watched hypothesis in the weekly review; the sealed scalping holdout (2026-06-25 onwards) is still unused | Fails every-period rule and neighbourhood robustness at XM costs | Interview | 2026-09-26 |
+| D54 | Reviewer tool boundary | The weekly review's scheduled task gets an allowed-tools list without the operator MCP tools (start/pause/resume/stop Session, Kill Switch, run learning), and its Bash is limited to the research CLI; the MCP server keeps its full tool set for the operator | The local HTTP API has no authentication, so hiding MCP tools alone would not stop a free Bash call | Interview | 2026-09-27 |
 
 ## Dependency Graph & Implementation Order
 
@@ -456,9 +457,9 @@ New catalog entries only. The existing strategies' behaviour and golden rows are
 - [x] Scorecard per Arena: the Paper Account's closed trades this epoch (R = profit ÷ money risked) against the 90% bootstrap band of the matching Evidence, a verdict (within / below / above / too few trades / no evidence), and the real Account's min-lot risk % at the current stop. Paper trades are counted per Strategy, not per parameter set (trades do not record their Candidate)
 
 ### 7. API and MCP
-- [ ] `/api/evidence`, `/api/evidence/run`, `/api/scorecard`, `/api/paper-account` (+ `reset`), `/api/sessions/{id}/cost-check`
-- [ ] `/api/research/snapshot`, `/api/research/trials`, `/api/research/holdout`, `/api/reviews`, `/api/learning/challengers`
-- [ ] MCP: read-only `get_evidence`, `get_research_snapshot` and `get_trials`; write tools `submit_review` and `submit_challenger` only
+- [x] `/api/evidence` (+ `/{id}`), `/api/evidence/match` (the editor's badge for unsaved settings), `/api/evidence/run` (202, dashboard only), `/api/sessions/{id}/evidence`, `/api/scorecard`, `/api/paper-account` (GET/PUT, + `reset`), `/api/sessions/{id}/cost-check`. The Cost Check override travels in the Session payload (`cost_overrides`: omitted = unchanged, a list = the full set; an override whose Assignment is removed is dropped; every change journaled). Changing the Paper start balance has the reset's guards and moves the Paper day start with it
+- [x] `/api/research/snapshot`, `/api/research/trials` (GET/POST), `/api/research/holdout`, `/api/reviews` (+ `/{id}`), `/api/learning/challengers`. Their storage and rules were built here, because the endpoints need them (see milestone 9)
+- [x] MCP: read-only `get_evidence`, `get_scorecard`, `get_research_snapshot` (≤ 500 bars; the CLI reads the full snapshot over HTTP) and `get_trials`; write tools `submit_review` and `submit_challenger` only. The whole tool set is pinned by a test. The original operator tools (start/pause/resume/stop Session, Kill Switch, run learning) are unchanged: keeping the reviewer away from them is decided with milestone 9
 
 ### 8. UI
 - [ ] Session editor: several Assignments per Symbol, Evidence badges, Cost Check with override, weekend warning
@@ -469,12 +470,12 @@ New catalog entries only. The existing strategies' behaviour and golden rows are
 - [ ] Reviews page
 
 ### 9. Claude Strategy Review
-- [ ] `research_trials` ledger table; the per-Arena count feeds the selection penalty
-- [ ] Research snapshot export with the rolling 12-month sealed holdout cut out
+- [x] `research_trials` ledger table (built in milestone 7); the per-Arena count feeds the selection penalty of reviewer Challengers, read again whenever their Guardrails are judged and never below an Optimizer pick's (`TOP_K`)
+- [x] Research snapshot export with the rolling 12-month sealed holdout cut out (built in milestone 7): `research.holdout_from` — the first of the month 12 months back (3 for M1/M5), server time; a bar is research data only if it closed by then, and a trial whose data reaches it is refused
 - [ ] `fxcommand-research` CLI: backtest a hypothesis on the snapshot and append to the ledger
-- [ ] One-shot holdout evaluation, recorded in the ledger; failure is final
+- [x] One-shot holdout evaluation, recorded in the ledger; failure is final (built in milestone 7). The ledger row is reserved before the backtest, keyed by Arena and Candidate. Pass rule: at least 5 trades opened in the holdout, positive mean R at Evidence pricing (2× spread, the Arena's rules, window and Weekend Close), and at least the Champion's mean R on the same bars
 - [ ] `.claude/skills/gold-review/SKILL.md`: loop, mistake categories, every-period rule, objective, authority limits, PR format with no P&L
-- [ ] Weekly Saturday scheduled task, plus on-demand invocation
+- [ ] Weekly Saturday scheduled task, plus on-demand invocation — its allowed tools exclude the operator MCP tools and its Bash is limited to the research CLI (D54)
 - [ ] CLAUDE.md reviewer rules
 - [ ] GOLD M5 scalping research Arena (M15 context, M1 trigger inputs; 3-month holdout); scalping hypotheses are counted in the same ledger
 - [x] After "Max bars in chart" was raised (2026-09-26): M1/M5/M15 re-pulled read-only from 2020 and the scalping research re-run (`scalp2.py`, `scalp3.py`). No design passed (D53)
