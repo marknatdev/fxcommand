@@ -344,3 +344,42 @@ class PendingChangeRow(SQLModel, table=True):
     status: str = Field(default="pending", index=True)  # pending | applied | cancelled
     created_wall: float = 0
     applied_ts: Optional[int] = None
+
+
+class EvidenceRow(SQLModel, table=True):
+    """One Evidence Run: a read-only Backtest of a Candidate on an Arena's full history at 2× the
+    typical spread (spec D11, D23). Local DB only: never committed, never exposed beyond read-only MCP."""
+
+    __tablename__ = "evidence_runs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    key: str = Field(index=True)  # learning.evidence.evidence_key: every setting the result depends on
+    symbol: str = Field(index=True)
+    timeframe: str
+    strategy: str
+    candidate_key: str
+    params: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    exit_rules: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    exit_rules_hash: str = ""
+    window: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    window_hash: str = ""
+    weekend_close: str = ""  # "" = off, else Friday close time "HH:MM"
+    cost_version: int = 0
+    costs: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))  # the CostModel used
+    status: str = Field(default="queued", index=True)  # queued | running | done | incomplete | failed
+    trigger: str = "manual"
+    requested_wall: float = 0
+    finished_wall: Optional[float] = None
+    run_ts: Optional[int] = None  # server time the history was read
+    bars: int = 0
+    first_ts: Optional[int] = None
+    last_ts: Optional[int] = None
+    trades: int = 0
+    mean_r: float = 0.0
+    sqn: float = 0.0
+    win_rate: float = 0.0
+    total_r: float = 0.0
+    max_dd_r: float = 0.0
+    periods: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # [{label, from_ts, to_ts, n, mean}]
+    rs: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # every trade's R (rounded), for the scorecard band
+    note: str = ""

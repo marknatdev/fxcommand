@@ -142,3 +142,39 @@ def next_tradable(server_ts: int, window: TradingWindow | None = None, hours: Tr
             return ts
         ts += 60
     return None
+
+
+def weekday(ts: int) -> int:
+    """Monday=0 .. Sunday=6 for server-time epoch seconds (1970-01-01 was a Thursday)."""
+    return (ts // DAY + 3) % 7
+
+
+def in_weekend_close(now: int, close_time: str) -> bool:
+    """From Friday ``close_time`` (server time) until the week ends. Shared by the live Weekend Close
+    and every Backtest (``WeekendClose``), so the Evidence models the Session's setting."""
+    wd = weekday(now)
+    if wd >= 5:
+        return True
+    if wd != 4:
+        return False
+    return (now % DAY) // 60 >= _hm(close_time)
+
+
+@dataclass(frozen=True)
+class WeekendClose:
+    """A Session's Weekend Close as a Backtest applies it (spec D6). Plain data, so it pickles.
+
+    Friday ``close_time`` is rarely a bar boundary (22:30 falls inside GOLD's 20:00 H4 bar), so a
+    position is settled at the close of the bar that contains it (its stops are checked first), not
+    at the next bar's open, which lies after the weekend gap. An entry whose fill falls inside the
+    span is refused, as the live engine refuses it."""
+
+    close_time: str = "22:30"
+    bar_seconds: int = 3600
+
+    def blocks_fill(self, t: int) -> bool:
+        return in_weekend_close(t, self.close_time)
+
+    def closes_bar(self, t: int) -> bool:
+        """Bar opening at ``t`` reaches Friday ``close_time`` (or the weekend) before it ends."""
+        return in_weekend_close(t + self.bar_seconds - 1, self.close_time)

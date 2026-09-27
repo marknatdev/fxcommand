@@ -180,6 +180,14 @@ _Avoid_: queued order, pending order (MT5's resting limit/stop orders)
 The cost of one round trip (spread and slippage) as a share of an Assignment's stop, in R. An Assignment above the limit cannot start unless the operator overrides it. Swap is shown beside it but never blocks.
 _Avoid_: spread filter (that is the Risk Profile's per-order maximum spread)
 
+**Evidence Run**:
+A read-only Backtest of one Candidate on an Arena's full history from the connected feed, priced at twice the typical spread and run with an Assignment's exit rules, Trading Window and Weekend Close. Evidence belongs to exactly those settings: an Assignment whose settings differ has no matching Evidence.
+_Avoid_: backtest result (a Backtest is also what an Optimizer Run does many times)
+
+**Scorecard**:
+Per Arena, the Paper Account's record set against the range the Evidence says a record of that many trades should fall in, beside what one minimum lot would risk on the real Account. It advises the operator; it never blocks.
+_Avoid_: graduation check (nothing is checked or gated)
+
 ## Relationships
 
 - An **Account** has many **Sessions**; a **Session** belongs to exactly one **Account**.
@@ -192,6 +200,7 @@ _Avoid_: spread filter (that is the Risk Profile's per-order maximum spread)
 - A **Session** has exactly one **Execution Mode**; Paper and Broker Sessions follow the same Symbol rule.
 - A **Session** is pinned to one login while active; **Live Caps** and the **Equity Floor** apply only when that Account is live.
 - A **Promotion** or **Rollback** creates a new **Champion Version**; only the operator may promote on a live **Account**.
+- An **Evidence Run** tests one **Candidate** on one **Arena** under one set of settings; an **Assignment** has matching Evidence only when all of them agree.
 
 ## Example dialogue
 

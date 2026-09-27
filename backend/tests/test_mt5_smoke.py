@@ -65,6 +65,17 @@ def test_symbols_ticks_and_bars(mt5_broker):
     print(f"closed bars OK; last M15 bar {time.strftime('%Y-%m-%d %H:%M', time.gmtime(int(mt5_broker.closed_bars(sample, Timeframe.M15, 1)['time'].iloc[-1])))} server time")
 
 
+def test_history_reads_in_pages(mt5_broker):
+    """The Evidence Run reads history newest page first (``offset``); pages must stitch without gaps."""
+    names = mt5_broker.symbols()
+    sample = next((n for n in names if n.upper().startswith("GOLD")), names[0])
+    whole = mt5_broker.closed_bars(sample, Timeframe.H4, 3000)
+    pages = [mt5_broker.closed_bars(sample, Timeframe.H4, 1000, offset) for offset in (0, 1000, 2000)]
+    stitched = [int(t) for p in pages[::-1] for t in p["time"]]
+    assert stitched == [int(t) for t in whole["time"]], "paged H4 history differs from one read"
+    print(f"\n{sample} H4: {len(whole)} bars read in 3 pages, oldest {time.strftime('%Y-%m-%d', time.gmtime(stitched[0]))}")
+
+
 def test_positions_and_history_read(mt5_broker):
     pos = mt5_broker.positions()
     hist = mt5_broker.history(int(time.time()) - 7 * 86400)

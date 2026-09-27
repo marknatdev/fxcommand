@@ -14,6 +14,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
+from ..risk.window import WeekendClose
 from .candidate import Candidate, generate, perturb
 from .objective import MIN_OOS_TRADES, ROBUST_SHARE, WalkForward, walk_forward
 from .paper import Costs, EntryGate, ExitRules, backtest
@@ -68,8 +69,8 @@ class OptimizeResult:
         }
 
 
-def _score(bars, cand, costs, rules, allow, split, edges) -> Scored:
-    return Scored(cand, walk_forward(backtest(bars, cand, costs, rules, allow), split, edges))
+def _score(bars, cand, costs, rules, allow, split, edges, weekend=None) -> Scored:
+    return Scored(cand, walk_forward(backtest(bars, cand, costs, rules, allow, weekend=weekend), split, edges))
 
 
 def optimize(
@@ -82,6 +83,7 @@ def optimize(
     seed: int = 0,
     allow_entry: Callable[[int], bool] | None = None,
     exclude: set[str] | None = None,
+    weekend: WeekendClose | None = None,
 ) -> OptimizeResult:
     bars = bars.reset_index(drop=True)
     if len(bars) < MIN_BARS:
@@ -93,12 +95,12 @@ def optimize(
     edges = [int(t[i]) for i in oos_idx]
     rules = rules or ExitRules()
 
-    champ = _score(bars, champion, costs, rules, allow_entry, split, edges)
+    champ = _score(bars, champion, costs, rules, allow_entry, split, edges, weekend)
     cands = [c for c in generate(champion, n_candidates, rng) if not exclude or c.key not in exclude]
-    scored = [_score(bars, c, costs, rules, allow_entry, split, edges) for c in cands]
+    scored = [_score(bars, c, costs, rules, allow_entry, split, edges, weekend) for c in cands]
     finalists = sorted(scored, key=lambda s: s.is_sqn, reverse=True)[:top_k]
     for s in finalists:
-        neigh = [_score(bars, perturb(s.candidate, rng, 0.12), costs, rules, allow_entry, split, edges) for _ in range(NEIGHBOURS)]
+        neigh = [_score(bars, perturb(s.candidate, rng, 0.12), costs, rules, allow_entry, split, edges, weekend) for _ in range(NEIGHBOURS)]
         med = statistics.median(n.wf.oos.sqn for n in neigh)
         s.neighbours_median_sqn = round(med, 3)
         s.robust = s.wf.oos.sqn > 0 and med >= ROBUST_SHARE * s.wf.oos.sqn
@@ -128,8 +130,11 @@ def optimize_job(
     window: dict | None,
     bar_seconds: int,
     exclude: set[str],
+    weekend_close: str | None = None,
 ) -> OptimizeResult:
     """Picklable entry point for running an Optimizer Run in a separate process (no lambdas). The
-    Trading Window is judged at each entry's fill time, per Candidate's fill window (EntryGate)."""
+    Trading Window is judged at each entry's fill time, per Candidate's fill window (EntryGate), and
+    the Session's Weekend Close is applied when it is on."""
     allow = EntryGate(window, bar_seconds) if window is not None else None
-    return optimize(bars, champion, costs, rules, n_candidates=n_candidates, seed=seed, allow_entry=allow, exclude=exclude)
+    weekend = WeekendClose(weekend_close, bar_seconds) if weekend_close else None
+    return optimize(bars, champion, costs, rules, n_candidates=n_candidates, seed=seed, allow_entry=allow, exclude=exclude, weekend=weekend)

@@ -171,9 +171,9 @@ class Mt5Broker:
         info = self._need(mt5.symbol_info(symbol), f"symbol_info({symbol})")
         return Tick(symbol=symbol, time=int(t.time), bid=float(t.bid), ask=float(t.ask), point=float(info.point))
 
-    def closed_bars(self, symbol: str, timeframe: Timeframe, count: int) -> pd.DataFrame:
+    def closed_bars(self, symbol: str, timeframe: Timeframe, count: int, offset: int = 0) -> pd.DataFrame:
         # start_pos=1 skips index 0, the bar that is still forming
-        rates = mt5.copy_rates_from_pos(symbol, _tf(timeframe), 1, count)
+        rates = mt5.copy_rates_from_pos(symbol, _tf(timeframe), 1 + max(0, int(offset)), count)
         if rates is None or len(rates) == 0:
             return empty_bars()
         df = pd.DataFrame(rates)

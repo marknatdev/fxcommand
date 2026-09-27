@@ -9,16 +9,21 @@ Engine hooks (all called inside the engine lock, all cheap, never place orders):
     pending(session_id, symbol)         -> Promotion / Rollback waiting for the Assignment to be flat
     apply(change, s, a, now)            -> Candidate to switch to (engine updates the Assignment)
     on_session_started / on_session_stopped / on_new_day
-Operator commands: request_optimize, promote, rollback, set_auto_promote. Read side: overview, arena.
+Operator commands: request_optimize, promote, rollback, set_auto_promote, request_evidence.
+Read side: overview, arena, evidence, evidence_for, assignment_evidence, scorecard.
 
-CPU-heavy work (Optimizer Runs) runs on a dedicated learner thread with pure inputs and outputs;
-service state is only mutated on the event loop. Bars for Optimizer Runs are fetched through the
-engine's BrokerThread. Nothing here can send, modify or close an order.
+CPU-heavy work (Optimizer Runs, Evidence Runs) runs in the learning pool with pure inputs and
+outputs; service state is only mutated on the event loop. One queue serves both, Optimizer Runs
+first: an Evidence Run is low priority. Bars are fetched through the engine's BrokerThread; an
+Evidence Run reads its history in pages of at most ``CHUNK_BARS``, each its own short broker call,
+and waits while the engine has an order in flight (``order_busy``). Nothing here can send, modify
+or close an order.
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import time
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
@@ -26,10 +31,11 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from ..broker import BrokerThread, SymbolInfo, Tick, Timeframe
+from ..broker import BrokerError, BrokerThread, SymbolInfo, Tick, Timeframe
 from ..engine.schemas import DomainError
 from ..journal import Journal
 from ..risk import TradingWindow
+from ..risk.window import WeekendClose
 from ..risk.spreads import SpreadBook
 from ..store import AssignmentRow, SessionRow, Store, TradeRow
 from ..store.models import ChallengerRow, PendingChangeRow
@@ -41,6 +47,7 @@ from .candidate import Candidate
 from .features import market_frame, vector
 from .objective import RStats, guardrails, r_stats, should_rollback
 from .optimizer import optimize_job
+from . import evidence as ev
 from .costs import CostModel
 from .paper import Costs, EntryGate, ExitRules, PaperTrader
 from .repo import LearningRepo
@@ -53,6 +60,8 @@ RETENTION_DAYS = 180
 FEATURE_BARS = 160  # market features need ~100 bars of ATR rank + EMA50 warm-up
 AUTO_KINDS = ("auto_promotion", "auto_rollback")
 ACTIVE = ("running", "paused")
+BUSY_WAIT = 60.0  # seconds an Evidence page waits for an order in flight before reading anyway
+OPTIMIZE, EVIDENCE = 0, 1  # queue priorities: lower runs first
 
 
 def filter_key(symbol: str, timeframe: str, strategy: str) -> str:
@@ -85,7 +94,10 @@ class LearningService:
         self.journal = journal
         self.mode = mode
         self._arenas: dict[tuple[str, str], _Arena] = {}
-        self._queue: asyncio.Queue | None = None
+        self._queue: asyncio.PriorityQueue | None = None
+        self._seq = itertools.count()
+        self._evidence_queued: dict[str, int] = {}  # evidence key -> row id (queued or running)
+        self.order_busy = lambda: False  # set by the engine: True while an entry or close is in flight
         self._queued: dict[tuple[str, str], int] = {}  # arena -> run id (queued or running)
         self._worker: asyncio.Task | None = None
         # Optimizer Runs are CPU-bound pure Python: in the app they run in a separate process so they
@@ -111,7 +123,8 @@ class LearningService:
         for r in self.repo.runs(limit=200):
             if r.status in ("queued", "running"):
                 self.repo.update_run(r.id, status="failed", note="interrupted by restart", finished_wall=time.time())
-        self._queue = asyncio.Queue()
+        self.repo.fail_unfinished_evidence("interrupted by restart")
+        self._queue = asyncio.PriorityQueue()
         self._worker = asyncio.create_task(self._work(), name="learner")
 
     async def stop(self) -> None:
@@ -156,9 +169,9 @@ class LearningService:
         return typical if typical is not None else max(tick.ask - tick.bid, 0.0)
 
     @staticmethod
-    def _job_args(bars, champion, costs, rules, n_cands, run_id, window, tf, exclude) -> tuple:
+    def _job_args(bars, champion, costs, rules, n_cands, run_id, window, tf, exclude, weekend_close: str | None = None) -> tuple:
         """The Optimizer Run's arguments, as sent to the worker process (every one must pickle)."""
-        return (bars, champion, costs, rules, n_cands, run_id, window.to_dict(), tf.seconds, exclude)
+        return (bars, champion, costs, rules, n_cands, run_id, window.to_dict(), tf.seconds, exclude, weekend_close)
 
     def _filter(self, symbol: str, timeframe: str, strategy: str) -> sf.FilterState:
         key = filter_key(symbol, timeframe, strategy)
@@ -204,6 +217,7 @@ class LearningService:
         spread_ok = round(spread / info.point, 1) <= profile.max_spread_points if info.point else True  # as Tick.spread_points
         costs = CostModel.from_symbol(info, spread=spread, ref_price=float(bars["close"].iloc[-1]))
         gate = EntryGate(s.window, tf_secs)
+        weekend = WeekendClose(s.weekend_close_time, tf_secs) if s.weekend_close else None
         # market features are only needed when some Candidate schedules an entry: compute lazily, once,
         # on a short tail of the window (same index as ``bars``)
         _mf: list[pd.DataFrame] = []
@@ -222,6 +236,7 @@ class LearningService:
             if tr is None:
                 tr = arena.traders[key] = PaperTrader(costs, rules)
             tr.costs, tr.rules = costs, rules
+            tr.weekend = weekend
             cand_gate = gate.for_strategy(cand.strategy)
             tr.allow_entry = lambda ts, g=cand_gate: spread_ok and g(ts)
             frame = get_strategy(cand.strategy).signals(bars, cand.param_dict)
@@ -497,7 +512,7 @@ class LearningService:
         run = self.repo.add_run(symbol=symbol, timeframe=timeframe, trigger=trigger)
         self._queued[key] = run.id
         if self._queue is not None:
-            self._queue.put_nowait((symbol, timeframe, run.id))
+            self._queue.put_nowait((OPTIMIZE, next(self._seq), (symbol, timeframe, run.id)))
         return run.id
 
     async def drain(self) -> None:
@@ -517,15 +532,209 @@ class LearningService:
 
     async def _work(self) -> None:
         while True:
-            symbol, timeframe, run_id = await self._queue.get()
+            prio, _, job = await self._queue.get()
             try:
-                await self._run(symbol, timeframe, run_id)
-            except Exception as e:  # a failed run must never take the worker (or the engine) down
-                log.exception("optimizer run %s failed", run_id)
-                self.repo.update_run(run_id, status="failed", note=str(e)[:500], finished_wall=time.time())
+                if prio == OPTIMIZE:
+                    await self._work_optimize(*job)
+                else:
+                    await self._work_evidence(job)
             finally:
-                self._queued.pop((symbol, timeframe), None)
                 self._queue.task_done()
+
+    async def _work_optimize(self, symbol: str, timeframe: str, run_id: int) -> None:
+        try:
+            await self._run(symbol, timeframe, run_id)
+        except Exception as e:  # a failed run must never take the worker (or the engine) down
+            log.exception("optimizer run %s failed", run_id)
+            self.repo.update_run(run_id, status="failed", note=str(e)[:500], finished_wall=time.time())
+        finally:
+            self._queued.pop((symbol, timeframe), None)
+
+    async def _work_evidence(self, evidence_id: int) -> None:
+        row = self.repo.evidence_row(evidence_id)
+        try:
+            await self._run_evidence(evidence_id)
+        except Exception as e:
+            log.exception("evidence run %s failed", evidence_id)
+            self.repo.update_evidence(evidence_id, status="failed", note=str(e)[:500], finished_wall=time.time())
+        finally:
+            if row is not None:
+                self._evidence_queued.pop(row.key, None)
+
+    # ------------------------------------------------------------ evidence runs
+    def spec_for(self, s: SessionRow, a: AssignmentRow) -> ev.EvidenceSpec:
+        """The Evidence an Assignment's settings call for: its Candidate, its Risk Profile's exit rules,
+        its Session's Trading Window and Weekend Close."""
+        profile = self.store.to_profile(self.store.risk_profile(a.risk_profile_id))
+        return ev.EvidenceSpec.of(
+            a.symbol, a.timeframe, a.strategy, a.params, ExitRules.from_profile(profile, a.reverse_on_opposite),
+            s.window, s.weekend_close_time if s.weekend_close else None,
+        )
+
+    def request_evidence(self, spec: ev.EvidenceSpec, trigger: str = "manual") -> dict:
+        """Queue an Evidence Run (low priority: after every queued Optimizer Run). The same settings
+        already queued or running are merged. Refused while the engine has an order in flight."""
+        if self.order_busy():
+            raise DomainError("busy", "an order is being sent right now: try the Evidence Run again in a moment", 409)
+        if spec.key in self._evidence_queued:
+            return ev.summary(self.repo.evidence_row(self._evidence_queued[spec.key]))
+        row = self.repo.add_evidence(**spec.row_fields(), trigger=trigger)
+        self._evidence_queued[spec.key] = row.id
+        if self._queue is not None:
+            self._queue.put_nowait((EVIDENCE, next(self._seq), row.id))
+        return ev.summary(row)
+
+    async def _wait_for_orders(self) -> None:
+        waited = 0.0
+        while self.order_busy() and waited < BUSY_WAIT:
+            await asyncio.sleep(0.2)
+            waited += 0.2
+
+    async def _read_history(self, symbol: str, tf: Timeframe) -> tuple[pd.DataFrame, str, bool]:
+        """Every closed bar the feed has (up to ``MAX_EVIDENCE_BARS``, newest kept), read newest page
+        first. Returns (bars, note, complete): a page that fails or times out ends the read, and the
+        run is marked incomplete with the bars received."""
+        pages: list[pd.DataFrame] = []
+        got, note, complete = 0, "", True
+        while True:
+            if got >= ev.MAX_EVIDENCE_BARS:
+                note = f"history capped at the most recent {ev.MAX_EVIDENCE_BARS:,} bars"
+                break
+            n = min(ev.CHUNK_BARS, ev.MAX_EVIDENCE_BARS - got)
+            await self._wait_for_orders()
+            try:
+                page = await self.broker.run(lambda b, n=n, o=got: b.closed_bars(symbol, tf, n, o), timeout=ev.CHUNK_TIMEOUT)
+            except (BrokerError, asyncio.TimeoutError) as e:
+                note, complete = f"history read stopped after {got:,} bars: {type(e).__name__} {e}".strip(), False
+                break
+            if len(page) == 0:
+                break
+            pages.append(page)
+            got += len(page)
+            if len(page) < n:
+                break
+        if not pages:
+            return pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"]), note, complete
+        bars = pd.concat(pages[::-1], ignore_index=True).drop_duplicates("time").sort_values("time").reset_index(drop=True)
+        return bars, note, complete
+
+    async def _run_evidence(self, evidence_id: int) -> None:
+        row = self.repo.evidence_row(evidence_id)
+        spec = ev.EvidenceSpec.from_row(row)
+        self.repo.update_evidence(evidence_id, status="running")
+        tf = Timeframe(spec.timeframe)
+        symbol = spec.symbol
+        tick, info, now = await self.broker.run(lambda b: (b.tick(symbol), b.symbol_info(symbol), b.server_time()), timeout=ev.CHUNK_TIMEOUT)
+        spread = self.spreads.spread_for(symbol, tick, now)
+        if spread is None:
+            self.repo.update_evidence(evidence_id, status="failed", run_ts=now, finished_wall=time.time(),
+                                      note="no typical spread is known yet and the market is shut: run it when the market is open")
+            return
+        bars, note, complete = await self._read_history(symbol, tf)
+        if len(bars) == 0:
+            self.repo.update_evidence(evidence_id, status="failed", run_ts=now, finished_wall=time.time(), note=note or "the feed returned no history")
+            return
+        costs = CostModel.from_symbol(info, spread=ev.SPREAD_MULTIPLIER * spread, ref_price=float(bars["close"].iloc[-1]))
+        gate = EntryGate(spec.window, tf.seconds)
+        weekend = WeekendClose(spec.weekend_close, tf.seconds) if spec.weekend_close else None
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(self._pool, ev.evidence_job, bars, spec.candidate, costs, spec.rules, gate, weekend)
+        status = "done" if complete else "incomplete"
+        self.repo.update_evidence(evidence_id, status=status, run_ts=now, finished_wall=time.time(), costs=costs.to_dict(), note=note, **result)
+        self._server_time = now
+        label = f"{symbol} {spec.timeframe} {spec.candidate.label()}"
+        self._j("learning", f"Evidence {label}: {result['trades']} trades, {result['mean_r']:+.3f}R per trade on {result['bars']:,} bars"
+                + ("" if complete else " (incomplete)"), symbol=symbol)
+
+    def evidence(self, symbol: str | None = None, timeframe: str | None = None, strategy: str | None = None) -> list[dict]:
+        """The latest Evidence per key (the Strategies page's table)."""
+        seen, out = set(), []
+        for r in self.repo.evidence_rows(symbol=symbol, timeframe=timeframe, strategy=strategy, limit=1000):
+            if r.key not in seen:
+                seen.add(r.key)
+                out.append(ev.summary(r))
+        return out
+
+    def evidence_for(self, spec: ev.EvidenceSpec) -> dict:
+        """The badge: ``match`` (Evidence for exactly these settings), ``running``, ``mismatch``
+        (Evidence exists for this Strategy on this Arena, but for other settings) or ``none``."""
+        rows = self.repo.evidence_rows(key=spec.key, limit=20)
+        done = next((r for r in rows if r.status in ("done", "incomplete")), None)
+        if done is not None:
+            return {"status": "match", "key": spec.key, "evidence": ev.summary(done)}
+        if any(r.status in ("queued", "running") for r in rows):
+            return {"status": "running", "key": spec.key, "evidence": None}
+        other = self.repo.evidence_rows(symbol=spec.symbol, timeframe=spec.timeframe, strategy=spec.candidate.strategy, status=("done", "incomplete"), limit=1)
+        if other:
+            return {"status": "mismatch", "key": spec.key, "evidence": ev.summary(other[0])}
+        return {"status": "none", "key": spec.key, "evidence": None}
+
+    def assignment_evidence(self, s: SessionRow, a: AssignmentRow) -> dict:
+        """The badge for an Assignment; with Weekend Close on for H4/D1, also the Evidence without it
+        (spec D6: Weekend Close cuts a trend edge — show by how much)."""
+        spec = self.spec_for(s, a)
+        out = self.evidence_for(spec)
+        if s.weekend_close and a.timeframe in ("H4", "D1"):
+            out["without_weekend_close"] = self.evidence_for(spec.with_weekend_close(None))
+        return out
+
+    async def scorecard(self) -> list[dict]:
+        """Per Arena: the Paper Account's record against the band the backtest says it should fall in,
+        and what one minimum lot would risk on the real Account. Advisory; it never blocks."""
+        arenas: dict[tuple[str, str], tuple[SessionRow, AssignmentRow]] = {}
+        for s in self.store.list_sessions():
+            for a in self.store.assignments(s.id):
+                cur = arenas.get((a.symbol, a.timeframe))
+                rank = (s.execution == "paper", s.status in ACTIVE)
+                if cur is None or rank > (cur[0].execution == "paper", cur[0].status in ACTIVE):
+                    arenas[(a.symbol, a.timeframe)] = (s, a)
+        out = []
+        for (symbol, timeframe), (s, a) in sorted(arenas.items()):
+            badge = self.evidence_for(self.spec_for(s, a))
+            rs = self.repo.evidence_row(badge["evidence"]["id"]).rs if badge["status"] == "match" else []
+            paper_rs = [self._trade_r(t) for t in self.store.paper_closed_trades(symbol, timeframe, a.strategy)]
+            n = len(paper_rs)
+            mean = sum(paper_rs) / n if n else 0.0
+            rng = ev.band(rs, n) if rs else None
+            strat = get_strategy(a.strategy)
+            p = strat.resolve(a.params)
+            tf = Timeframe(timeframe)
+            stop, risk = None, None
+            try:
+                acct, info, bars = await self.broker.run(
+                    lambda b, k=strat.lookback(p) + WARMUP_BARS: (b.account(), b.symbol_info(symbol), b.closed_bars(symbol, tf, k)),
+                    timeout=ev.CHUNK_TIMEOUT,
+                )
+                if len(bars):
+                    stop = float(strat.signals(bars, p)["sl_dist"].iloc[-1])
+                    vpp = float(info.trade_tick_value) / float(info.trade_tick_size) if info.trade_tick_size else 0.0
+                    risk = ev.min_lot_risk_pct(float(info.volume_min), stop, vpp, float(acct.balance))
+            except BrokerError:
+                pass
+            out.append({
+                "symbol": symbol, "timeframe": timeframe, "strategy": a.strategy,
+                "session": {"id": s.id, "name": s.name, "status": s.status, "execution": s.execution},
+                "evidence": badge,
+                "paper": {"trades": n, "mean_r": round(mean, 4), "total_r": round(sum(paper_rs), 3), "epoch": self.store.paper_epoch()},
+                "band": list(rng) if rng else None,
+                "band_level": ev.BAND_LEVEL,
+                "verdict": "the backtest took no trades" if badge["status"] == "match" and not rs else ev.verdict(n, mean, rng),
+                "min_lot_risk_pct": risk,
+                "stop": stop if stop == stop else None,
+                "note": "counts every Paper trade of this Strategy on the Arena in this Paper epoch, whatever its parameters",
+            })
+        return out
+
+    @staticmethod
+    def _trade_r(t: TradeRow) -> float:
+        """A closed trade's result in R: profit over the money it risked (swap included); the price
+        move over the initial stop when the risk was not recorded (an adopted Orphan)."""
+        if t.risk_amount and t.risk_amount > 0 and t.profit is not None:
+            return float(t.profit) / float(t.risk_amount)
+        if t.initial_risk and t.close_price is not None:
+            move = t.close_price - t.open_price if t.side == "long" else t.open_price - t.close_price
+            return move / t.initial_risk
+        return 0.0
 
     async def _run(self, symbol: str, timeframe: str, run_id: int) -> None:
         found = self._arena_assignment(symbol, timeframe)
@@ -547,7 +756,8 @@ class LearningService:
         costs = CostModel.from_symbol(info, spread=self._typical_spread(symbol, tick, now), ref_price=float(bars["close"].iloc[-1]) if len(bars) else None)
         exclude = {c.candidate_key for c in self.repo.challengers(symbol, timeframe)} | {champion.key}
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(self._pool, optimize_job, *self._job_args(bars, champion, costs, rules, n_cands, run_id, window, tf, exclude))
+        result = await loop.run_in_executor(self._pool, optimize_job, *self._job_args(bars, champion, costs, rules, n_cands, run_id, window, tf, exclude,
+                                                                                                  s.weekend_close_time if s.weekend_close else None))
         self._server_time = now
         if result.insufficient:
             self.repo.update_run(run_id, status="insufficient", note=result.insufficient, result=result.to_dict(), finished_wall=time.time())

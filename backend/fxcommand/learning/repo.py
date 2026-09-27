@@ -13,6 +13,7 @@ from ..store.models import (
     CandidateRow,
     ChallengerRow,
     ChampionVersionRow,
+    EvidenceRow,
     FilterStateRow,
     LearningSlotRow,
     OptimizerRunRow,
@@ -172,6 +173,43 @@ class LearningRepo:
             return [(r.features, float(r.r)) for r in rows if r.features and r.r is not None]
 
     # ---------------------------------------------------------- optimizer runs
+    # -------------------------------------------------------------- evidence
+    def add_evidence(self, **fields: Any) -> EvidenceRow:
+        return self._save(EvidenceRow(requested_wall=time.time(), **fields))
+
+    def update_evidence(self, evidence_id: int, **fields: Any) -> EvidenceRow | None:
+        return self._update(EvidenceRow, evidence_id, **fields)
+
+    def evidence_row(self, evidence_id: int) -> EvidenceRow | None:
+        with self._db() as db:
+            return db.get(EvidenceRow, evidence_id)
+
+    def evidence_rows(
+        self, key: str | None = None, symbol: str | None = None, timeframe: str | None = None, strategy: str | None = None,
+        status: tuple[str, ...] | None = None, limit: int = 200,
+    ) -> list[EvidenceRow]:
+        """Newest first."""
+        with self._db() as db:
+            q = select(EvidenceRow)
+            if key is not None:
+                q = q.where(EvidenceRow.key == key)
+            if symbol:
+                q = q.where(EvidenceRow.symbol == symbol)
+            if timeframe:
+                q = q.where(EvidenceRow.timeframe == timeframe)
+            if strategy:
+                q = q.where(EvidenceRow.strategy == strategy)
+            if status:
+                q = q.where(EvidenceRow.status.in_(status))
+            return list(db.exec(q.order_by(EvidenceRow.id.desc()).limit(limit)))
+
+    def fail_unfinished_evidence(self, note: str) -> int:
+        rows = self.evidence_rows(status=("queued", "running"), limit=10_000)
+        for r in rows:
+            self.update_evidence(r.id, status="failed", note=note, finished_wall=time.time())
+        return len(rows)
+
+    # ------------------------------------------------------------------ runs
     def add_run(self, **fields: Any) -> OptimizerRunRow:
         return self._save(OptimizerRunRow(queued_wall=time.time(), **fields))
 

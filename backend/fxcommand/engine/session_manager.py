@@ -20,6 +20,7 @@ never interleave with an engine pass. All Broker calls go through
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from dataclasses import asdict, dataclass, field
@@ -33,7 +34,7 @@ from ..risk import Exposure, GateInput, LiveCaps, Rejected, RiskLimits, TradingW
 from ..risk.costcheck import CostEstimate, estimate_cost
 from ..risk.gate import MAX_QUOTE_AGE
 from ..risk.spreads import SpreadBook
-from ..risk.window import fill_limit
+from ..risk.window import fill_limit, in_weekend_close, weekday  # noqa: F401 (re-exported)
 from ..store import AssignmentRow, SessionRow, Store, TradeRow
 from ..store.models import PendingEntryRow
 from ..strategies import Signal, get_strategy
@@ -55,22 +56,6 @@ TRANSIENT_REJECTS = {"outside_window", "stale_quote", "spread"}
 PENDING_MAX_WAIT = 4 * DAY  # a Pending Entry that never saw the market open (a long closure) expires anyway
 DEFERRED = "deferred: market closed"  # _close_confirmed's failure note for a close the market refused
 DEFAULT_FLOOR_PCT = 80.0
-
-
-def weekday(ts: int) -> int:
-    """Monday=0 .. Sunday=6 for server-time epoch seconds (1970-01-01 was a Thursday)."""
-    return (ts // DAY + 3) % 7
-
-
-def in_weekend_close(now: int, close_time: str) -> bool:
-    """From Friday ``close_time`` (server time) until the week ends."""
-    wd = weekday(now)
-    if wd >= 5:
-        return True
-    if wd != 4:
-        return False
-    hh, mm = (int(x) for x in close_time.split(":"))
-    return (now % DAY) // 60 >= hh * 60 + mm
 
 
 @dataclass
@@ -97,9 +82,25 @@ class EngineStatus:
     extra: dict = field(default_factory=dict)
 
 
+def _order_in_flight(fn):
+    """Count the engine's order paths while they run: an Evidence Run reads history only between them
+    (spec D24: a long history read must never delay an entry or a close into an uncertain outcome)."""
+
+    @functools.wraps(fn)
+    async def wrapper(self, *args, **kwargs):
+        self._orders_in_flight += 1
+        try:
+            return await fn(self, *args, **kwargs)
+        finally:
+            self._orders_in_flight -= 1
+
+    return wrapper
+
+
 class SessionManager:
     def __init__(self, broker: BrokerThread, store: Store, journal: Journal, bus: EventBus, learning=None):
         self.broker = broker
+        self._orders_in_flight = 0
         self.learning = learning  # LearningService | None (ADR 0004); every call goes through _learn()
         self._learn_errors: set[str] = set()
         self.store = store
@@ -122,6 +123,16 @@ class SessionManager:
         self.notifier_configured = lambda: False  # set by the app (Pre-flight Check)
 
     # ================================================================ helpers
+    @property
+    def learning(self):
+        return self._learning
+
+    @learning.setter
+    def learning(self, service) -> None:
+        self._learning = service
+        if service is not None:  # its Evidence Runs read history only while no order is in flight
+            service.order_busy = lambda: self._orders_in_flight > 0
+
     def _learn(self, fn, default=None):
         """Run a learning hook. Learning must never stop trading: any failure is logged, journaled once
         per distinct message, and swallowed (it is also never mistaken for a Broker error)."""
@@ -1063,6 +1074,7 @@ class SessionManager:
         if outcome == "transient":
             self._defer_entry(s, a, sig, record_id, why)
 
+    @_order_in_flight
     async def _enter(self, s: SessionRow, a: AssignmentRow, sig: Signal, record_id: int | None = None, deferred: str = "") -> tuple[str, str]:
         """Gate and send one entry. Returns (outcome, reason): ``filled``, ``transient`` (a reject that
         clears by itself — nothing journaled, the caller keeps a Pending Entry), ``rejected``,
@@ -1226,6 +1238,7 @@ class SessionManager:
         )
         return "filled", ""
 
+    @_order_in_flight
     async def _close_confirmed(self, tickets: list[int], reason: str, defer_market_closed: bool = False) -> tuple[int, dict[int, str]]:
         """Close positions and keep trying until the Account confirms they are gone (closes are
         idempotent, ADR 0007). Returns (closed, {ticket: last failure message}). With
@@ -1360,6 +1373,7 @@ class SessionManager:
             else:
                 await self._retry_entry(s, a, r)
 
+    @_order_in_flight
     async def _retry_exit(self, s: SessionRow, a: AssignmentRow, r: PendingEntryRow) -> None:
         """One close request per pass at most, and none while the quote is stale: a shut market
         must not see a request a second (brokers throttle that). Any other failure alerts once per

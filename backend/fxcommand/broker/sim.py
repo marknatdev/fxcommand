@@ -430,7 +430,13 @@ class SimBroker:
         # while a Symbol is shut its last quote is the last bar's close, and it ages
         return Tick(symbol=symbol, time=min(self.now, int(s.t[s.n - 1]) + MINUTE), bid=bid, ask=ask, point=spec.point)
 
-    def closed_bars(self, symbol: str, timeframe: Timeframe, count: int) -> pd.DataFrame:
+    def closed_bars(self, symbol: str, timeframe: Timeframe, count: int, offset: int = 0) -> pd.DataFrame:
+        if offset <= 0:
+            return self._closed_bars(symbol, timeframe, count)
+        bars = self._closed_bars(symbol, timeframe, count + offset)
+        return bars.iloc[: max(0, len(bars) - offset)].reset_index(drop=True)
+
+    def _closed_bars(self, symbol: str, timeframe: Timeframe, count: int) -> pd.DataFrame:
         self._spec(symbol)
         s = self._series[symbol]
         tf = Timeframe(timeframe)

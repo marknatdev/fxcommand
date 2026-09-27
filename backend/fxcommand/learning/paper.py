@@ -16,6 +16,8 @@ Rules mirror live trading (ADR 0004):
 - The Trading Window is judged when the entry fills (the next bar's open, the next tradable time),
   not when the Signal fires: an entry is taken if the window opens within the fill limit (the bar,
   or the Strategy's shorter fill window), as a live Pending Entry would be.
+- Weekend Close (optional, a Session setting): a position is settled at the close of the bar that
+  reaches Friday's close time, after that bar's stops; no entry fills inside the weekend span.
 
 Everything is measured in R: result / initial stop distance.
 """
@@ -28,7 +30,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
-from ..risk.window import DAY, TradingWindow, fill_limit, next_tradable
+from ..risk.window import DAY, TradingWindow, WeekendClose, fill_limit, next_tradable
 from ..strategies import get_strategy
 from .candidate import Candidate
 from .costs import CostModel
@@ -132,7 +134,7 @@ class PaperTrade:
     entry: float
     exit: float
     r: float
-    reason: str  # sl | tp | exit | reverse | end
+    reason: str  # sl | tp | exit | reverse | weekend | end
     features: list[float] | None = None
     p_win: float | None = None
 
@@ -159,6 +161,7 @@ class PaperTrader:
     costs: CostLike
     rules: ExitRules = field(default_factory=ExitRules)
     allow_entry: Callable[[int], bool] | None = None  # judged at the fill time (e.g. an EntryGate)
+    weekend: WeekendClose | None = None  # the Session's Weekend Close, when it is on
     position: OpenPaper | None = None
     last_r: float = 0.0
     _close: str | None = None
@@ -204,7 +207,10 @@ class PaperTrader:
         if self._close and self.position:
             closed.append(self._settle(t, self._market_exit(o), self._close))
         self._close = None
-        if self._entry and self.position is None and (self.allow_entry is None or self.allow_entry(t)):
+        shut = self.weekend is not None and self.weekend.blocks_fill(t)
+        if shut and self.position:  # a bar opening inside the span (e.g. a gap in the data)
+            closed.append(self._settle(t, self._market_exit(o), "weekend"))
+        if self._entry and self.position is None and not shut and (self.allow_entry is None or self.allow_entry(t)):
             e = self._entry
             if e.side == "long":
                 entry = o + spread + slip
@@ -233,6 +239,10 @@ class PaperTrader:
                     closed.append(self._settle(t, p.sl + slip, "sl"))
                 elif p.tp and l + spread <= p.tp:
                     closed.append(self._settle(t, p.tp, "tp"))
+
+        # Weekend Close: flat at the close of the bar that reaches Friday's close time
+        if self.position is not None and self.weekend is not None and self.weekend.closes_bar(t):
+            closed.append(self._settle(t, self._market_exit(c), "weekend"))
 
         # 3. stop management at the close
         p = self.position
@@ -296,6 +306,7 @@ def backtest(
     allow_entry: Callable[[int], bool] | None = None,
     features: pd.DataFrame | None = None,
     scorer: Callable[[list[float]], float] | None = None,
+    weekend: WeekendClose | None = None,
 ) -> list[PaperTrade]:
     """Replay ``bars`` through a PaperTrader for ``candidate``. Deterministic and pure."""
     from .features import vector
@@ -310,7 +321,7 @@ def backtest(
     cols = {k: frame[k].to_numpy() for k in ("long", "short", "exit_long", "exit_short", "sl_dist", "tp_dist")}
     if isinstance(allow_entry, EntryGate):
         allow_entry = allow_entry.for_strategy(candidate.strategy)
-    trader = PaperTrader(costs, rules or ExitRules(), allow_entry)
+    trader = PaperTrader(costs, rules or ExitRules(), allow_entry, weekend)
     trades: list[PaperTrade] = []
     for i in range(len(bars)):
         sig = {k: v[i] for k, v in cols.items()}

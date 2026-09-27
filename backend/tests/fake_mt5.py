@@ -82,8 +82,9 @@ class FakeMt5:
         return NS(time=self.now, bid=self.bid, ask=self.ask) if sym == "EURUSD" else None
 
     def copy_rates_from_pos(self, sym, tf, start, count):
+        self.__dict__.setdefault("rate_calls", []).append((sym, tf, start, count))
         n = count
-        t = self.now - 60 * (np.arange(n)[::-1] + 1)
+        t = self.now - 60 * (np.arange(n)[::-1] + start)  # index 0 = the forming bar
         a = np.zeros(n, dtype=[("time", "i8"), ("open", "f8"), ("high", "f8"), ("low", "f8"), ("close", "f8"), ("tick_volume", "i8")])
         a["time"], a["open"], a["high"], a["low"], a["close"], a["tick_volume"] = t, self.bid, self.bid + 1e-4, self.bid - 1e-4, self.bid, 10
         return a
