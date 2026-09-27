@@ -537,7 +537,7 @@ export interface ArenaDetail extends ArenaT {
   curves: Record<string, { ts: number; r: number }[]>;
   history: { id: number; version: number; kind: string; reason: string; label: string; candidate_key: string; server_ts: number; session_id: number }[];
   runs: OptimizerRunT[];
-  signals: { id: number; ts: number; side: string; p_win: number | null; filter_mode: string; decision: string; ticket: number | null; r: number | null }[];
+  signals: { id: number; ts: number; side: string; p_win: number | null; filter_mode: string; decision: string; ticket: number | null; r: number | null; fill_delay_s?: number | null; fill_spread_points?: number | null }[];
 }
 
 /* ------------------------------------------------ better strategies (spec v5) */
@@ -547,6 +547,8 @@ export interface CostCheckRow {
   strategy: string;
   cost_r?: number;
   swap_r?: number;
+  swap_nights?: number | null; // swap nights per trade, from Evidence or Shadow Trades (null: not known yet)
+  swap_source?: string | null;
   threshold?: number;
   blocked?: boolean;
   reason?: string;
@@ -639,7 +641,7 @@ export interface ScorecardRow {
   strategy: string;
   session: { id: number; name: string; status: SessionStatus; execution: Execution };
   evidence: EvidenceBadge;
-  paper: { trades: number; mean_r: number; total_r: number; epoch: number };
+  paper: { trades: number; mean_r: number; total_r: number; epoch: number; candidate: string; unattributed: number };
   band: [number, number] | null;
   band_level: number;
   verdict: string;

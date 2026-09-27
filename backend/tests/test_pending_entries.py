@@ -55,6 +55,14 @@ async def test_reopen_entries_wait_for_01_00_and_match_the_shadow_trades(tmp_pat
     assert len(deferred) == len(trades)  # journaled once per signal, not once per pass
     assert not [j for j in h.store.journal(session_id=s.id, kinds=["order_fail"], limit=100)]
     assert [r.status for r in h.store.pending_entries(s.id, status=None)] == ["filled"] * len(trades)
+    # fill quality on the Learning Signal record (D32): the Signal closes with the 23:00 bar at 00:00, so the wait
+    # is the daily break plus the minute to the first tradable bar; the spread is the reopen's
+    taken = [r for r in h.L.repo.signals("GOLD", "H1", limit=50) if r.ticket is not None]
+    assert len(taken) == len(trades)
+    for r in taken:
+        assert 3600 <= r.fill_delay_s < 3600 + 5 * 60 and r.fill_spread_points >= 60, (r.fill_delay_s, r.fill_spread_points)
+    opened = [j for j in kinds(h, s, "order") if "Opened" in j.message]
+    assert all(j.data["fill_delay_s"] is not None and j.data["fill_spread_points"] for j in opened)
     await h.close()
 
 

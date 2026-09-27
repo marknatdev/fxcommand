@@ -132,6 +132,7 @@ class TradeRow(SQLModel, table=True):
     volume: float
     strategy: str = ""
     timeframe: str = ""
+    candidate_key: str = ""  # the parameter set that opened it (Candidate key); "" = recorded before it was kept
     open_time: int
     open_price: float
     sl: float = 0.0
@@ -329,6 +330,10 @@ class SignalRecordRow(SQLModel, table=True):
     decision: str = "taken"  # taken | blocked | rejected
     ticket: Optional[int] = Field(default=None, index=True)
     r: Optional[float] = None
+    # how the entry was filled (spec D32): seconds from the Signal bar's close to the fill, and the spread
+    # (points) of the tick the order was sent at — a Pending Entry sent after the daily break shows its wait here
+    fill_delay_s: Optional[int] = None
+    fill_spread_points: Optional[float] = None
 
 
 class PendingChangeRow(SQLModel, table=True):
@@ -383,6 +388,8 @@ class EvidenceRow(SQLModel, table=True):
     max_dd_r: float = 0.0
     periods: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # [{label, from_ts, to_ts, n, mean}]
     rs: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # every trade's R (rounded), for the scorecard band
+    avg_nights: Optional[float] = None  # swap nights charged per trade (MT5 rollovers): the Cost Check's swap estimate
+    long_share: Optional[float] = None
     note: str = ""
 
 

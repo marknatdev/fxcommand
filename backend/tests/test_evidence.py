@@ -290,17 +290,23 @@ async def test_the_scorecard_sets_the_paper_record_against_the_backtest_band(eh)
     await eh.mgr.create_session(SessionIn(name="Other", daily_loss_pct=90, assignments=[AssignmentIn(symbol="EURUSD", timeframe="M15", strategy="ema_cross")]))
     [a] = eh.store.assignments(s.id)
     row = await run(eh, eh.L.spec_for(s, a))
+    mine = Candidate.of("trend_breakout", None).key
     for i, r in enumerate([-1.0] * 12):  # a Paper record far below what the backtest allows
         eh.store.add_trade(TradeRow(ticket=-(i + 1), session_id=s.id, magic=a.magic, symbol="GOLD", side="long", volume=0.01, strategy="trend_breakout",
-                                    timeframe="H4", open_time=MON_08, open_price=2000, status="closed", close_time=MON_08 + 3600,
-                                    close_price=1990, profit=r * 5.0, risk_amount=5.0, paper=True))
+                                    timeframe="H4", candidate_key=mine, open_time=MON_08, open_price=2000, status="closed",
+                                    close_time=MON_08 + 3600, close_price=1990, profit=r * 5.0, risk_amount=5.0, paper=True))
+    for ticket, key in ((-50, Candidate.of("trend_breakout", {"entry": 40}).key), (-51, ""), (-52, "")):  # another parameter set; unrecorded
+        eh.store.add_trade(TradeRow(ticket=ticket, session_id=s.id, magic=a.magic, symbol="GOLD", side="long", volume=0.01, strategy="trend_breakout",
+                                    timeframe="H4", candidate_key=key, open_time=MON_08, open_price=2000, status="closed",
+                                    close_time=MON_08 + 3600, close_price=2100, profit=50.0, risk_amount=5.0, paper=True))
     eh.store.add_trade(TradeRow(ticket=-99, session_id=s.id, magic=a.magic, symbol="GOLD", side="long", volume=0.01, strategy="trend_breakout",
                                 timeframe="H4", open_time=MON_08, open_price=2000, status="closed", close_time=MON_08, close_price=2100,
                                 profit=500.0, risk_amount=5.0, paper=True, paper_epoch=7))  # an archived epoch: not counted
     cards = {(c["symbol"], c["timeframe"]): c for c in await eh.L.scorecard()}
     gold = cards[("GOLD", "H4")]
     assert gold["session"]["execution"] == "paper" and gold["evidence"]["evidence"]["id"] == row.id
-    assert gold["paper"]["trades"] == 12 and gold["paper"]["mean_r"] == -1.0
+    assert gold["paper"]["trades"] == 12 and gold["paper"]["mean_r"] == -1.0  # only this parameter set's trades
+    assert gold["paper"]["unattributed"] == 2 and "2 earlier trades" in gold["note"]
     assert gold["band"] == list(ev.band(row.rs, 12)) and gold["verdict"] == "below the backtest"
     info, acct = eh.sim.symbol_info("GOLD"), eh.sim.account()
     expected = ev.min_lot_risk_pct(info.volume_min, gold["stop"], info.trade_tick_value / info.trade_tick_size, acct.balance)
@@ -321,3 +327,37 @@ def test_optimizer_runs_apply_the_sessions_weekend_close():
     off = optimize_job(*pickle.loads(pickle.dumps(args)))
     on = optimize_job(*pickle.loads(pickle.dumps(args[:-1] + ("22:30",))))
     assert off.champion.wf.to_dict() != on.champion.wf.to_dict()
+
+
+# ------------------------------------------------------------ swap beside the Cost Check
+async def test_the_cost_check_shows_swap_from_the_evidence_and_never_blocks_on_it(eh):
+    s = await eh.mgr.create_session(SessionIn(name="Swap", daily_loss_pct=90, assignments=[
+        AssignmentIn(symbol="GOLD", timeframe="H4", strategy="trend_breakout"), AssignmentIn(symbol="GOLD", timeframe="H1", strategy="session_drift")]))
+    before = {c["timeframe"]: c for c in await eh.mgr.cost_check(s)}
+    assert before["H4"]["swap_nights"] is None and before["H4"]["swap_r"] == 0.0  # nothing known yet
+    trend = await run(eh, ev.EvidenceSpec.of(*TREND))
+    drift = await run(eh, ev.EvidenceSpec.of("GOLD", "H1", "session_drift"))
+    assert trend.avg_nights > 1 and trend.long_share == 1.0  # long-only, held for days
+    assert drift.avg_nights == 0  # the Reopen trade is flat by 04:00: never pays swap
+    after = {c["timeframe"]: c for c in await eh.mgr.cost_check(s)}
+    h4, h1 = after["H4"], after["H1"]
+    info, tick = eh.sim.symbol_info("GOLD"), eh.sim.tick("GOLD")
+    per_night = CostModel.from_symbol(info, 0.0).swap_per_night("long", tick.bid)
+    assert per_night < 0 and h4["swap_r"] == pytest.approx(per_night * trend.avg_nights / h4["stop"], abs=1e-3)
+    assert h4["swap_source"] == "Evidence" and h4["swap_nights"] == trend.avg_nights
+    assert h4["cost_r"] == before["H4"]["cost_r"] and h4["allowed"] == before["H4"]["allowed"]  # swap never changes the verdict
+    assert h1["swap_r"] == 0.0 and h1["swap_nights"] == 0
+
+
+async def test_nights_come_from_shadow_trades_when_there_is_no_evidence(eh):
+    from fxcommand.store.models import ShadowTradeRow
+
+    cand = Candidate.of("trend_breakout", None)
+    wed = MON_08 + 2 * DAY
+    with eh.L.repo._db() as db:
+        db.add(ShadowTradeRow(symbol="GOLD", timeframe="H4", candidate_key=cand.key, side="long", open_ts=wed, close_ts=wed + DAY,
+                              signal_ts=wed, entry=2000, sl=1990, tp=0, risk=10, status="closed", r=1.0))
+        db.commit()
+    hold = eh.L.expected_hold("GOLD", "H4", "trend_breakout", None)
+    assert hold == {"nights": 3.0, "long_share": 1.0, "trades": 1, "source": "Shadow Trades"}  # Wednesday night counts three
+    assert eh.L.expected_hold("GOLD", "H1", "session_drift", None) is None

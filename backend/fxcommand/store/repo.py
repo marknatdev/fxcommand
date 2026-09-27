@@ -641,7 +641,9 @@ class Store:
                 q = q.where(TradeRow.session_id == session_id)
             return float(db.exec(q).one())
 
-    def paper_closed_trades(self, symbol: str, timeframe: str, strategy: str | None = None, epoch: int | None = None) -> list[TradeRow]:
+    def paper_closed_trades(
+        self, symbol: str, timeframe: str, strategy: str | None = None, epoch: int | None = None, candidate_key: str | None = None
+    ) -> list[TradeRow]:
         """The Paper Account's closed trades on an Arena (this epoch unless given), oldest first."""
         epoch = self.paper_epoch() if epoch is None else epoch
         with self._db() as db:
@@ -651,6 +653,8 @@ class Store:
             )
             if strategy:
                 q = q.where(TradeRow.strategy == strategy)
+            if candidate_key is not None:
+                q = q.where(TradeRow.candidate_key == candidate_key)
             return list(db.exec(q.order_by(TradeRow.close_time)))
 
     # ------------------------------------------------------------------ equity

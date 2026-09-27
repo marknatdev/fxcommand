@@ -108,7 +108,13 @@ export function CostCheckLine({ row, testId }: { row: CostCheckRow | undefined; 
       <Badge tone={tone}>
         cost {Number.isFinite(row.cost_r) ? `${row.cost_r!.toFixed(2)}R` : "—"} {row.blocked ? (row.override ? "· overridden" : "· blocked") : "· ok"}
       </Badge>
-      {row.swap_r ? <span className="text-dim">swap {r2(row.swap_r)} per trade (shown, not blocking)</span> : null}
+      {row.swap_nights !== undefined && row.swap_nights !== null ? (
+        <span className="text-dim" data-testid="swap" title={`Swap per trade at today's swap rates, ${row.swap_nights.toFixed(1)} nights held on average (${row.swap_source}). Shown, never blocking: the Evidence judges whether the edge survives it.`}>
+          swap <span className={row.swap_r! < 0 ? "text-down" : row.swap_r! > 0 ? "text-up" : ""}>{r2(row.swap_r ?? 0)}</span> per trade · {row.swap_nights.toFixed(1)} nights ({row.swap_source})
+        </span>
+      ) : (
+        <span className="text-faint" data-testid="swap">swap: unknown until the Evidence or Shadow Trades show how long trades are held</span>
+      )}
       {row.blocked && <span className="text-dim">{row.reason}</span>}
     </span>
   );

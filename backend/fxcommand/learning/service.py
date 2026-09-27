@@ -310,13 +310,16 @@ class LearningService:
         note = f"P(win) {p:.2f} < {state.threshold:.2f}" if blocked and p is not None else ""
         return Screen(not blocked, p, state.mode, rec.id, note)
 
-    def signal_outcome(self, record_id: int | None, ticket: int | None = None, rejected: bool = False) -> None:
+    def signal_outcome(
+        self, record_id: int | None, ticket: int | None = None, rejected: bool = False,
+        fill_delay_s: int | None = None, fill_spread_points: float | None = None,
+    ) -> None:
         if record_id is None:
             return
         if rejected:
             self.repo.update_signal(record_id, decision="rejected")
         elif ticket is not None:
-            self.repo.update_signal(record_id, ticket=ticket)
+            self.repo.update_signal(record_id, ticket=ticket, fill_delay_s=fill_delay_s, fill_spread_points=fill_spread_points)
 
     def on_live_close(self, trade: TradeRow, s: SessionRow | None) -> None:
         rec = self.repo.signal_by_ticket(trade.ticket)
@@ -949,9 +952,13 @@ class LearningService:
                     arenas[(a.symbol, a.timeframe)] = (s, a)
         out = []
         for (symbol, timeframe), (s, a) in sorted(arenas.items()):
-            badge = self.evidence_for(self.spec_for(s, a))
+            spec = self.spec_for(s, a)
+            badge = self.evidence_for(spec)
             rs = self.repo.evidence_row(badge["evidence"]["id"]).rs if badge["status"] == "match" else []
-            paper_rs = [self._trade_r(t) for t in self.store.paper_closed_trades(symbol, timeframe, a.strategy)]
+            # only this parameter set's Paper trades: a Promotion starts a new record (trades recorded before the
+            # parameter set was kept cannot be attributed and are counted separately)
+            paper_rs = [self._trade_r(t) for t in self.store.paper_closed_trades(symbol, timeframe, a.strategy, candidate_key=spec.candidate.key)]
+            unattributed = len(self.store.paper_closed_trades(symbol, timeframe, a.strategy, candidate_key=""))
             n = len(paper_rs)
             mean = sum(paper_rs) / n if n else 0.0
             rng = ev.band(rs, n) if rs and n else None
@@ -974,15 +981,39 @@ class LearningService:
                 "symbol": symbol, "timeframe": timeframe, "strategy": a.strategy,
                 "session": {"id": s.id, "name": s.name, "status": s.status, "execution": s.execution},
                 "evidence": badge,
-                "paper": {"trades": n, "mean_r": round(mean, 4), "total_r": round(sum(paper_rs), 3), "epoch": self.store.paper_epoch()},
+                "paper": {"trades": n, "mean_r": round(mean, 4), "total_r": round(sum(paper_rs), 3), "epoch": self.store.paper_epoch(),
+                          "candidate": spec.candidate.label(), "unattributed": unattributed},
                 "band": list(rng) if rng else None,
                 "band_level": ev.BAND_LEVEL,
                 "verdict": self._verdict(badge["status"] == "match", rs, n, mean, rng),
                 "min_lot_risk_pct": risk,
                 "stop": stop if stop == stop else None,
-                "note": "counts every Paper trade of this Strategy on the Arena in this Paper epoch, whatever its parameters",
+                "note": f"counts this epoch's Paper trades of {spec.candidate.label()} only"
+                        + (f"; {unattributed} earlier trades have no parameter record and are not counted" if unattributed else ""),
             })
         return out
+
+    def expected_hold(self, symbol: str, timeframe: str, strategy: str, params: dict | None) -> dict | None:
+        """How many swap nights a trade of this Candidate typically pays, and how many of its trades are
+        long: from its Evidence (the same Candidate, else the same Strategy on the Arena), else its closed
+        Shadow Trades. None while neither exists. Read by the Cost Check to show swap beside the cost."""
+        from .costs import rollover_nights
+
+        cand = Candidate.of(strategy, params)
+        rows = [r for r in self.repo.evidence_rows(symbol=symbol, timeframe=timeframe, status=("done", "incomplete"), limit=50)
+                if r.avg_nights is not None and r.trades]
+        same = [r for r in rows if r.candidate_key == cand.key]
+        other = [r for r in rows if r.strategy == strategy]
+        for pick, source in ((same, "Evidence"), (other, f"Evidence of another {get_strategy(strategy).title} parameter set")):
+            if pick:
+                return {"nights": pick[0].avg_nights, "long_share": pick[0].long_share, "trades": pick[0].trades, "source": source}
+        shadows = self.repo.shadow_closed(symbol, timeframe, cand.key, limit=500)
+        shadows = [t for t in shadows if t.close_ts]
+        if shadows:
+            nights = [rollover_nights(t.open_ts, t.close_ts) for t in shadows]
+            return {"nights": round(sum(nights) / len(nights), 3), "long_share": round(sum(t.side == "long" for t in shadows) / len(shadows), 3),
+                    "trades": len(shadows), "source": "Shadow Trades"}
+        return None
 
     @staticmethod
     def _verdict(matched: bool, rs: list, n: int, mean: float, rng) -> str:
