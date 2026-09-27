@@ -44,10 +44,10 @@ async def test_paper_stop_always_closes(h):
     s = await paper_session(h)
     for _ in range(200):
         await h.bars(1)
-        if any(p.magic == s.magic for p in h.mgr._positions):
+        if any(p.magic in h.store.session_magics(s.id) for p in h.mgr._positions):
             break
     await h.mgr.stop(s.id, close_positions=False)
-    assert not [p for p in h.mgr._positions if p.magic == s.magic]
+    assert not [p for p in h.mgr._positions if p.magic in h.store.session_magics(s.id)]
     assert not h.store.paper_open()
 
 
@@ -59,7 +59,7 @@ async def test_paper_and_broker_sessions_side_by_side(h):
     await h.bars(120)
     assert all(t.paper for t in h.store.trades(session_id=paper.id))
     assert all(not t.paper and t.ticket > 0 for t in h.store.trades(session_id=real.id))
-    assert all(p.magic == real.magic for p in h.sim.positions())
+    assert all(p.magic in h.store.session_magics(real.id) for p in h.sim.positions())
     await h.mgr.kill_all()
     assert not h.mgr._positions  # the Kill Switch closes Paper Positions too
 

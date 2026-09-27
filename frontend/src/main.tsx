@@ -12,6 +12,7 @@ import Learning from "./pages/Learning";
 import Logs from "./pages/Logs";
 import Overview from "./pages/Overview";
 import Positions from "./pages/Positions";
+import Reviews from "./pages/Reviews";
 import Risk from "./pages/Risk";
 import SessionDetail from "./pages/SessionDetail";
 import SessionEditor from "./pages/SessionEditor";
@@ -41,6 +42,7 @@ createRoot(document.getElementById("root")!).render(
               <Route path="symbols" element={<Symbols />} />
               <Route path="strategies" element={<Strategies />} />
               <Route path="learning" element={<Learning />} />
+              <Route path="reviews" element={<Reviews />} />
               <Route path="risk" element={<Risk />} />
               <Route path="positions" element={<Positions />} />
               <Route path="history" element={<History />} />

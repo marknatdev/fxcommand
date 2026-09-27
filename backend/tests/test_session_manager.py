@@ -15,12 +15,13 @@ async def test_session_trades_on_bar_close(h):
     assert "signal" in kinds and "order" in kinds
     trades = h.store.trades(session_id=s.id)
     assert trades, "expected at least one trade in 60 bars"
-    assert all(t.magic == s.magic and t.sl > 0 for t in trades)
+    by_symbol = {a.symbol: a.magic for a in h.store.assignments(s.id)}
+    assert all(t.magic == by_symbol[t.symbol] and t.sl > 0 for t in trades)  # one magic per Assignment (ADR 0009)
     # at most one open position per assignment
-    open_syms = [p.symbol for p in h.sim.positions(s.magic)]
+    open_syms = [p.symbol for p in h.positions(s)]
     assert len(open_syms) == len(set(open_syms))
     # every order stamped with the session's magic
-    assert all(p.magic == s.magic for p in h.sim.positions())
+    assert all(p.magic in h.store.session_magics(s.id) for p in h.sim.positions())
 
 
 async def test_first_bar_after_start_is_not_traded(h):
@@ -66,17 +67,17 @@ async def _session_with_position(h, **kw):
     await h.mgr.start(s.id)
     for _ in range(100):
         await h.bars(1)
-        if h.sim.positions(s.magic):
+        if h.positions(s):
             return s
     pytest.fail("no position opened")
 
 
 async def test_stop_leave_positions(h):
     s = await _session_with_position(h)
-    n = len(h.sim.positions(s.magic))
+    n = len(h.positions(s))
     await h.mgr.stop(s.id, close_positions=False)
     assert h.store.get_session(s.id).status == "stopped"
-    assert len(h.sim.positions(s.magic)) == n
+    assert len(h.positions(s)) == n
     n_orders = h.journal_kinds(s.id).count("order")
     await h.bars(30)
     assert h.journal_kinds(s.id).count("order") == n_orders  # stopped => no trading
@@ -85,22 +86,29 @@ async def test_stop_leave_positions(h):
 async def test_stop_close_positions(h):
     s = await _session_with_position(h)
     await h.mgr.stop(s.id, close_positions=True)
-    assert h.sim.positions(s.magic) == []
+    assert h.positions(s) == []
     assert h.store.open_trades(s.id) == []
 
 
 async def test_symbol_rules(h):
+    """ADR 0009: an Arena (Symbol, Timeframe) appears once per Session and in one running Session;
+    the same Symbol on another Timeframe is allowed."""
     with pytest.raises(DomainError) as e:
         await h.mgr.create_session(
-            SessionIn(name="dup", assignments=[AssignmentIn(symbol="EURUSD"), AssignmentIn(symbol="EURUSD", timeframe="H1")])
+            SessionIn(name="dup", assignments=[AssignmentIn(symbol="EURUSD", timeframe="H1"), AssignmentIn(symbol="EURUSD", timeframe="H1", strategy="donchian_breakout")])
         )
     assert e.value.code == "duplicate_symbol"
+    two = await h.mgr.create_session(
+        SessionIn(name="two", assignments=[AssignmentIn(symbol="EURUSD", timeframe="H1"), AssignmentIn(symbol="EURUSD", timeframe="M15")])
+    )
+    assert len({a.magic for a in h.store.assignments(two.id)}) == 2
     a = await h.session("A", symbols=("EURUSD", "GOLD"))
     b = await h.session("B", symbols=("GBPUSD", "GOLD"))
     await h.mgr.start(a.id)
     with pytest.raises(DomainError) as e:
         await h.mgr.start(b.id)
-    assert e.value.code == "symbol_conflict" and "GOLD" in e.value.message
+    assert e.value.code == "symbol_conflict" and "GOLD M1" in e.value.message
+    await h.mgr.start(two.id)  # EURUSD on H1/M15 does not clash with A's EURUSD M1
     await h.mgr.stop(a.id)
     await h.mgr.start(b.id)  # fine once A is stopped
     with pytest.raises(DomainError) as e:
@@ -126,11 +134,11 @@ async def test_edit_and_delete_rules(h):
 
 async def test_daily_loss_auto_stop(h):
     s = await _session_with_position(h, daily_loss_pct=0.5)
-    p = h.sim.positions(s.magic)[0]
+    p = h.positions(s)[0]
     await h.shock(p.symbol, -0.03 if p.side == "long" else 0.03)  # gap through the stop-loss
     row = h.store.get_session(s.id)
     assert row.status == "stopped" and "AUTO-STOP" in row.stop_reason
-    assert h.sim.positions(s.magic) == []  # close_on_auto_stop defaults to True
+    assert h.positions(s) == []  # close_on_auto_stop defaults to True
     alerts = h.store.journal(session_id=s.id, alerts_only=True)
     assert any("AUTO-STOP" in a.message for a in alerts)
 
@@ -153,7 +161,7 @@ async def test_kill_switch_closes_owned_only(h):
 
 async def test_restart_interrupts_and_readopts(tmp_path, h):
     s = await _session_with_position(h, name="Resumer")
-    tickets = {p.ticket for p in h.sim.positions(s.magic)}
+    tickets = {p.ticket for p in h.positions(s)}
     # a position the DB doesn't know about (e.g. crash between send and commit)
     t = h.sim.tick("GOLD")
     orphan = h.sim.market_order("GOLD", "short", 0.01, round(t.ask + 20, 2), 0, magic=s.magic)
@@ -199,7 +207,7 @@ async def test_risk_rejection_is_journaled(h):
     await h.bars(60)
     rejects = h.store.journal(session_id=s.id, kinds=["risk_reject"])
     assert rejects and "spread" in rejects[0].message
-    assert h.sim.positions(s.magic) == []
+    assert h.positions(s) == []
 
 
 async def test_breakeven_moves_stop(h):
@@ -207,7 +215,7 @@ async def test_breakeven_moves_stop(h):
     prof.breakeven, prof.breakeven_at_r = True, 0.3
     h.store.save_risk_profile(prof)
     s = await _session_with_position(h)
-    p = h.sim.positions(s.magic)[0]
+    p = h.positions(s)[0]
     r = abs(p.price_open - p.sl)
     move = (0.6 * r + 20 * h.sim.symbol_info(p.symbol).point) / p.price_open  # past 0.3R net of spread, short of TP (2R)
     await h.shock(p.symbol, move if p.side == "long" else -move)

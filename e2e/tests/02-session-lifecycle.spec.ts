@@ -35,7 +35,8 @@ test("create a multi-symbol session through the editor", async ({ page }) => {
   await page.getByTestId("add-assignment").click();
   await expect(rows).toHaveCount(2);
   await rows.nth(1).getByTestId("assignment-symbol").fill("EURUSD");
-  await expect(rows.nth(1)).toContainText("Already in this session");
+  await rows.nth(1).getByTestId("assignment-timeframe").selectOption("M1");
+  await expect(rows.nth(1)).toContainText("Already in this session on M1"); // another Timeframe would be allowed (ADR 0009)
   await rows.nth(1).getByTestId("assignment-symbol").fill("NOTASYMBOL");
   await expect(rows.nth(1)).toContainText("Not offered by the broker");
   await rows.nth(1).getByTestId("assignment-symbol").fill("GBPUSD");
@@ -53,6 +54,7 @@ test("create a multi-symbol session through the editor", async ({ page }) => {
 });
 
 test("start, trade, pause, resume and stop (closing positions) from the dashboard", async ({ page, request }) => {
+  test.slow(); // ~130 simulated bars through the whole engine; 20-50 s depending on machine load
   const errors = watchErrors(page);
   const sessions = await api<any[]>(request, "GET", "/sessions");
   const s = sessions.find((x) => x.name === "E2E Majors");
@@ -97,7 +99,7 @@ test("start, trade, pause, resume and stop (closing positions) from the dashboar
 
   // make sure something is open, then stop with "close positions"
   for (let i = 0; i < 40; i++) {
-    const pos = (await api<any[]>(request, "GET", "/positions")).filter((p) => p.magic === s.magic);
+    const pos = (await api<any[]>(request, "GET", "/positions")).filter((p) => p.session_id === s.id);
     if (pos.length) break;
     await advance(request, 2);
   }
@@ -107,7 +109,7 @@ test("start, trade, pause, resume and stop (closing positions) from the dashboar
   await dialog.getByTestId("stop-close-positions").click();
   await dialog.getByTestId("confirm-button").click();
   await expect(page.getByTestId("session-status").first()).toHaveText(/stopped/i);
-  const left = (await api<any[]>(request, "GET", "/positions")).filter((p) => p.magic === s.magic);
+  const left = (await api<any[]>(request, "GET", "/positions")).filter((p) => p.session_id === s.id);
   expect(left).toEqual([]);
   expect(errors).toEqual([]);
 });
@@ -119,24 +121,32 @@ test("the same symbol cannot run in two sessions at once", async ({ page, reques
   await page.goto(`/sessions/${b.id}`);
   await page.getByTestId("start-session").click();
   await page.getByTestId("start-dialog").getByTestId("confirm-button").click();
-  await expect(page.getByText(/USDJPY already traded by running session 'Conflict A'/)).toBeVisible();
+  await expect(page.getByText(/USDJPY M1 already traded by running session 'Conflict A'/)).toBeVisible();
   await expect(page.getByTestId("session-status").first()).toHaveText(/stopped/i);
   await api(request, "POST", `/sessions/${a.id}/stop`, { close_positions: true });
 });
 
-test("a duplicate symbol inside one session is rejected by the API", async ({ request }) => {
+test("a duplicate Arena inside one session is rejected by the API; another timeframe is allowed", async ({ request }) => {
   const res = await request.post("/api/sessions", {
-    data: { name: "Dup", assignments: [{ symbol: "GOLD" }, { symbol: "GOLD", timeframe: "H1" }] },
+    data: { name: "Dup", assignments: [{ symbol: "GOLD", timeframe: "H1" }, { symbol: "GOLD", timeframe: "H1", strategy: "trend_breakout" }] },
   });
   expect(res.status()).toBe(422);
   expect((await res.json()).code).toBe("duplicate_symbol");
+  // ADR 0009: GOLD on two timeframes, each Assignment with its own magic
+  const ok = await api<any>(request, "POST", "/sessions", {
+    name: "Gold pair", assignments: [{ symbol: "GOLD", timeframe: "H4", strategy: "trend_breakout" }, { symbol: "GOLD", timeframe: "H1", strategy: "session_drift" }],
+  });
+  const magics = ok.assignments.map((a: any) => a.magic);
+  expect(new Set(magics).size).toBe(2);
+  expect(magics[0]).toBe(ok.magic);
+  await api(request, "DELETE", `/sessions/${ok.id}`);
 });
 
 test("stop with 'leave positions' keeps them open and editing is allowed only when stopped", async ({ page, request }) => {
   const s = await createSession(request, "Leaver", ["GOLD"], { daily_loss_pct: 50 });
   await api(request, "POST", `/sessions/${s.id}/start`);
   for (let i = 0; i < 60; i++) {
-    const pos = (await api<any[]>(request, "GET", "/positions")).filter((p) => p.magic === s.magic);
+    const pos = (await api<any[]>(request, "GET", "/positions")).filter((p) => p.session_id === s.id);
     if (pos.length) break;
     await advance(request, 2);
   }
@@ -145,7 +155,7 @@ test("stop with 'leave positions' keeps them open and editing is allowed only wh
   await page.getByTestId("stop-session").first().click();
   await page.getByTestId("stop-dialog").getByTestId("confirm-button").click();
   await expect(page.getByTestId("session-status").first()).toHaveText(/stopped/i);
-  const left = (await api<any[]>(request, "GET", "/positions")).filter((p) => p.magic === s.magic);
+  const left = (await api<any[]>(request, "GET", "/positions")).filter((p) => p.session_id === s.id);
   expect(left.length).toBe(1);
 
   // positions page shows it as owned by the session, closable manually

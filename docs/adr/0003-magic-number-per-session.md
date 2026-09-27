@@ -1,5 +1,7 @@
 # Position ownership by one Magic Number per Session, one Symbol per Session
 
+**Superseded by ADR 0009** (one Magic Number per Assignment).
+
 Each Session gets a unique, never-reused MT5 magic number, stamped on every order it sends. Position ownership is `(magic, symbol)`, which is unambiguous because a Symbol may appear only once per Session and in at most one running Session at a time. This keeps the engine away from manual or foreign trades, lets a restarted Session re-adopt its positions straight from the terminal (the terminal, not our database, is the source of truth for open positions), and makes the Kill Switch "close everything with one of our magic numbers".
 
 ## Considered Options

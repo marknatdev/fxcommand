@@ -24,7 +24,7 @@ A named, configured run of the engine against one Account, trading a set of Assi
 _Avoid_: bot, run, market session (London/New York — see Trading Window)
 
 **Assignment**:
-One Symbol inside a Session, bound to one Strategy (with its parameters), one Timeframe and one Risk Profile. A Symbol appears at most once per Session.
+One Symbol inside a Session, bound to one Strategy (with its parameters), one Timeframe and one Risk Profile. A Symbol appears at most once per Timeframe in a Session, so GOLD may trade on H4 and H1 side by side.
 _Avoid_: leg, slot, pair config
 
 **Timeframe**:
@@ -51,7 +51,7 @@ The hours of the Broker's server time during which a Session may open new positi
 _Avoid_: market session, trading hours
 
 **Magic Number**:
-The unique number stamped on every order a Session sends. It is how the system tells which positions belong to which Session, and which positions it owns at all.
+The unique number stamped on every order an Assignment sends. Each Assignment has its own, kept for the same Session, Symbol, Strategy and Timeframe across edits and never reused. A Session's positions are those carrying any of its Assignments' Magic Numbers, and a position carrying none of them is not the system's.
 
 **Position**:
 An open trade on the Account. An **owned position** carries a Magic Number of some Session; any other position is **foreign** and is never touched.
@@ -125,6 +125,9 @@ A model, learned from closed trades and Shadow Trades, that estimates how likely
 How a Session's orders are carried out. **Broker** sends them to the Account. **Paper** runs the whole engine on the Broker's real prices but fills orders in a local simulated book; nothing reaches the Account.
 _Avoid_: dry run, simulation (the simulated market is the sim Broker, a different thing)
 
+**Paper Account**:
+The notional balance every Paper Session sizes its trades from and measures its limits against. It is separate from the real Account, and resetting it starts a new epoch that keeps the old records.
+
 **Paper Position**:
 A Position held in the Paper book of a Paper Session. It has no server-side stop-loss, so it is always closed when its Session stops, and is settled from the bars missed if the application was down.
 
@@ -152,18 +155,65 @@ An optional per-Session rule that closes its positions at a set Friday server ti
 **Notifier**:
 Where Alerts are delivered outside the application (Telegram), so the operator hears about them when the dashboard is not open.
 
+### Strategy evidence
+
+**Strategy Family**:
+A group of Strategies that Learning may search across. A Candidate is only ever drawn from its Champion's family, so the classic Strategies and the GOLD Strategies never replace each other.
+
+**Trading Hours**:
+When the Broker quotes a Symbol, per weekday, in server time (GOLD is shut 00:00–01:00 every day and all weekend). Different from the Trading Window, which is the operator's choice of when a Session may open positions.
+
+**Next Tradable Time**:
+The first moment at or after a given time when both the Trading Hours and the Trading Window are open. A signal that arrives while either is shut is acted on then.
+
+**Fill Window**:
+How long after the Next Tradable Time a Strategy's entry may still be sent. Past it the entry is dropped, because the edge it was meant to capture has gone.
+
+**Cost Model**:
+The costs a Backtest charges a trade: spread, slippage and overnight swap, scaled to the price at the time so older, cheaper years are not overcharged.
+
+**Pending Entry**:
+A Signal that could not become an order yet because the market or the Trading Window was shut, or the spread too wide. It waits and is sent at the Next Tradable Time, and is dropped when its Fill Window ends or the Session stops. A strategy exit that the shut market refuses waits the same way.
+_Avoid_: queued order, pending order (MT5's resting limit/stop orders)
+
+**Cost Check**:
+The cost of one round trip (spread and slippage) as a share of an Assignment's stop, in R. An Assignment above the limit cannot start unless the operator overrides it. Swap is shown beside it but never blocks.
+_Avoid_: spread filter (that is the Risk Profile's per-order maximum spread)
+
+**Evidence Run**:
+A read-only Backtest of one Candidate on an Arena's full history from the connected feed, priced at twice the typical spread and run with an Assignment's exit rules, Trading Window and Weekend Close. Evidence belongs to exactly those settings: an Assignment whose settings differ has no matching Evidence.
+_Avoid_: backtest result (a Backtest is also what an Optimizer Run does many times)
+
+**Scorecard**:
+Per Arena, the Paper Account's record set against the range the Evidence says a record of that many trades should fall in, beside what one minimum lot would risk on the real Account. It advises the operator; it never blocks.
+_Avoid_: graduation check (nothing is checked or gated)
+
+**Strategy Review**:
+A weekly research pass by Claude over the week's trades, Evidence and Scorecards. It may submit Challengers and reports, and propose new Strategy code only as pull requests; it never controls Sessions, risk or money.
+
+**Sealed Holdout**:
+The most recent year of an Arena's history (three months for M1/M5), rolling forward monthly, that research never sees. A finalist is scored on it once; a failure there is final.
+_Avoid_: test set, out-of-sample (the Optimizer's out-of-sample part is research data)
+
+**Research Snapshot**:
+An Arena's history up to the start of its Sealed Holdout, exported read-only for research.
+
+**Trial Ledger**:
+The record of every hypothesis tested on an Arena, whatever its result, and every use of its Sealed Holdout. The more trials an Arena has seen, the higher the bar a Challenger from the Strategy Review must clear.
+
 ## Relationships
 
 - An **Account** has many **Sessions**; a **Session** belongs to exactly one **Account**.
 - A **Session** has one or more **Assignments**; each **Assignment** has exactly one **Symbol**, **Strategy**, **Timeframe** and **Risk Profile**.
-- A **Symbol** can be in at most one *running or paused* **Session** at a time.
-- A **Session** has exactly one **Magic Number**, never reused.
+- An **Arena** (a Symbol on one Timeframe) can be in at most one *running or paused* **Session** at a time; the same Symbol on another Timeframe can run elsewhere.
+- An **Assignment** has exactly one **Magic Number**, never reused; a **Session** has one per **Assignment**.
 - An **Assignment** holds at most one open **Position** at a time.
 - Every **Signal** passes the **Signal Filter** (once it is active) and then the **Risk Gate**; only approved ones become orders.
 - An **Assignment** trades in exactly one **Arena** and has exactly one **Champion**; an **Arena** has at most three **Challengers**.
 - A **Session** has exactly one **Execution Mode**; Paper and Broker Sessions follow the same Symbol rule.
 - A **Session** is pinned to one login while active; **Live Caps** and the **Equity Floor** apply only when that Account is live.
 - A **Promotion** or **Rollback** creates a new **Champion Version**; only the operator may promote on a live **Account**.
+- An **Evidence Run** tests one **Candidate** on one **Arena** under one set of settings; an **Assignment** has matching Evidence only when all of them agree.
 
 ## Example dialogue
 

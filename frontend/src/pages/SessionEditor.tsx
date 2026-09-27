@@ -1,12 +1,16 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Plus, Save, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, Plus, Save, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api, type ApiError } from "../api/client";
-import { TIMEFRAMES, type AssignmentInput, type SessionInput, type StrategyInfo, type Timeframe } from "../api/types";
+import { TIMEFRAMES, type AssignmentInput, type EvidenceRequest, type SessionInput, type StrategyInfo, type Timeframe } from "../api/types";
+import { CostCheckLine, EvidenceFor } from "../components/evidence";
 import { WindowEditor } from "../components/WindowEditor";
 import { Button, Card, ConfirmDialog, ErrorBox, Field, Loading, PageHeader, Switch } from "../components/ui";
+
+const arenaKey = (a: { symbol: string; timeframe: string }) => `${a.symbol}|${a.timeframe}`;
+const LONG_HOLD: Timeframe[] = ["H4", "D1"];
 
 const DEFAULT_WINDOW = { enabled: true, open_day: 0, open_time: "00:10", close_day: 4, close_time: "23:00", blackouts: [{ start: "23:55", end: "00:10" }] };
 
@@ -68,6 +72,15 @@ export default function SessionEditor() {
   const [error, setError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [confirmLogin, setConfirmLogin] = useState<string | null>(null);
+  // Cost Check overrides by Arena ("GOLD|M1" -> reason); sent as the full set on save
+  const [overrides, setOverrides] = useState<Record<string, string> | null>(null);
+  const ready = form?.assignments.filter((a) => a.symbol) ?? [];
+  const costs = useQuery({
+    queryKey: ["cost-preview", editing ? Number(id) : null, ready.map((a) => [a.symbol, a.timeframe, a.strategy, a.params])],
+    queryFn: () => api.costPreview(ready, editing ? Number(id) : null),
+    enabled: ready.length > 0,
+    staleTime: 30_000,
+  });
 
   useEffect(() => {
     if (form) return;
@@ -93,6 +106,7 @@ export default function SessionEditor() {
           enabled: a.enabled,
         })),
       });
+      setOverrides(Object.fromEntries((s.cost_overrides ?? []).map((o) => [arenaKey(o), o.reason])));
     } else if (!editing && strategies.data && settings.data) {
       setForm({
         name: "",
@@ -106,13 +120,28 @@ export default function SessionEditor() {
         weekend_close_time: "22:30",
         assignments: [blankAssignment("", strategies.data)],
       });
+      setOverrides({});
       setOpen(0);
     }
   }, [editing, existing.data, strategies.data, settings.data, form]);
 
-  if (!form || symbols.isLoading || strategies.isLoading || risk.isLoading) return <Loading />;
+  if (!form || !overrides || symbols.isLoading || strategies.isLoading || risk.isLoading) return <Loading />;
   const stratMap = new Map((strategies.data ?? []).map((s) => [s.key, s]));
   const used = new Set(form.assignments.map((a) => a.symbol));
+  const costBy = new Map((costs.data?.assignments ?? []).map((c) => [arenaKey(c), c]));
+  const defaultProfile = risk.data?.profiles[0]?.id ?? null;
+  const evidenceReq = (a: AssignmentInput): EvidenceRequest => ({
+    symbol: a.symbol,
+    timeframe: a.timeframe,
+    strategy: a.strategy,
+    params: a.params,
+    risk_profile_id: a.risk_profile_id ?? defaultProfile,
+    reverse_on_opposite: a.reverse_on_opposite,
+    window: form.window,
+    weekend_close: form.weekend_close,
+    weekend_close_time: form.weekend_close_time,
+  });
+  const weekendWarning = form.weekend_close && form.assignments.some((a) => LONG_HOLD.includes(a.timeframe));
   const known = new Set(symbols.data ?? []);
   const setA = (i: number, patch: Partial<AssignmentInput>) =>
     setForm({ ...form, assignments: form.assignments.map((a, j) => (j === i ? { ...a, ...patch } : a)) });
@@ -121,14 +150,19 @@ export default function SessionEditor() {
     setError(null);
     if (!form.name.trim()) return setError("Give the session a name.");
     if (form.assignments.some((a) => !a.symbol)) return setError("Every assignment needs a symbol.");
-    if (new Set(form.assignments.map((a) => a.symbol)).size !== form.assignments.length)
-      return setError("A Symbol may appear only once per Session.");
+    if (new Set(form.assignments.map(arenaKey)).size !== form.assignments.length)
+      return setError("A Symbol may appear only once per Timeframe in a Session.");
     setSaving(true);
     try {
-      const body = confirmLogin ? { ...form, confirm_login: Number(confirmLogin) } : form;
+      const arenas = new Set(form.assignments.map(arenaKey));
+      const cost_overrides = Object.entries(overrides)
+        .filter(([k]) => arenas.has(k))
+        .map(([k, reason]) => ({ symbol: k.split("|")[0], timeframe: k.split("|")[1] as Timeframe, reason }));
+      const withOverrides = { ...form, cost_overrides };
+      const body = confirmLogin ? { ...withOverrides, confirm_login: Number(confirmLogin) } : withOverrides;
       const s = editing ? await api.updateSession(Number(id), body) : await api.createSession(body);
       toast.success(`Session '${s.name}' saved`);
-      ["sessions", "session", "overview", "symbols"].forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
+      ["sessions", "session", "overview", "symbols", "cost-check"].forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
       nav(`/sessions/${s.id}`);
     } catch (e) {
       setError((e as Error).message);
@@ -162,6 +196,12 @@ export default function SessionEditor() {
         }
       />
       {active && <ErrorBox error={new Error("This session is active. Stop it before editing.")} />}
+      {weekendWarning && (
+        <div className="flex items-start gap-2 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-sm text-warn" data-testid="weekend-warning">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <span>Weekend Close is on with H4/D1 Assignments. It flattens trend trades every Friday and cuts the edge they were tested with; each Assignment below shows its Evidence with and without it.</span>
+        </div>
+      )}
       {error && (
         <div data-testid="form-error">
           <ErrorBox error={new Error(error)} />
@@ -223,7 +263,7 @@ export default function SessionEditor() {
         }
         bodyClass="space-y-3"
       >
-        <p className="text-xs text-faint">A Symbol can appear only once per Session, and only one running Session can trade a given Symbol.</p>
+        <p className="text-xs text-faint">A Symbol may appear once per Timeframe (e.g. GOLD H4 and GOLD H1 together), and only one running Session can trade a given Symbol on a Timeframe.</p>
         {form.assignments.map((a, i) => {
           const strat = stratMap.get(a.strategy);
           const expanded = open === i;
@@ -241,8 +281,8 @@ export default function SessionEditor() {
                       onChange={(e) => setA(i, { symbol: e.target.value.trim() })}
                     />
                     {a.symbol && !known.has(a.symbol) && <p className="mt-1 text-xs text-warn">Not offered by the broker</p>}
-                    {a.symbol && form.assignments.some((x, j) => j !== i && x.symbol === a.symbol) && (
-                      <p className="mt-1 text-xs text-down">Already in this session</p>
+                    {a.symbol && form.assignments.some((x, j) => j !== i && arenaKey(x) === arenaKey(a)) && (
+                      <p className="mt-1 text-xs text-down">Already in this session on {a.timeframe}</p>
                     )}
                   </>
                 </Field>
@@ -299,6 +339,44 @@ export default function SessionEditor() {
                   </Button>
                 </div>
               </div>
+              {a.symbol && (
+                <div className="flex flex-col gap-2 border-t border-line/60 px-3 py-2" data-testid="assignment-checks">
+                  <EvidenceFor req={evidenceReq(a)} testId="assignment-evidence" weekendWarning={form.weekend_close && LONG_HOLD.includes(a.timeframe)} />
+                  <div className="flex flex-wrap items-center gap-3">
+                    <CostCheckLine
+                      testId="assignment-cost"
+                      row={(() => {
+                        const c = costBy.get(arenaKey(a));
+                        return c ? { ...c, override: arenaKey(a) in overrides, allowed: !c.blocked || arenaKey(a) in overrides } : undefined;
+                      })()}
+                    />
+                    {(costBy.get(arenaKey(a))?.blocked || arenaKey(a) in overrides) && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Switch
+                          checked={arenaKey(a) in overrides}
+                          onChange={(v) => {
+                            const next = { ...overrides };
+                            if (v) next[arenaKey(a)] = "";
+                            else delete next[arenaKey(a)];
+                            setOverrides(next);
+                          }}
+                          label="Override the Cost Check"
+                          testId="cost-override"
+                        />
+                        {arenaKey(a) in overrides && (
+                          <input
+                            className="field h-7 w-64 text-xs"
+                            placeholder="Reason (journaled)"
+                            value={overrides[arenaKey(a)]}
+                            onChange={(e) => setOverrides({ ...overrides, [arenaKey(a)]: e.target.value })}
+                            data-testid="cost-override-reason"
+                          />
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
               {expanded && (
                 <div className="space-y-3 border-t border-line p-3">
                   <p className="text-xs text-dim">{strat?.description}</p>
@@ -315,7 +393,7 @@ export default function SessionEditor() {
       </Card>
 
       <datalist id="symbol-names">
-        {(symbols.data ?? []).filter((n) => !used.has(n)).map((n) => (
+        {(symbols.data ?? []).map((n) => (
           <option key={n} value={n} />
         ))}
       </datalist>

@@ -9,7 +9,7 @@ test("kill switch stops every session and closes every owned position", async ({
   const b = await createSession(request, "Kill B", ["USDJPY", "GOLD"], { daily_loss_pct: 50 });
   await api(request, "POST", `/sessions/${a.id}/start`);
   await api(request, "POST", `/sessions/${b.id}/start`);
-  await untilPosition(request, a.magic);
+  await untilPosition(request, a.id);
 
   await page.goto("/");
   await expect(page.getByTestId("overview-session").filter({ hasText: "Kill A" })).toContainText(/running/i);

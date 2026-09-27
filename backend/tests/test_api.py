@@ -12,6 +12,7 @@ def client(tmp_path):
     cfg = Config(broker="sim", db_url=f"sqlite:///{tmp_path / 'api.db'}", sim_speed=0, sim_start=MON_08, run_engine=False)
     with TestClient(create_app(cfg)) as c:
         c.post("/api/account/reconnect")
+        c.put("/api/settings", json={"cost_check_max_r": 10})  # the FAST M1 test strategy fails the real 0.15R Cost Check
         yield c
 
 
@@ -270,3 +271,15 @@ def test_paper_session_over_http(client):
     assert trades and all(t["paper"] for t in trades)
     bad = client.post("/api/sessions", json={"name": "Q", "weekend_close_time": "25:00", "assignments": [{"symbol": "GBPUSD"}]})
     assert bad.status_code == 422
+
+
+def test_cost_check_limit_is_a_setting_and_weekend_close_warns_on_h4_d1(client):
+    assert client.put("/api/settings", json={"cost_check_max_r": 0.15}).status_code == 200
+    s = client.post("/api/sessions", json={"name": "M1", "assignments": [{"symbol": "EURUSD", "timeframe": "M1", "params": FAST}]}).json()
+    r = client.post(f"/api/sessions/{s['id']}/start")
+    assert r.status_code == 422 and r.json()["code"] == "cost_check"  # enforced by the engine: the API cannot skip it
+    assert client.put("/api/settings", json={"cost_check_max_r": 0}).status_code == 422
+    t = client.post("/api/sessions", json={"name": "T", "weekend_close": True, "assignments": [{"symbol": "GOLD", "timeframe": "H4", "strategy": "trend_breakout"}]}).json()
+    assert t["weekend_close_warning"] is True
+    u = client.post("/api/sessions", json={"name": "U", "weekend_close": True, "assignments": [{"symbol": "GOLD", "timeframe": "H1", "strategy": "session_drift"}]}).json()
+    assert u["weekend_close_warning"] is False

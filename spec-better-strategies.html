@@ -1,0 +1,507 @@
+<title>FXCommand Index Pullback</title>
+<style>
+  :root {
+    --bg-primary: #f4f6f9;
+    --bg-section: #ffffff;
+    --bg-card: #eef2f6;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #64748b;
+    --accent: #0a8f74;
+    --accent-muted: rgba(10, 143, 116, 0.12);
+    --warn: #b45309;
+    --warn-muted: rgba(180, 83, 9, 0.12);
+    --danger: #c2410c;
+    --danger-muted: rgba(194, 65, 12, 0.12);
+    --info: #2563eb;
+    --info-muted: rgba(37, 99, 235, 0.12);
+    --border: rgba(71, 85, 105, 0.18);
+    --edge: #94a3b8;
+    --radius: 12px;
+    --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Cascadia Code', monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg-primary: #0a0f1c; --bg-section: #111827; --bg-card: #1a2236;
+      --text-primary: #f1f5f9; --text-secondary: #94a3b8; --text-muted: #7c8aa0;
+      --accent: #00d4aa; --accent-muted: rgba(0, 212, 170, 0.15);
+      --warn: #f59e0b; --warn-muted: rgba(245, 158, 11, 0.15);
+      --danger: #f87171; --danger-muted: rgba(248, 113, 113, 0.15);
+      --info: #60a5fa; --info-muted: rgba(96, 165, 250, 0.15);
+      --border: rgba(148, 163, 184, 0.15); --edge: #64748b;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg-primary: #0a0f1c; --bg-section: #111827; --bg-card: #1a2236;
+    --text-primary: #f1f5f9; --text-secondary: #94a3b8; --text-muted: #7c8aa0;
+    --accent: #00d4aa; --accent-muted: rgba(0, 212, 170, 0.15);
+    --warn: #f59e0b; --warn-muted: rgba(245, 158, 11, 0.15);
+    --danger: #f87171; --danger-muted: rgba(248, 113, 113, 0.15);
+    --info: #60a5fa; --info-muted: rgba(96, 165, 250, 0.15);
+    --border: rgba(148, 163, 184, 0.15); --edge: #64748b;
+  }
+
+  html { scroll-behavior: smooth; }
+  body { background: var(--bg-primary); color: var(--text-primary); font-family: var(--font-body); font-size: 1rem; line-height: 1.65; padding-inline: 16px; padding-block: 2.5rem 4rem; }
+  main { max-width: 880px; margin: 0 auto; }
+  h1, h2, h3 { text-wrap: balance; }
+
+  .hero { margin-bottom: 2rem; }
+  .hero h1 { font-size: 2rem; line-height: 1.2; letter-spacing: -0.02em; }
+  .hero .subtitle { color: var(--text-secondary); margin-top: 0.5rem; max-width: 64ch; }
+  .meta-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 1rem; }
+  .chip { font-size: 0.78rem; font-weight: 600; padding: 4px 12px; border-radius: 999px; background: var(--accent-muted); color: var(--accent); border: 1px solid transparent; }
+  .chip.warn { background: var(--warn-muted); color: var(--warn); }
+  .chip.info { background: var(--info-muted); color: var(--info); }
+  .chip.muted { background: transparent; color: var(--text-muted); border-color: var(--border); }
+
+  .glance { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 1.5rem; }
+  .glance-card { background: var(--bg-section); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.2rem; }
+  .glance-card .label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); margin-bottom: 0.3rem; }
+  .glance-card .value { font-size: 0.92rem; line-height: 1.5; }
+  .glance-card.risk .label { color: var(--warn); }
+
+  .section { background: var(--bg-section); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.75rem; margin: 1.5rem 0; }
+  .section h2 { font-size: 1.3rem; margin-bottom: 0.8rem; letter-spacing: -0.01em; }
+  .section h3 { font-size: 1rem; margin: 1.2rem 0 0.4rem; color: var(--text-secondary); }
+  .section-tldr { font-size: 0.95rem; color: var(--text-secondary); font-style: italic; border-left: 3px solid var(--accent); padding-left: 0.9rem; margin: 0 0 1rem; }
+  .section p { margin: 0.6rem 0; max-width: 72ch; }
+  .section ul, .section ol { margin: 0.6rem 0 0.6rem 1.3rem; }
+  .section li { margin: 0.3rem 0; }
+  code { font-family: var(--font-mono); font-size: 0.86em; background: var(--bg-card); padding: 1px 6px; border-radius: 4px; }
+
+  .diagram-wrap { overflow-x: auto; margin: 1rem 0; padding: 0.5rem 0.25rem; }
+  .diagram-wrap svg { display: block; margin: 0 auto; min-width: 560px; max-width: 100%; height: auto; }
+  .diagram-caption { text-align: center; color: var(--text-muted); font-size: 0.82rem; margin-top: 0.25rem; }
+  svg text { font-family: var(--font-body); }
+  svg .edge { stroke: var(--edge); stroke-width: 1.5; fill: none; }
+  svg .edge.bad { stroke: var(--danger); }
+  svg .edge.ok { stroke: var(--accent); }
+  svg .lbl { fill: var(--text-muted); font-size: 11px; }
+  svg .lbl.bad { fill: var(--danger); }
+  svg .node rect, svg .node path { fill: var(--bg-card); stroke: var(--accent); stroke-opacity: 0.45; }
+  svg .node text { fill: var(--text-primary); font-size: 13px; }
+  svg .start rect { fill: var(--accent-muted); stroke: var(--accent); }
+  svg .start text { fill: var(--accent); font-size: 13px; font-weight: 600; }
+  svg .store rect { fill: var(--bg-card); stroke: var(--info); stroke-opacity: 0.6; }
+  svg .store text { fill: var(--info); font-size: 13px; }
+  svg .dec path { fill: var(--bg-card); stroke: var(--warn); stroke-opacity: 0.7; }
+  svg .dec text { fill: var(--warn); font-size: 12px; }
+  svg .badn rect { fill: var(--danger-muted); stroke: var(--danger); stroke-opacity: 0.6; }
+  svg .badn text { fill: var(--danger); font-size: 13px; }
+  svg .ext rect { fill: none; stroke: var(--edge); stroke-dasharray: 5 4; }
+  svg .ext text { fill: var(--text-secondary); font-size: 13px; }
+  svg .arrowhead { fill: var(--edge); }
+  svg .axis { stroke: var(--border); }
+  svg .tick { fill: var(--text-muted); font-size: 11px; }
+  svg .barpos { fill: var(--accent); }
+  svg .barneg { fill: var(--danger); opacity: 0.8; }
+  svg .barlabel { fill: var(--text-primary); font-size: 12px; }
+  svg .barval { fill: var(--text-secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+  .table-wrap { overflow-x: auto; margin: 0.75rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+  th { text-align: left; color: var(--text-secondary); font-weight: 600; }
+  th, td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td.num { text-align: right; white-space: nowrap; }
+  .pos { color: var(--accent); font-weight: 600; }
+  .neg { color: var(--danger); font-weight: 600; }
+
+  details { border: 1px solid var(--border); border-radius: 8px; margin: 0.75rem 0; }
+  summary { cursor: pointer; padding: 12px 16px; font-weight: 600; color: var(--text-secondary); }
+  summary:hover, summary:focus-visible { color: var(--text-primary); }
+  details[open] summary { border-bottom: 1px solid var(--border); }
+  details .table-wrap { padding: 0 12px 12px; }
+  .src { font-size: 0.75rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+  .src.iv { background: var(--accent-muted); color: var(--accent); }
+  .src.rt { background: var(--warn-muted); color: var(--warn); }
+
+  .timeline { list-style: none; margin: 1rem 0 0 0; padding: 0; }
+  .timeline li { position: relative; padding: 0 0 1.3rem 2.3rem; }
+  .timeline li::before { content: attr(data-step); position: absolute; left: 0; top: 0; width: 26px; height: 26px; border-radius: 50%; background: var(--accent-muted); color: var(--accent); font-size: 0.78rem; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+  .timeline li:not(:last-child)::after { content: ''; position: absolute; left: 12px; top: 30px; bottom: 4px; width: 2px; background: var(--border); }
+  .timeline .step-title { font-weight: 600; }
+  .timeline .step-detail { color: var(--text-secondary); font-size: 0.9rem; }
+
+  @media (max-width: 640px) {
+    body { padding-block: 1.5rem 3rem; }
+    .section { padding: 1.2rem; }
+    .hero h1 { font-size: 1.55rem; }
+  }
+</style>
+
+<main>
+  <header class="hero">
+    <h1>Better Strategies for FXCommand: GOLD First</h1>
+    <p class="subtitle">GOLD only. Two strategies (an H4 trend breakout and an intraday reopen drift), proven first on a notional Paper Account. A weekly Claude review hunts for upgrades, including multi-timeframe filters, behind a trial ledger and a sealed holdout. Supporting work: price-scaled costs, deferred entries around the daily break, and one Magic Number per Assignment.</p>
+    <div class="meta-chips">
+      <span class="chip">Approved · v5</span>
+      <span class="chip info">53 decisions · 11 red-team</span>
+      <span class="chip warn">Real $50 cannot size a GOLD stop</span>
+      <span class="chip muted">2026-09-25 · base f0c9ecd</span>
+    </div>
+  </header>
+
+  <div class="glance">
+    <div class="glance-card"><div class="label">Problem</div><div class="value">All 3 strategies lose after XM costs. Your demo record: 27 GOLD M1 trades, 4 winners, a net loss.</div></div>
+    <div class="glance-card"><div class="label">Approach</div><div class="value">GOLD Trend (H4) and GOLD Reopen Drift (intraday) on Paper, improved weekly by a Claude review loop.</div></div>
+    <div class="glance-card"><div class="label">Evidence</div><div class="value">Sealed final year: Reopen +0.159R over 257 trades, Trend +0.369R over 9 trades. The "smarter" filter failed it.</div></div>
+    <div class="glance-card risk"><div class="label">Top risk</div><div class="value">GOLD Trend depends on the market regime. Reopen Drift depends on filling within minutes of 01:00.</div></div>
+  </div>
+
+  <section class="section">
+    <h2>How it works</h2>
+    <p class="section-tldr">Each strategy runs as its own Assignment with its own Magic Number. Signals that fall in the daily break become Pending Entries, sent at the first tradable tick within their fill window.</p>
+    <div class="diagram-wrap">
+      <svg viewBox="0 0 900 280" role="img" aria-label="Two assignments (GOLD Trend H4, GOLD Reopen H1) each with own magic produce signals into Pending Entries, re-gated at the first tradable tick and sent to the Paper book or broker">
+        <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <path class="edge" d="M180,45 L230,45 L230,125 L260,125" marker-end="url(#arrow)"/>
+        <path class="edge" d="M180,125 L260,125" marker-end="url(#arrow)"/>
+        <path class="edge" d="M390,125 L430,125" marker-end="url(#arrow)"/>
+        <path class="edge" d="M560,125 L600,125" marker-end="url(#arrow)"/>
+        <text class="lbl" x="580" y="116" text-anchor="middle">ok</text>
+        <path class="edge bad" d="M495,150 L495,190 L390,190 L390,150" marker-end="url(#arrow)"/>
+        <text class="lbl bad" x="442" y="208" text-anchor="middle">transient reject: wait (within fill window)</text>
+        <path class="edge" d="M730,110 L760,110 L760,70 L790,70" marker-end="url(#arrow)"/>
+        <text class="lbl" x="770" y="60">Paper</text>
+        <path class="edge" d="M730,140 L760,140 L760,180 L790,180" marker-end="url(#arrow)"/>
+        <text class="lbl" x="770" y="200">Broker</text>
+
+        <g class="start"><rect x="20" y="22" width="160" height="46" rx="10"/><text x="100" y="45" text-anchor="middle" dominant-baseline="middle">GOLD Trend · H4</text></g>
+        <g class="start"><rect x="20" y="102" width="160" height="46" rx="10"/><text x="100" y="125" text-anchor="middle" dominant-baseline="middle">GOLD Reopen · H1</text></g>
+        <g class="store"><rect x="260" y="102" width="130" height="46" rx="4"/><text x="325" y="125" text-anchor="middle" dominant-baseline="middle">Pending Entry</text></g>
+        <g class="dec"><path d="M495,100 L560,125 L495,150 L430,125 Z"/><text x="495" y="125" text-anchor="middle" dominant-baseline="middle">Risk Gate</text></g>
+        <g class="node"><rect x="600" y="102" width="130" height="46" rx="10"/><text x="665" y="125" text-anchor="middle" dominant-baseline="middle">_enter</text></g>
+        <g class="node"><rect x="790" y="48" width="100" height="44" rx="10"/><text x="840" y="70" text-anchor="middle" dominant-baseline="middle">Paper book</text></g>
+        <g class="ext"><rect x="790" y="158" width="100" height="44" rx="10"/><text x="840" y="180" text-anchor="middle" dominant-baseline="middle">MT5</text></g>
+        <text class="lbl" x="100" y="252" text-anchor="middle">one Magic Number per Assignment</text>
+      </svg>
+    </div>
+    <p class="diagram-caption">Two GOLD Assignments, two Magic Numbers, one shared entry path</p>
+    <p>GOLD and the index CFDs close for a daily break until 01:00 server time. A signal that arrives while the market or the Trading Window is shut is stored as a Pending Entry. It is re-checked by the Risk Gate against the first tradable tick and sent through the normal <code>_enter</code> path. Each strategy sets how long its Pending Entry may wait: 5 minutes for Reopen Drift, whose edge fades fast, and until the next bar close for the others.</p>
+  </section>
+
+  <section class="section">
+    <h2>What the GOLD research found</h2>
+    <p class="section-tldr">Intraday GOLD systems lose to spread except at the 01:00 reopen. H4 trend breakouts are positive overall but depend on the regime. Costs are scaled to GOLD's price each year.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>GOLD family (price-scaled spread, slippage, swap)</th><th class="num">Variants</th><th class="num">Positive overall</th><th class="num">2010–17</th><th class="num">2018–21</th><th class="num">2022–26</th><th class="num">Trades/yr</th></tr></thead>
+      <tbody>
+        <tr><td><strong>H4 Turtle breakout, long-only</strong></td><td class="num">8</td><td class="num pos">100%</td><td class="num pos">+0.106</td><td class="num pos">+0.046</td><td class="num pos">+0.731</td><td class="num">~11</td></tr>
+        <tr><td>H4 EMA cross, long-only</td><td class="num">135</td><td class="num pos">99%</td><td class="num pos">+0.065</td><td class="num neg">−0.085</td><td class="num pos">+0.474</td><td class="num">~13</td></tr>
+        <tr><td>H4 Turtle, long + short</td><td class="num">8</td><td class="num pos">100%</td><td class="num pos">+0.160</td><td class="num neg">−0.113</td><td class="num pos">+0.186</td><td class="num">~20</td></tr>
+        <tr><td>D1 EMA / Turtle, long-only</td><td class="num">143</td><td class="num pos">100%</td><td class="num neg">−0.31</td><td class="num">≈0</td><td class="num pos">+1.7 to +4.2</td><td class="num">2–4</td></tr>
+        <tr><td><strong>Reopen Drift: buy 01:00, sell 04:00–05:00</strong></td><td class="num">12</td><td class="num pos">100%</td><td class="num pos">+0.02 to +0.04</td><td class="num pos">+0.02 to +0.06</td><td class="num pos">+0.03 to +0.09</td><td class="num">~250</td></tr>
+        <tr><td>Same, entering 01:15 or 02:00</td><td class="num">27</td><td class="num neg">~0%</td><td class="num neg">−</td><td class="num neg">−</td><td class="num neg">−</td><td class="num">~250</td></tr>
+        <tr><td>Prev-day-high breakout, M15/H1 old strategies</td><td class="num">many</td><td class="num neg">~0%</td><td class="num neg">−</td><td class="num neg">−</td><td class="num neg">−</td><td class="num">80–1000</td></tr>
+      </tbody>
+    </table></div>
+    <p>Values are median mean R per trade in each period. About 400 GOLD variants were tested in total. Choosing the single most profitable backtest from that many mostly chooses luck, so these picks rest on consistency across variants and periods, not on peak profit.</p>
+    <ul>
+      <li><strong>Why intraday GOLD lost:</strong> XM's GOLD spread is a fixed ~$0.55. It was a large share of each small bar when GOLD traded at $1,200–1,800. The M1 bleed on your demo is this effect.</li>
+      <li><strong>The reopen effect:</strong> GOLD's average rise per hour is largest in the 01:00 server-time bar, about +0.11 ATR in every period, and it is intraday, so it pays no swap. The spread at the reopen is ~$0.70, normal by 01:15, and by then the edge is gone.</li>
+      <li><strong>Swap:</strong> XM charges ~$0.87 per ounce per night on GOLD longs, about 7%/yr at today's price, and pays ~$0.20 on shorts. Trend holds pay it; Reopen Drift never holds overnight.</li>
+    </ul>
+  </section>
+
+  <section class="section">
+    <h2>Account and goal</h2>
+    <p class="section-tldr">Prove everything on Paper with a notional balance. Trading the real $50 is a later decision that you make, informed by the scorecard.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Minimum lot on real $50</th><th class="num">Typical stop</th><th class="num">Risk per trade</th></tr></thead>
+      <tbody>
+        <tr><td>GOLD 0.01 lot (1 oz): Reopen Drift, 1×ATR H1</td><td class="num">~$16.5</td><td class="num neg">33%</td></tr>
+        <tr><td>GOLD 0.01 lot: Trend, 2×ATR H4</td><td class="num">~$63</td><td class="num neg">126%</td></tr>
+      </tbody>
+    </table></div>
+    <p>These figures are arithmetic on today's contract specs, not financial advice. The scorecard shows them next to the Paper record so the real-money decision stays informed.</p>
+  </section>
+
+  <section class="section">
+    <h2>The two GOLD strategies</h2>
+    <p class="section-tldr">Both are new catalog entries. The existing strategies and their golden rows stay as they are. US500 Index Pullback is dropped from this build.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Strategy</th><th>Arena</th><th>Rule (defaults)</th><th>Optimizer bounds</th></tr></thead>
+      <tbody>
+        <tr><td><strong>GOLD Trend</strong> (<code>trend_breakout</code>)</td><td>GOLD H4</td><td>Long when close &gt; highest high of the last 55 bars. Exit when close &lt; lowest low of 20. Stop 2×ATR(20). <code>allow_short</code> off.</td><td>entry 40–100, exit 10–50, stop 2–3 ATR</td></tr>
+        <tr><td><strong>GOLD Reopen Drift</strong> (<code>session_drift</code>)</td><td>GOLD H1</td><td>Long at the 01:00 server reopen, exit at the 04:00 bar open, stop 1.5×ATR(24). Fill window 5 min. Mon–Fri.</td><td>exit hour 03–05, stop 1–2 ATR; entry hour fixed</td></tr>
+      </tbody>
+    </table></div>
+    <ul>
+      <li><strong>Session Drift anchor:</strong> hours are server time, measured from the broker's daily reopen. XM's server clock follows New York daylight saving, so the reopen stays at 01:00.</li>
+      <li><strong>Parameter names:</strong> every strategy keeps the <code>atr_period</code> and <code>sl_atr</code> names that the live path and preflight read.</li>
+      <li><strong>Assignments:</strong> allowed anywhere. The Evidence badge and the Cost Check guide the choice.</li>
+    </ul>
+  </section>
+
+  <section class="section">
+    <h2>Claude Strategy Review</h2>
+    <p class="section-tldr">Every Saturday Claude reviews the week's trades, tests fixes on history it is allowed to see, and scores finalists once on a sealed year. Only survivors become Challengers or PRs.</p>
+    <div class="diagram-wrap">
+      <svg viewBox="0 0 900 250" role="img" aria-label="Weekly review loop: trades and journal feed Claude, which forms hypotheses, tests them on the research snapshot with every trial counted, checks the every-period rule, scores finalists once on the sealed holdout, then submits Challengers or opens PRs; failures are logged">
+        <defs><marker id="arrow4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <path class="edge" d="M140,50 L180,50" marker-end="url(#arrow4)"/>
+        <path class="edge" d="M310,50 L350,50" marker-end="url(#arrow4)"/>
+        <path class="edge" d="M480,50 L520,50" marker-end="url(#arrow4)"/>
+        <path class="edge ok" d="M650,50 L690,50" marker-end="url(#arrow4)"/>
+        <text class="lbl" x="670" y="41" text-anchor="middle">pass</text>
+        <path class="edge ok" d="M760,75 L760,120" marker-end="url(#arrow4)"/>
+        <text class="lbl" x="770" y="102">pass</text>
+        <path class="edge bad" d="M585,75 L585,190 L520,190" marker-end="url(#arrow4)"/>
+        <path class="edge bad" d="M760,75 L760,90 L700,90 L700,190 L650,190" />
+        <text class="lbl bad" x="600" y="210">fail: logged, never retried silently</text>
+        <path class="edge" d="M760,165 L760,190 L80,190 L80,75" marker-end="url(#arrow4)"/>
+        <text class="lbl" x="95" y="180">next week: Paper and Shadow results</text>
+        <path class="edge" d="M415,75 L415,120" marker-end="url(#arrow4)"/>
+
+        <g class="start"><rect x="20" y="27" width="120" height="46" rx="10"/><text x="80" y="50" text-anchor="middle" dominant-baseline="middle">Week's trades</text></g>
+        <g class="node"><rect x="180" y="27" width="130" height="46" rx="10"/><text x="245" y="50" text-anchor="middle" dominant-baseline="middle">Find mistakes</text></g>
+        <g class="node"><rect x="350" y="27" width="130" height="46" rx="10"/><text x="415" y="50" text-anchor="middle" dominant-baseline="middle">Test hypotheses</text></g>
+        <g class="dec"><path d="M585,25 L650,50 L585,75 L520,50 Z"/><text x="585" y="50" text-anchor="middle" dominant-baseline="middle">every period?</text></g>
+        <g class="dec"><path d="M760,25 L830,50 L760,75 L690,50 Z"/><text x="760" y="50" text-anchor="middle" dominant-baseline="middle">sealed year?</text></g>
+        <g class="store"><rect x="350" y="120" width="130" height="44" rx="4"/><text x="415" y="142" text-anchor="middle" dominant-baseline="middle">Trial ledger</text></g>
+        <g class="start"><rect x="690" y="120" width="140" height="44" rx="10"/><text x="760" y="142" text-anchor="middle" dominant-baseline="middle">Challenger / PR</text></g>
+      </svg>
+    </div>
+    <p class="diagram-caption">Every trial is counted, and the bar gets stricter as the count grows</p>
+    <ul>
+      <li><strong>Mistakes it looks for:</strong> stops hit right after entry, entries missed by the fill window, trades against the higher-timeframe context, costs above plan, and Paper drifting from the backtest.</li>
+      <li><strong>Authority:</strong> Claude may submit Challengers, which go to Shadow and Paper under the existing Guardrails, and may open PRs for new code. It never merges, promotes, touches Sessions, risk or live trading, and never sends orders.</li>
+      <li><strong>Objective:</strong> expected R after costs. Win rate is reported but never the target, because it can rise while profit falls.</li>
+      <li><strong>Where results go:</strong> a Reviews page in the app plus a Telegram summary. PRs contain code only, because the repo is public.</li>
+    </ul>
+    <h3>First round, run during this interview</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Idea</th><th>Research periods</th><th>Sealed year</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td>Trend: ensemble 20/55/100, D1/ADX regime filters</td><td class="neg">Worse in some period</td><td>—</td><td class="neg">Rejected</td></tr>
+        <tr><td>Trend: pyramiding (2–4 units)</td><td class="neg">Negative in 2010–17 or overall</td><td>—</td><td class="neg">Rejected</td></tr>
+        <tr><td>Reopen: only when H4 &lt; EMA50 (buy the dip)</td><td class="pos">+0.059R vs +0.032R in every period</td><td class="neg">+0.010R vs +0.159R</td><td class="neg">Rejected on holdout</td></tr>
+        <tr><td>Reopen: exit 05:00 instead of 04:00</td><td class="pos">Better in every period</td><td class="neg">+0.114R vs +0.159R</td><td class="neg">Rejected on holdout</td></tr>
+        <tr><td>Scalping, 6.5 years: 12 M15→M5→M1 designs + 24 neighbours</td><td class="neg">Only NY opening-range breakout positive (+0.039R), negative in 2024–26; 0/24 neighbours positive in every period</td><td>not reached</td><td class="neg">No scalper ships</td></tr>
+        <tr><td><strong>Baselines: Turtle 55/20 and Reopen 01→04</strong></td><td class="pos">Positive in every period</td><td class="pos">+0.369R (9) and +0.159R (257)</td><td class="pos">Kept</td></tr>
+      </tbody>
+    </table></div>
+    <p><strong>Scalping (M1/M5/M15)</strong> is a research track on its own GOLD M5 Arena, separate from the H4/H1 strategies. Over 6.5 years of M1/M5 the M5 signals are about zero even before costs, and an M1 trigger makes every design worse. The one positive idea, a New York opening-range breakout, is a narrow peak: none of its 24 neighbours holds up in every period. Nothing trades there; the weekly review keeps watching it, and the 3-month scalping holdout stays sealed.</p>
+    <p>The dip filter is exactly the trap this loop guards against: it looked like a clear improvement on the data used to find it, and it failed on data it had never seen.</p>
+  </section>
+
+  <section class="section">
+    <h2>One Magic Number per Assignment</h2>
+    <p class="section-tldr">Two GOLD strategies can run at once. This supersedes ADR 0003, which already named this as its upgrade path.</p>
+    <ul>
+      <li><strong>Magic allocation:</strong> each Assignment has its own never-reused Magic Number. Ownership becomes <code>(magic, symbol)</code> per Assignment. The account is hedging, so opposite positions on GOLD can coexist.</li>
+      <li><strong>Stable across edits:</strong> the magic is keyed by (Session, Symbol, Strategy, Timeframe), so editing a Session keeps it even though assignment ids are recreated.</li>
+      <li><strong>Uniqueness:</strong> an Arena (Symbol, Timeframe) appears at most once among running Assignments, so Learning records keyed by Arena never collide.</li>
+      <li><strong>Unchanged:</strong> the Kill Switch closes every position carrying any FXCommand magic. Orphan adoption, Pinned Login, Live Caps and the Paper routing table all move to per-Assignment magics.</li>
+      <li><strong>Migration:</strong> an existing Session's current magic goes to its first Assignment; other Assignments get new ones.</li>
+    </ul>
+  </section>
+
+  <section class="section">
+    <h2>Pending Entry lifecycle</h2>
+    <p class="section-tldr">Persisted and keyed by Arena and signal bar. It survives Interrupted, is cancelled by stop-type events, retries only transient rejects, and expires after its strategy's fill window.</p>
+    <div class="diagram-wrap">
+      <svg viewBox="0 0 860 230" role="img" aria-label="Pending Entry states: created, waiting, sent via _enter, filled; cancelled on stop events; expired after fill window">
+        <defs><marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <path class="edge" d="M140,50 L190,50" marker-end="url(#arrow2)"/>
+        <path class="edge" d="M320,50 L370,50" marker-end="url(#arrow2)"/>
+        <text class="lbl" x="345" y="40" text-anchor="middle">tick</text>
+        <path class="edge ok" d="M500,50 L560,50" marker-end="url(#arrow2)"/>
+        <text class="lbl" x="530" y="40" text-anchor="middle">pass</text>
+        <path class="edge" d="M690,50 L740,50" marker-end="url(#arrow2)"/>
+        <path class="edge bad" d="M435,75 L435,105 L255,105 L255,78" marker-end="url(#arrow2)"/>
+        <text class="lbl bad" x="345" y="98" text-anchor="middle">window, market closed, spread, stale quote</text>
+        <path class="edge bad" d="M255,78 L255,160 L300,160" marker-end="url(#arrow2)"/>
+        <text class="lbl bad" x="170" y="140">fill window over</text>
+        <path class="edge bad" d="M255,78 L255,200 L520,200" marker-end="url(#arrow2)"/>
+        <text class="lbl bad" x="270" y="215">Stop · Kill Switch · Auto-stop · login change · Champion change</text>
+        <path class="edge bad" d="M435,75 L435,140 L520,140" marker-end="url(#arrow2)"/>
+        <text class="lbl bad" x="445" y="132">hard reject</text>
+
+        <g class="start"><rect x="20" y="27" width="120" height="46" rx="10"/><text x="80" y="50" text-anchor="middle" dominant-baseline="middle">Signal</text></g>
+        <g class="store"><rect x="190" y="27" width="130" height="46" rx="4"/><text x="255" y="50" text-anchor="middle" dominant-baseline="middle">Waiting (DB)</text></g>
+        <g class="dec"><path d="M435,25 L500,50 L435,75 L370,50 Z"/><text x="435" y="50" text-anchor="middle" dominant-baseline="middle">re-gate</text></g>
+        <g class="node"><rect x="560" y="27" width="130" height="46" rx="10"/><text x="625" y="50" text-anchor="middle" dominant-baseline="middle">_enter / send</text></g>
+        <g class="start"><rect x="740" y="27" width="110" height="46" rx="10"/><text x="795" y="50" text-anchor="middle" dominant-baseline="middle">Filled</text></g>
+        <g class="badn"><rect x="300" y="140" width="110" height="40" rx="10"/><text x="355" y="160" text-anchor="middle" dominant-baseline="middle">Expired</text></g>
+        <g class="badn"><rect x="520" y="120" width="130" height="40" rx="10"/><text x="585" y="140" text-anchor="middle" dominant-baseline="middle">Rejected</text></g>
+        <g class="badn"><rect x="520" y="180" width="130" height="40" rx="10"/><text x="585" y="200" text-anchor="middle" dominant-baseline="middle">Cancelled</text></g>
+      </svg>
+    </div>
+    <p class="diagram-caption">Every final state is journaled once and written to the Learning Signal record</p>
+    <ul>
+      <li><strong>Key:</strong> <code>(session_id, symbol, timeframe, signal_bar_ts, candidate_key)</code>. Never the assignment id.</li>
+      <li><strong>Send path:</strong> only through <code>SessionManager._enter</code>, which keeps its guards: the one-call gate-and-send, <code>_kill_seq</code>, never opening while a close failed, one position per Assignment, and Order Outcomes. An <code>uncertain</code> entry is never retried.</li>
+      <li><strong>Fill window:</strong> set per strategy. Reopen Drift uses 5 minutes, and the Journal records fill delay and spread. Other strategies wait until the next bar close. A paused Session never sends.</li>
+      <li><strong>Deferred exits:</strong> exits that fall in the daily break are sent at the first tradable tick. Server-side SL/TP protect the position meanwhile.</li>
+      <li><strong>Gold Reopen Risk Profile:</strong> a 100-point spread cap, because the reopen spread is ~70 points and the existing Gold profile caps at 60.</li>
+    </ul>
+  </section>
+
+  <section class="section">
+    <h2>Paper Account</h2>
+    <p class="section-tldr">One notional balance shared by all Paper Sessions, with its own equity, day-start and limits. It is fully separate from the real account.</p>
+    <ul>
+      <li><strong>Equity:</strong> start balance + realized Paper P&amp;L + open Paper P&amp;L, including swap. The start balance is set on the Account page, e.g. $5,000.</li>
+      <li><strong>Limits:</strong> sizing, risk %, daily-loss and global limits use the Paper Account. A Paper limit stops only Paper Sessions.</li>
+      <li><strong>Isolation:</strong> the Paper <code>AccountInfo</code> is built outside <code>gate_and_send</code> and is never written into <code>self._account</code>. It keeps its own day-start key.</li>
+      <li><strong>Reset:</strong> needs typed confirmation and is refused while Paper is active or open. Rows are archived with an epoch id. Paper tickets only go down, so they are never reused.</li>
+      <li><strong>Swap and catch-up:</strong> swap on Paper positions comes from server-day rollovers, using the same function as the backtest. Catch-up pages through M1 bars, then falls back to H1/D1.</li>
+      <li><strong>Statistics:</strong> Overview, History and Strategies split Paper Account from real account figures. ADR 0007 and CLAUDE.md are amended.</li>
+    </ul>
+  </section>
+
+  <section class="section">
+    <h2>Costs, Cost Check and Evidence</h2>
+    <p class="section-tldr">Backtests charge spread and swap scaled to each bar's price. The Cost Check blocks strategies whose transaction costs eat the edge. Evidence shows whether the edge survives all costs.</p>
+    <ul>
+      <li><strong>Cost model:</strong> spread, slippage and swap per night are today's values scaled by close ÷ today's price. Triple-swap day comes from <code>swap_rollover3days</code>. One model version is used by Learning, Shadow Trades, the Evidence Run and Paper.</li>
+      <li><strong>Cost Check:</strong> spread + slippage as R per trade, with the spread taken from ticks or the bar median. Start is blocked above 0.15R without a journaled per-Assignment override. It is enforced in <code>_start</code> and when a Promotion is applied. GOLD M1 costs ~0.3–0.5R and is blocked. Reopen Drift costs ~0.05R and passes.</li>
+      <li><strong>Swap:</strong> shown next to the Cost Check but does not block. GOLD Trend pays ~0.1–0.2R per trade in swap and is still positive, which the Evidence reports.</li>
+      <li><strong>Evidence Run:</strong> read-only, keyed by <code>(symbol, tf, candidate_key, exit-rules hash, weekend_close, window hash, cost version)</code>. It reports mean R per period (2010–17, 2018–21, 2022–26), bars received and the date. Fetches are chunked and backtests run in the process pool. Results stay in the local DB only.</li>
+      <li><strong>Scorecard:</strong> per Arena, the Paper record against the backtest's 90% band, plus real-account min-lot risk. Advisory only.</li>
+    </ul>
+  </section>
+
+  <section class="section">
+    <h2>Learning</h2>
+    <p class="section-tldr">Learning uses the new costs, correct window timing, longer retention for slow Arenas, and family-scoped search inside narrow bounds.</p>
+    <ul>
+      <li><strong>Backtest timing:</strong> entries check the window at the next tradable time, using one helper shared with live Pending Entries.</li>
+      <li><strong>Retention:</strong> keep at least 200 closed Shadow Trades per Candidate per Arena, whatever their age.</li>
+      <li><strong>Search scope:</strong> the optimizer searches within the Champion's family, with separate search bounds. The noise and planted-edge tests are re-pinned. Guardrail constants are unchanged, and auto-promotion is never allowed on live.</li>
+    </ul>
+  </section>
+
+  <section class="section">
+    <h2>Testing and verification</h2>
+    <p class="section-tldr">Everything order-related runs on SimBroker, which gains GOLD and index trading hours, swap and long history. The MT5 probe is read-only.</p>
+    <ul>
+      <li><strong>SimBroker:</strong> a daily break until 01:00, a wider reopen spread, swap fields and 600+ days of history. A new "Gold Reopen" Risk Profile.</li>
+      <li><strong>pytest:</strong>
+        <ul>
+          <li>Magic per Assignment: ownership, migration, Kill Switch, Orphans, two GOLD positions at once.</li>
+          <li>Pending Entry states and the 5-minute fill window.</li>
+          <li>Paper Account limits and reset.</li>
+          <li>Price-scaled swap and spread, including the triple day.</li>
+          <li>Cost Check enforcement from the API, MCP, auto-resume and promotions.</li>
+          <li>Evidence keys, retention and family-scoped candidates.</li>
+          <li>Reviewer: the snapshot never contains holdout bars, every run is in the ledger, a holdout use can't repeat silently, and <code>submit_challenger</code> can't promote.</li>
+        </ul>
+      </li>
+      <li><strong>E2E and exploratory:</strong> two GOLD Assignments in one Session, the Evidence badges, the Cost Check block and override, the Paper Account, the stats split and the scorecard.</li>
+      <li><strong>Read-only MT5 smoke:</strong> logs when the H1 and H4 bars appear after the reopen and GOLD's spread per minute from 01:00 to 01:15. Order methods stay tripwired.</li>
+    </ul>
+  </section>
+
+  <section class="section">
+    <h2>Decisions Log</h2>
+    <details>
+      <summary>53 decisions recorded (42 interview, 11 red team). Expand to view</summary>
+      <div class="table-wrap"><table>
+        <thead><tr><th>ID</th><th>Topic</th><th>Decision</th><th>Rationale</th><th>Source</th><th>Date</th></tr></thead>
+        <tbody>
+          <tr><td>D1</td><td>Account</td><td>Target the existing $50 XM Standard demo; no micro/cent account</td><td>User cannot provide a micro account</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D2</td><td>Goal</td><td>Prove on Paper first with notional sizing; real trading is a later decision</td><td>No setup with an edge fits $50 at survivable risk</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D3</td><td>Families</td><td>Evidence-only: ship only families that survive full costs; make Learning swap-aware</td><td>Stops shipping edgeless strategies</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D4</td><td>Old strategies</td><td>Keep them; add a blocking Cost Check with a per-Assignment override</td><td>History and golden fixture; stops GOLD-M1-style bleeding</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D5</td><td>D1 timing</td><td>Deferred Pending Entry, re-gated at the first tradable tick</td><td>Matches the backtest's next-open fill</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D6</td><td>Weekend</td><td>Per-Session Weekend Close, off by default for D1/H4, with a warning; the backtest models it</td><td>It halves the US500 edge</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D7</td><td>Arenas</td><td>Assignable anywhere; Evidence table and "no evidence" badge</td><td>Informs without a whitelist</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D8</td><td>Paper money</td><td>One Paper Account notional balance</td><td>Tests portfolio limits realistically</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D9</td><td>Graduation</td><td>Advisory per-Arena scorecard with real-account risk math</td><td>You decide on real money</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D10</td><td>Learning</td><td>Narrow, swap-aware optimizer bounds; Guardrails unchanged</td><td>Flat plateaus; tuning mostly fits noise</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D11</td><td>Evidence source</td><td>In-app read-only Evidence Run</td><td>Works on any broker; stays current</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D12</td><td>Exits</td><td>Exits that fall in the daily break are deferred like entries</td><td>Market is shut</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D13</td><td>Pending scope</td><td>Pending Entries apply on any timeframe when the market or window is shut</td><td>One mechanism</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D14</td><td>Cost threshold</td><td>0.15R default, set in Settings</td><td>Blocks M1/M15 on XM</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D15</td><td>Swap model</td><td>Mode-aware swap in backtests, Shadow Trades, the Evidence Run and Paper</td><td>Swap reverses many trend results</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D16</td><td>Stats split</td><td>Separate Paper Account and real account statistics</td><td>Removes mixed stats</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D17</td><td>Invariants</td><td>Old golden rows, Guardrail constants and the no-MT5-orders rule unchanged</td><td>Existing guarantees</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D18</td><td>Backtest window</td><td>Check the window at the next tradable time with a helper shared with live</td><td>Otherwise backtests open 0 D1 trades</td><td><span class="src rt">Red Team</span></td><td>2026-09-25</td></tr>
+          <tr><td>D19</td><td>Paper pool</td><td>Separate Paper AccountInfo, day-start and limits; amend ADR 0007</td><td>A $50 day-loss cap would stop Paper</td><td><span class="src rt">Red Team</span></td><td>2026-09-25</td></tr>
+          <tr><td>D20</td><td>Pending lifecycle</td><td>Persisted and keyed by Arena and bar; cancel events defined; sent only via _enter; transient retries only</td><td>Keeps every entry guard</td><td><span class="src rt">Red Team</span></td><td>2026-09-25</td></tr>
+          <tr><td>D21</td><td>Paper reset</td><td>Refused while Paper is active or open; archive; tickets only go down</td><td>No ticket reuse</td><td><span class="src rt">Red Team</span></td><td>2026-09-25</td></tr>
+          <tr><td>D22</td><td>Retention</td><td>Keep at least 200 closed Shadow Trades per Candidate per Arena</td><td>180 days is too short for D1/H4</td><td><span class="src rt">Red Team</span></td><td>2026-09-25</td></tr>
+          <tr><td>D23</td><td>Evidence key</td><td>Key by Arena, candidate, exit rules, weekend, window and cost version</td><td>No evidence shown for untested settings</td><td><span class="src rt">Red Team</span></td><td>2026-09-25</td></tr>
+          <tr><td>D24</td><td>Evidence scheduling</td><td>Chunked fetches, process pool, refused during an entry</td><td>BrokerThread contention</td><td><span class="src rt">Red Team</span></td><td>2026-09-25</td></tr>
+          <tr><td>D25</td><td>Search scope</td><td>Family-scoped candidates; separate search bounds; re-pin tests</td><td>No cross-family promotions</td><td><span class="src rt">Red Team</span></td><td>2026-09-25</td></tr>
+          <tr><td>D26</td><td>Cost inputs</td><td>Spread from ticks or bar median; enforced in _start and at promotion</td><td>Live spread widens at the break; UI-only check is bypassable</td><td><span class="src rt">Red Team</span></td><td>2026-09-25</td></tr>
+          <tr><td>D27</td><td>Sim and probe</td><td>SimBroker hours, swap and history; Index profile; read-only timing probe</td><td>D1/H4 paths otherwise untestable</td><td><span class="src rt">Red Team</span></td><td>2026-09-25</td></tr>
+          <tr><td>D28</td><td>Paper swap</td><td>Rollover-based swap with a shared function; paged catch-up</td><td>No double-count across restarts</td><td><span class="src rt">Red Team</span></td><td>2026-09-25</td></tr>
+          <tr><td>D29</td><td>Exposure</td><td>Evidence in the local DB only; MCP read-only get_evidence</td><td>Public repo; no-auth API</td><td><span class="src rt">Red Team</span></td><td>2026-09-25</td></tr>
+          <tr><td>D30</td><td>Focus</td><td>GOLD is the primary instrument</td><td>User direction</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D31</td><td>Strategy set</td><td>GOLD Trend (H4) and GOLD Reopen Drift (H1) primary; US500 Index Pullback secondary</td><td>Only GOLD families positive across all variants; uncorrelated trio</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D32</td><td>Reopen fill</td><td>Send at the first tick after 01:00; 5-minute fill window; Gold Reopen profile with a 100-point cap; journal delay and spread</td><td>The edge is gone by 01:15; reopen spread ~70 points</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D33</td><td>Same symbol</td><td>Magic Number per Assignment; supersede ADR 0003</td><td>Two GOLD strategies at once; hedging account</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D34</td><td>Cost scaling</td><td>Spread, slippage and swap scale with price in multi-year backtests</td><td>Fixed dollar costs overstate early years 2.5–3.5×</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D35</td><td>Time anchor</td><td>Session Drift hours are server time from the daily reopen</td><td>Survives daylight-saving shifts</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D36</td><td>Trend direction</td><td>GOLD Trend long-only by default; allow_short param</td><td>Long-only median positive in all periods; L+S negative 2018–21</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D37</td><td>Magic identity</td><td>Magic keyed by (Session, Symbol, Strategy, Timeframe), stable across edits; Arena unique among running Assignments</td><td>Assignment ids are recreated on edit; Learning keys by Arena</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D38</td><td>Swap in Cost Check</td><td>The Cost Check blocks on spread + slippage only; swap is shown, and the Evidence judges it</td><td>GOLD Trend pays swap yet stays positive</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D39</td><td>Fill window</td><td>Pending Entry expiry is set per strategy (5 min for Reopen, next bar close otherwise)</td><td>Edges decay at different speeds</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D40</td><td>Scope</td><td>GOLD only; US500 Index Pullback dropped from this build</td><td>Operator wants GOLD focus</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D41</td><td>Self-learning</td><td>Weekly Claude Strategy Review of mistakes and upgrades, including multi-timeframe filters</td><td>Operator direction</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D42</td><td>Reviewer authority</td><td>Challengers automatically; code only as PRs; never live, risk, Sessions or orders</td><td>Learning speed without unreviewed engine code</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D43</td><td>Review trigger</td><td>Saturday scheduled task, plus on demand</td><td>Enough trades; no clash with trading</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D44</td><td>Trial guard</td><td>Trial ledger with a growing penalty; sealed rolling 12-month holdout scored once; failure is final</td><td>Weekly mining would find luck</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D45</td><td>Review reports</td><td>Reviews page plus Telegram; PRs carry code only</td><td>Public repo</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D46</td><td>Pyramiding</td><td>Only if proven; research rejected it</td><td>Fails every-period rule</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D47</td><td>Reviewer I/O</td><td>Research CLI on a holdout-free snapshot; MCP submit_review and submit_challenger</td><td>Narrow write surface</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D48</td><td>Objective</td><td>Expected R after costs; win rate reported, not optimised</td><td>Win rate can rise while profit falls</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D49</td><td>Upgrade results</td><td>Keep Turtle 55/20 and Reopen 01→04; reject ensembles, regime filters, the dip filter and exit at 05:00</td><td>Every-period rule and sealed holdout</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D50</td><td>Volatility sizing</td><td>No extra work; ATR stops with risk-% sizing already do it</td><td>Inherent in the Risk Gate</td><td><span class="src iv">Interview</span></td><td>2026-09-25</td></tr>
+          <tr><td>D51</td><td>Scalping</td><td>GOLD M1/M5/M15 scalping is a research track in the weekly review on its own Arena; no scalper engine work until a design passes</td><td>10 designs lose after costs</td><td><span class="src iv">Interview</span></td><td>2026-09-26</td></tr>
+          <tr><td>D52</td><td>History depth</td><td>Operator sets MT5 "Max bars in chart" to Unlimited; re-pull M1/M5 and re-run</td><td>100k-bar cap gives 3 months of M1</td><td><span class="src iv">Interview</span></td><td>2026-09-26</td></tr>
+          <tr><td>D53</td><td>Scalping result</td><td>No GOLD scalper ships; NY opening-range breakout stays a watched hypothesis; scalping holdout still sealed</td><td>Fails every-period rule and neighbourhood robustness</td><td><span class="src iv">Interview</span></td><td>2026-09-26</td></tr>
+        </tbody>
+      </table></div>
+    </details>
+  </section>
+
+  <section class="section">
+    <h2>Implementation order</h2>
+    <div class="diagram-wrap">
+      <svg viewBox="0 0 900 250" role="img" aria-label="Dependency graph: pure core and SimBroker, then magic per assignment and learning, then engine, evidence, API and MCP, UI and verification">
+        <defs><marker id="arrow3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <path class="edge" d="M140,45 L190,45" marker-end="url(#arrow3)"/>
+        <path class="edge" d="M140,45 L165,45 L165,125 L190,125" marker-end="url(#arrow3)"/>
+        <path class="edge" d="M140,205 L165,205 L165,125" />
+        <path class="edge" d="M140,205 L190,205" marker-end="url(#arrow3)"/>
+        <path class="edge" d="M320,45 L370,45" marker-end="url(#arrow3)"/>
+        <path class="edge" d="M320,125 L370,125" marker-end="url(#arrow3)"/>
+        <path class="edge" d="M320,205 L345,205 L345,125" />
+        <path class="edge" d="M500,45 L525,45 L525,125 L550,125" marker-end="url(#arrow3)"/>
+        <path class="edge" d="M500,125 L550,125" marker-end="url(#arrow3)"/>
+        <path class="edge" d="M680,125 L720,125" marker-end="url(#arrow3)"/>
+
+        <g class="start"><rect x="10" y="22" width="130" height="46" rx="10"/><text x="75" y="45" text-anchor="middle" dominant-baseline="middle">1 Pure core</text></g>
+        <g class="node"><rect x="10" y="182" width="130" height="46" rx="10"/><text x="75" y="205" text-anchor="middle" dominant-baseline="middle">2 SimBroker</text></g>
+        <g class="node"><rect x="190" y="22" width="130" height="46" rx="10"/><text x="255" y="45" text-anchor="middle" dominant-baseline="middle">4 Learning</text></g>
+        <g class="node"><rect x="190" y="102" width="130" height="46" rx="10"/><text x="255" y="125" text-anchor="middle" dominant-baseline="middle">3 Magic/Assign.</text></g>
+        <g class="store"><rect x="190" y="182" width="130" height="46" rx="4"/><text x="255" y="205" text-anchor="middle" dominant-baseline="middle">Store tables</text></g>
+        <g class="node"><rect x="370" y="22" width="130" height="46" rx="10"/><text x="435" y="45" text-anchor="middle" dominant-baseline="middle">6 Evidence Run</text></g>
+        <g class="node"><rect x="370" y="102" width="130" height="46" rx="10"/><text x="435" y="125" text-anchor="middle" dominant-baseline="middle">5 Engine</text></g>
+        <g class="node"><rect x="550" y="102" width="130" height="46" rx="10"/><text x="615" y="125" text-anchor="middle" dominant-baseline="middle">7 API + MCP</text></g>
+        <g class="node"><rect x="720" y="102" width="170" height="46" rx="10"/><text x="805" y="125" text-anchor="middle" dominant-baseline="middle">8 UI · 9 Review · 10 Verify</text></g>
+      </svg>
+    </div>
+    <p class="diagram-caption">Build left to right; each milestone ends green</p>
+    <ol class="timeline">
+      <li data-step="1"><span class="step-title">Pure core</span><br><span class="step-detail">Price-scaled cost model with swap and a cost version; next-tradable-time helper; both GOLD strategies with golden rows and optional multi-timeframe inputs; Cost Check math.</span></li>
+      <li data-step="2"><span class="step-title">SimBroker</span><br><span class="step-detail">Daily break and reopen spread, swap, 600+ days of history, GOLD specs; Gold Reopen Risk Profile.</span></li>
+      <li data-step="3"><span class="step-title">Magic per Assignment</span><br><span class="step-detail">ADR 0009 supersedes 0003. Stable magic identity, migration, ownership, Orphans, Kill Switch, Paper routing.</span></li>
+      <li data-step="4"><span class="step-title">Learning</span><br><span class="step-detail">PaperTrader costs and window fix, retention, family-scoped search; re-pin the noise and planted-edge tests.</span></li>
+      <li data-step="5"><span class="step-title">Engine</span><br><span class="step-detail">Pending Entries and deferred exits with per-strategy fill windows; Paper Account; Cost Check enforcement. ADR 0008; amend 0007, CONTEXT.md and CLAUDE.md.</span></li>
+      <li data-step="6"><span class="step-title">Evidence Run and scorecard</span><br><span class="step-detail">Evidence table, chunked read-only fetches, per-period results, band and risk math.</span></li>
+      <li data-step="7"><span class="step-title">API and MCP</span><br><span class="step-detail">Evidence, Cost Check, Paper Account and scorecard endpoints; MCP read-only get_evidence.</span></li>
+      <li data-step="8"><span class="step-title">UI</span><br><span class="step-detail">Multiple Assignments per Symbol in the editor; Evidence badges; Cost Check; Paper Account; stats split; scorecard; Reviews page.</span></li>
+      <li data-step="9"><span class="step-title">Claude Strategy Review</span><br><span class="step-detail">Research CLI with snapshot, trial ledger and one-shot holdout; gold-review skill; weekly scheduled task; CLAUDE.md rules.</span></li>
+      <li data-step="10"><span class="step-title">Verify</span><br><span class="step-detail">pytest, build, E2E, playwright-cli pass, read-only MT5 smoke with reopen timing and spread probe.</span></li>
+    </ol>
+  </section>
+</main>

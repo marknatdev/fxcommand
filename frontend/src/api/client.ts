@@ -1,6 +1,15 @@
 import type {
   AccountView,
   ArenaDetail,
+  CostCheckResult,
+  Evidence,
+  EvidenceBadge,
+  EvidenceRequest,
+  PaperAccount,
+  Review,
+  ScorecardRow,
+  TrialsView,
+  AssignmentInput,
   NotifySettings,
   OutboxEntry,
   PreflightReport,
@@ -100,8 +109,8 @@ export const api = {
   positions: () => req<PositionView[]>("GET", "/positions"),
   closePosition: (ticket: number) => req<unknown>("POST", `/positions/${ticket}/close`),
 
-  trades: (p: { session_id?: number; symbol?: string; strategy?: string; status?: string; limit?: number }) =>
-    req<{ trades: Trade[]; stats: Stats; curve: { ts: number; value: number }[] }>("GET", `/trades${qs(p)}`),
+  trades: (p: { session_id?: number; symbol?: string; strategy?: string; status?: string; account?: "real" | "paper"; limit?: number }) =>
+    req<{ trades: Trade[]; stats: Stats; stats_real: Stats; stats_paper: Stats; curve: { ts: number; value: number }[] }>("GET", `/trades${qs(p)}`),
   journal: (p: { session_id?: number; kind?: string[]; level?: string; alerts?: boolean; symbol?: string; limit?: number }) =>
     req<JournalEntry[]>("GET", `/journal${qs(p)}`),
   logs: (p: { level?: string; after?: number; limit?: number }) => req<LogLine[]>("GET", `/logs${qs(p)}`),
@@ -127,6 +136,19 @@ export const api = {
   setAutoPromote: (sessionId: number, symbol: string, enabled: boolean) =>
     req<unknown>("PUT", `/learning/slots/${sessionId}/${encodeURIComponent(symbol)}/auto-promote`, { enabled }),
   cancelPending: (id: number) => req<void>("DELETE", `/learning/pending/${id}`),
+
+  costCheck: (id: number) => req<CostCheckResult>("GET", `/sessions/${id}/cost-check`),
+  costPreview: (assignments: AssignmentInput[], session_id?: number | null) => req<CostCheckResult>("POST", "/cost-check", { session_id, assignments }),
+  evidence: (p: { symbol?: string; timeframe?: string; strategy?: string } = {}) => req<Evidence[]>("GET", `/evidence${qs(p)}`),
+  evidenceMatch: (body: EvidenceRequest) => req<EvidenceBadge>("POST", "/evidence/match", body),
+  runEvidence: (body: EvidenceRequest) => req<Evidence>("POST", "/evidence/run", body),
+  scorecard: () => req<ScorecardRow[]>("GET", "/scorecard"),
+  paperAccount: () => req<PaperAccount>("GET", "/paper-account"),
+  setPaperBalance: (start_balance: number) => req<PaperAccount>("PUT", "/paper-account", { start_balance }),
+  resetPaper: (confirm: string, start_balance?: number | null) => req<PaperAccount>("POST", "/paper-account/reset", { confirm, start_balance }),
+  reviews: () => req<Review[]>("GET", "/reviews"),
+  review: (id: number) => req<Review>("GET", `/reviews/${id}`),
+  trials: (p: { symbol?: string; timeframe?: string; limit?: number } = {}) => req<TrialsView>("GET", `/research/trials${qs(p)}`),
 
   simState: () => req<SimState>("GET", "/sim/state"),
   simAdvance: (bars: number) => req<SimState>("POST", "/sim/advance", { bars }),

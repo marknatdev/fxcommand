@@ -18,6 +18,7 @@ from .config import Config
 from .engine import DomainError, SessionManager
 from .journal import EventBus, Journal, LogBuffer
 from .learning.service import LearningService
+from .tasks import cancel_and_wait
 from .notify import AlertDispatcher, telegram_from_settings
 from .store import NotFound, Store
 
@@ -73,7 +74,12 @@ def build_runtime(config: Config) -> Runtime:
         root.addHandler(logs)
     store = Store(config.db_url)
     if config.broker == "sim":
-        broker = make_broker("sim", seed=config.sim_seed, start=config.sim_start or sim_resume_start(store.last_server_ts()))
+        broker = make_broker(
+            "sim",
+            seed=config.sim_seed,
+            start=config.sim_start or sim_resume_start(store.last_server_ts()),
+            deep_history_days=config.sim_deep_days,
+        )
         if config.sim_speed is not None:
             store.update_app_settings({"sim_speed": config.sim_speed})
     else:
@@ -126,8 +132,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         try:
             yield
         finally:
-            if rt.clock_task:
-                rt.clock_task.cancel()
+            await cancel_and_wait(rt.clock_task)  # it steps the sim through the broker thread too
             await rt.manager.stop_loop()
             await rt.learning.stop()
             await rt.notifier.stop()

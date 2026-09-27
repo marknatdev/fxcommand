@@ -20,15 +20,23 @@ never interleave with an engine pass. All Broker calls go through
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from dataclasses import asdict, dataclass, field
 
 from ..broker import BrokerError, BrokerThread, BrokerTimeout, OrderResult, Position, Timeframe
+from ..broker.paper import DEFERRABLE_REASONS
 from ..broker.types import AccountInfo
 from ..journal import EventBus, Journal
+from ..tasks import cancel_and_wait
 from ..risk import Exposure, GateInput, LiveCaps, Rejected, RiskLimits, TradingWindow, check, check_margin, manage
+from ..risk.costcheck import CostEstimate, estimate_cost
+from ..risk.gate import MAX_QUOTE_AGE
+from ..risk.spreads import SpreadBook
+from ..risk.window import fill_limit, in_weekend_close, weekday  # noqa: F401 (re-exported)
 from ..store import AssignmentRow, SessionRow, Store, TradeRow
+from ..store.models import PendingEntryRow
 from ..strategies import Signal, get_strategy
 from ..strategies.base import WARMUP_BARS
 from ..strategies.indicators import atr as atr_series
@@ -42,23 +50,12 @@ DAY = 86400
 MISSING_CLOSE_GIVE_UP = 60  # engine passes before an unexplained vanished position is closed as "unknown"
 RETRY_ONCE = {10004, 10018, 10019, 10020, 10021}  # requote, market closed, no money, price changed, price off
 DISCONNECT_NOTIFY_SECONDS = 60
+MARKET_CLOSED = 10018
+# Risk Gate rejects that clear by themselves: the entry becomes a Pending Entry (spec D5/D13/D20)
+TRANSIENT_REJECTS = {"outside_window", "stale_quote", "spread"}
+PENDING_MAX_WAIT = 4 * DAY  # a Pending Entry that never saw the market open (a long closure) expires anyway
+DEFERRED = "deferred: market closed"  # _close_confirmed's failure note for a close the market refused
 DEFAULT_FLOOR_PCT = 80.0
-
-
-def weekday(ts: int) -> int:
-    """Monday=0 .. Sunday=6 for server-time epoch seconds (1970-01-01 was a Thursday)."""
-    return (ts // DAY + 3) % 7
-
-
-def in_weekend_close(now: int, close_time: str) -> bool:
-    """From Friday ``close_time`` (server time) until the week ends."""
-    wd = weekday(now)
-    if wd >= 5:
-        return True
-    if wd != 4:
-        return False
-    hh, mm = (int(x) for x in close_time.split(":"))
-    return (now % DAY) // 60 >= hh * 60 + mm
 
 
 @dataclass
@@ -85,9 +82,25 @@ class EngineStatus:
     extra: dict = field(default_factory=dict)
 
 
+def _order_in_flight(fn):
+    """Count the engine's order paths while they run: an Evidence Run reads history only between them
+    (spec D24: a long history read must never delay an entry or a close into an uncertain outcome)."""
+
+    @functools.wraps(fn)
+    async def wrapper(self, *args, **kwargs):
+        self._orders_in_flight += 1
+        try:
+            return await fn(self, *args, **kwargs)
+        finally:
+            self._orders_in_flight -= 1
+
+    return wrapper
+
+
 class SessionManager:
     def __init__(self, broker: BrokerThread, store: Store, journal: Journal, bus: EventBus, learning=None):
         self.broker = broker
+        self._orders_in_flight = 0
         self.learning = learning  # LearningService | None (ADR 0004); every call goes through _learn()
         self._learn_errors: set[str] = set()
         self.store = store
@@ -100,6 +113,8 @@ class SessionManager:
         self._account: AccountInfo | None = None
         self._positions: list[Position] = []
         self._missing: dict[int, int] = {}
+        self._modify_failed: dict[int, str] = {}  # ticket -> last failed SL move, journaled once
+        self.spreads = SpreadBook(store)  # typical spreads for the Cost Check (never one quote from the break)
         self._task: asyncio.Task | None = None
         self._kill_seq = 0  # bumped by the Kill Switch; an entry prepared before it is refused
         self.close_attempts = 5
@@ -108,6 +123,16 @@ class SessionManager:
         self.notifier_configured = lambda: False  # set by the app (Pre-flight Check)
 
     # ================================================================ helpers
+    @property
+    def learning(self):
+        return self._learning
+
+    @learning.setter
+    def learning(self, service) -> None:
+        self._learning = service
+        if service is not None:  # its Evidence Runs read history only while no order is in flight
+            service.order_busy = lambda: self._orders_in_flight > 0
+
     def _learn(self, fn, default=None):
         """Run a learning hook. Learning must never stop trading: any failure is logged, journaled once
         per distinct message, and swallowed (it is also never mistaken for a Broker error)."""
@@ -147,14 +172,121 @@ class SessionManager:
         equity = float(ds.get("equity") or (self._account.equity if self._account else 0.0))
         return int(ds.get("day", self.now // DAY)) * DAY, equity
 
+    # ---------------------------------------------------------- Paper Account (D8/D19)
+    def _paper_account(self) -> AccountInfo:
+        """The notional pool every Paper Session sizes from. Built from the database and the open Paper
+        Positions; used only for the Risk Gate's sizing and limits — never stored in ``self._account``,
+        so the real Equity Floor, day start and equity snapshots never see it."""
+        cfg = self.store.paper_account()
+        balance = float(cfg["start_balance"]) + self.store.realized_paper(epoch=int(cfg["epoch"]))
+        equity = balance + sum(p.profit for p in self._positions if p.ticket < 0)
+        real = self._account
+        return AccountInfo(
+            login=real.login if real else 0, name="Paper Account", server=real.server if real else "", company=real.company if real else "",
+            currency=real.currency if real else "USD", balance=round(balance, 2), equity=round(equity, 2), margin=0.0, margin_free=round(equity, 2),
+            leverage=real.leverage if real else 100, is_demo=True, trade_allowed=True, margin_mode="hedging",
+        )
+
+    def _paper_day_start(self) -> tuple[int, float]:
+        ds = self.store.get_setting("day_start:paper") or {}
+        equity = float(ds.get("equity") or self._paper_account().equity)
+        return int(ds.get("day", self.now // DAY)) * DAY, equity
+
+    def _paper_global_pnl(self, day_ts: int) -> float:
+        return self.store.realized_paper(since=day_ts) + sum(p.profit for p in self._positions if p.ticket < 0)
+
+    def paper_account_view(self) -> dict:
+        cfg = self.store.paper_account()
+        acct = self._paper_account()
+        _, day_equity = self._paper_day_start()
+        return {
+            "start_balance": float(cfg["start_balance"]), "epoch": int(cfg["epoch"]), "currency": acct.currency,
+            "balance": acct.balance, "equity": acct.equity, "open_pnl": round(acct.equity - acct.balance, 2),
+            "realized": round(acct.balance - float(cfg["start_balance"]), 2),
+            "day_start_equity": round(day_equity, 2), "day_pnl": round(acct.equity - day_equity, 2),
+            "open_positions": sum(1 for p in self._positions if p.ticket < 0),
+            "active_sessions": [s.name for s in self.store.list_sessions() if s.execution == "paper" and s.status in ACTIVE],
+        }
+
+    def _paper_idle(self) -> None:
+        active = [s.name for s in self.store.list_sessions() if s.execution == "paper" and s.status in ACTIVE]
+        if active:
+            raise DomainError("paper_active", f"stop the Paper Sessions first: {', '.join(active)}")
+        if self.store.paper_open():
+            raise DomainError("paper_open", "close the open Paper Positions first")
+
+    async def set_paper_start_balance(self, start_balance: float) -> dict:
+        """Change the notional start balance within the epoch. Same guards as a reset, and the Paper day
+        start moves with it (otherwise today's loss limit would see a phantom loss or gain)."""
+        async with self._lock:
+            if not start_balance > 0:
+                raise DomainError("invalid", "the start balance must be positive", 422)
+            self._paper_idle()
+            cfg = self.store.set_paper_account(start_balance=float(start_balance))
+            equity = self._paper_account().equity
+            self.store.set_setting("day_start:paper", {"day": self.now // DAY, "equity": equity})
+            self._j("state", f"Paper Account start balance set to {start_balance:.2f} (equity {equity:.2f})", level="warn")
+            return cfg
+
+    async def reset_paper_account(self, confirm: str, start_balance: float | None = None) -> dict:
+        """Start a new Paper Account epoch. Typed confirmation; refused while a Paper Session is active
+        or a Paper Position is open. Old rows stay (archived by epoch); tickets are never reused."""
+        async with self._lock:
+            if confirm != "RESET PAPER":
+                raise DomainError("confirm_required", "type RESET PAPER to reset the Paper Account", 422)
+            self._paper_idle()
+            cfg = self.store.paper_account()
+            start = float(start_balance) if start_balance is not None else float(cfg["start_balance"])
+            if not start > 0:
+                raise DomainError("invalid", "the start balance must be positive", 422)
+            cfg = self.store.set_paper_account(start_balance=start, epoch=int(cfg["epoch"]) + 1)
+            self.store.set_setting("day_start:paper", {"day": self.now // DAY, "equity": start})
+            self._j("alert", f"Paper Account reset: epoch {cfg['epoch']}, balance {start:.2f} (earlier Paper trades archived)", level="warn", alert=True)
+            return cfg
+
     def _owned(self, magics: dict[int, int] | None = None) -> list[Position]:
         """Owned positions on the Account (Paper Positions excluded: they never touch the Account)."""
         magics = magics if magics is not None else self.store.all_magics()
         return [p for p in self._positions if p.magic in magics and p.ticket > 0]
 
     def _session_pnl(self, s: SessionRow, day_ts: int) -> float:
-        floating = sum(p.profit for p in self._positions if p.magic == s.magic)
+        magics = self.store.session_magics(s.id)
+        floating = sum(p.profit for p in self._positions if p.magic in magics)
         return self.store.realized_since(day_ts, s.id, self._login) + floating
+
+    def _session_positions(self, s: SessionRow, positions: list[Position] | None = None) -> list[Position]:
+        """Every position of the Session, whichever of its Assignment magics it carries (ADR 0009)."""
+        magics = self.store.session_magics(s.id)
+        return [p for p in (self._positions if positions is None else positions) if p.magic in magics]
+
+    def _owner(self, s: SessionRow, p: Position, assigns: list[AssignmentRow], idents: dict | None = None) -> AssignmentRow | None:
+        """The Assignment of ``s`` that manages position ``p`` (ADR 0009):
+        1. the Assignment whose magic ``p`` carries, if the Symbol matches;
+        2. else the Assignment in the Arena of the identity ``p``'s magic belongs to (the strategy
+           changed by an edit or a Promotion, the position stayed);
+        3. else, for a position carrying the Session's own magic with another Symbol (opened before
+           magics were per Assignment), the Session's first Assignment on that Symbol."""
+        same = [a for a in assigns if a.symbol == p.symbol]
+        if not same:
+            return None
+        for a in same:
+            if a.magic == p.magic:
+                return a
+        ident = (self.store.magic_identities() if idents is None else idents).get(p.magic)
+        if ident is not None and ident.session_id == s.id and ident.symbol == p.symbol:
+            return next((a for a in same if a.timeframe == ident.timeframe), None)
+        if p.magic == s.magic:
+            return same[0]
+        return None
+
+    def _position_of(self, s: SessionRow, a: AssignmentRow, positions: list[Position] | None = None) -> Position | None:
+        assigns = self.store.assignments(s.id)
+        idents = self.store.magic_identities()
+        for p in self._session_positions(s, positions):
+            o = self._owner(s, p, assigns, idents)
+            if o is not None and o.id == a.id:
+                return p
+        return None
 
     def _global_pnl(self, day_ts: int, magics: dict[int, int]) -> float:
         return self.store.realized_since(day_ts, login=self._login) + sum(p.profit for p in self._owned(magics))
@@ -163,7 +295,7 @@ class SessionManager:
         """Tell the PaperRouter which Magic Numbers are Paper Sessions (ADR 0007)."""
         router = self.broker.broker
         if hasattr(router, "paper_magics"):
-            router.paper_magics = {s.magic for s in self.store.list_sessions() if s.execution == "paper"}
+            router.paper_magics = set().union(*(self.store.session_magics(s.id) for s in self.store.list_sessions() if s.execution == "paper"))
 
     def _has_paper(self) -> bool:
         return hasattr(self.broker.broker, "paper_magics")
@@ -176,14 +308,17 @@ class SessionManager:
         other = self.store.session_by_name(spec.name)
         if other is not None and other.id != session_id:
             raise DomainError("name_taken", f"a session named {spec.name!r} already exists")
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
         profiles = {p.id: p for p in self.store.risk_profiles()}
         default_profile = next(iter(profiles))
         rows = []
         for a in spec.assignments:
-            if a.symbol in seen:
-                raise DomainError("duplicate_symbol", f"{a.symbol} appears twice; a Symbol may appear only once per Session", 422)
-            seen.add(a.symbol)
+            arena = (a.symbol, a.timeframe.value)
+            if arena in seen:
+                raise DomainError(
+                    "duplicate_symbol", f"{a.symbol} {a.timeframe.value} appears twice; a Symbol may appear once per Timeframe in a Session", 422
+                )
+            seen.add(arena)
             try:
                 strat = get_strategy(a.strategy)
             except KeyError as e:
@@ -233,10 +368,13 @@ class SessionManager:
                 weekend_close=spec.weekend_close,
                 weekend_close_time=spec.weekend_close_time,
             )
+            self._check_cost_overrides(spec)
             row = self.store.save_session(row, rows)
             self._sync_paper()
+            self._sync_cost_overrides(row, spec.cost_overrides)
             mode = " — PAPER" if row.execution == "paper" else ""
-            self._j("state", f"Session '{row.name}' created (magic {row.magic}, {len(rows)} assignments){mode}", row)
+            magics = ", ".join(str(a.magic) for a in self.store.assignments(row.id))
+            self._j("state", f"Session '{row.name}' created (magics {magics}, {len(rows)} assignments){mode}", row)
             return row
 
     async def update_session(self, session_id: int, spec: SessionIn) -> SessionRow:
@@ -246,8 +384,9 @@ class SessionManager:
                 raise DomainError("session_active", "stop the session before editing it")
             rows = self._validate_spec(spec, session_id)
             self._check_execution(spec)
+            self._check_cost_overrides(spec)
             if spec.execution != s.execution:
-                if any(p.magic == s.magic for p in self._positions):
+                if self._session_positions(s):
                     raise DomainError("has_positions", "close the session's positions before changing its execution mode")
                 if spec.execution == "broker" and self._is_live() and spec.confirm_login != self._account.login:
                     raise DomainError(
@@ -258,6 +397,7 @@ class SessionManager:
             s.execution, s.weekend_close, s.weekend_close_time = spec.execution, spec.weekend_close, spec.weekend_close_time
             s = self.store.save_session(s, rows)
             self._sync_paper()
+            self._sync_cost_overrides(s, spec.cost_overrides)
             for a in self.store.assignments(session_id):
                 self._states.pop(a.id, None)
             self._j("state", f"Session '{s.name}' updated", s)
@@ -268,7 +408,7 @@ class SessionManager:
             s = self.store.get_session(session_id)
             if s.status in ACTIVE:
                 raise DomainError("session_active", "stop the session before deleting it")
-            if any(p.magic == s.magic for p in self._positions):
+            if self._session_positions(s):
                 raise DomainError("has_positions", "the session still has open positions; close them first")
             self.store.delete_session(session_id)
             self._j("state", f"Session '{s.name}' deleted")
@@ -286,13 +426,15 @@ class SessionManager:
         if not assigns:
             raise DomainError("no_assignments", "session has no enabled assignments", 422)
         symbols = {a.symbol for a in assigns}
+        arenas = {(a.symbol, a.timeframe) for a in assigns}
         for other in self.store.list_sessions():
             if other.id == s.id or other.status not in ACTIVE:
                 continue
-            clash = symbols & {a.symbol for a in self.store.assignments(other.id) if a.enabled}
+            clash = arenas & {(a.symbol, a.timeframe) for a in self.store.assignments(other.id) if a.enabled}
             if clash:
                 raise DomainError(
-                    "symbol_conflict", f"{', '.join(sorted(clash))} already traded by running session '{other.name}'"
+                    "symbol_conflict",
+                    f"{', '.join(f'{sym} {tf}' for sym, tf in sorted(clash))} already traded by running session '{other.name}'",
                 )
         if not await self._ensure_connected():
             raise DomainError("broker_offline", f"broker not connected: {self.status.last_error}", 503)
@@ -319,6 +461,13 @@ class SessionManager:
             report = await self._preflight(s)
             if not report["ok"]:
                 raise DomainError("preflight_failed", "Pre-flight Check failed: " + "; ".join(report["failed"]), 422)
+        costs = await self.cost_check(s, assigns)  # enforced here, so neither the API nor MCP can skip it
+        blocked = [c for c in costs if not c["allowed"]]
+        if blocked:
+            raise DomainError("cost_check", "Cost Check failed: " + "; ".join(f"{c['symbol']} {c['timeframe']} {c['reason']}" for c in blocked), 422)
+        for c in costs:
+            if c["blocked"] and c["override"]:
+                self._j("state", f"Cost Check override used for {c['symbol']} {c['timeframe']}: {c['reason']}", s, c["symbol"], level="warn")
         self._sync_paper()
         await self._adopt_orphans(announce=False)
         self._learn(lambda L: L.on_session_started(s, assigns, self.now))
@@ -331,6 +480,84 @@ class SessionManager:
         self._j("state", f"Session '{s.name}' started ({mode}, account {s.login}) — {len(assigns)} assignments: {', '.join(sorted(symbols))}", s)
         self._publish()
         return s
+
+    # ------------------------------------------------------------- Cost Check (D4/D14/D26)
+    async def cost_check(self, s: SessionRow, assigns: list[AssignmentRow] | None = None, strategy: str | None = None, params: dict | None = None) -> list[dict]:
+        """Spread + slippage as R of each Assignment's typical stop (its Strategy's stop on the latest
+        bar), priced at the typical spread. ``strategy``/``params`` judge a Candidate instead (a
+        Promotion). Each result says whether it blocks, and whether an override lets it start."""
+        threshold = float(self.store.app_settings()["cost_check_max_r"])
+        out = []
+        for a in assigns if assigns is not None else [x for x in self.store.assignments(s.id) if x.enabled]:
+            key = strategy or a.strategy
+            strat = get_strategy(key)
+            p = strat.resolve(params if params is not None else a.params)
+            tf = Timeframe(a.timeframe)
+            bars, tick, info = await self.broker.run(
+                lambda b, a=a, n=strat.lookback(p) + WARMUP_BARS: (b.closed_bars(a.symbol, tf, n), b.tick(a.symbol), b.symbol_info(a.symbol))
+            )
+            spread = self.spreads.spread_for(a.symbol, tick, self.now)
+            stop = float(strat.signals(bars, p)["sl_dist"].iloc[-1]) if len(bars) else 0.0
+            if spread is None:
+                est = CostEstimate(float("inf"), 0.0, threshold, True, "no typical spread known yet and the market is shut: start when it is open")
+            else:
+                est = estimate_cost(spread, info.point, stop if stop == stop else 0.0, threshold)
+            override = self.store.cost_override(s.id, a.symbol, a.timeframe) if s is not None else None
+            out.append({
+                "symbol": a.symbol, "timeframe": a.timeframe, "strategy": key, **est.to_dict(), "spread": spread, "stop": stop,
+                "override": override is not None, "allowed": not est.blocked or override is not None,
+            })
+        return out
+
+    async def cost_check_preview(self, session_id: int | None, assignments: list) -> list[dict]:
+        """The Cost Check for an editor's unsaved Assignments (``AssignmentIn``), with the saved Session's
+        overrides. Read-only; one result per Assignment, an ``error`` where it cannot be priced."""
+        s = self.store.get_session(session_id) if session_id is not None else None
+        out = []
+        for a in assignments:
+            tf = Timeframe(a.timeframe).value
+            row = AssignmentRow(session_id=session_id or 0, symbol=a.symbol, timeframe=tf, strategy=a.strategy, params=a.params, risk_profile_id=0)
+            try:
+                out.extend(await self.cost_check(s, [row]))
+            except (KeyError, BrokerError, ValueError) as e:
+                out.append({"symbol": a.symbol, "timeframe": tf, "strategy": a.strategy, "error": str(e.args[0] if e.args else e), "allowed": False, "override": False})
+        return out
+
+    @staticmethod
+    def _check_cost_overrides(spec: SessionIn) -> None:
+        if spec.cost_overrides is None:
+            return
+        arenas = {(a.symbol, Timeframe(a.timeframe).value) for a in spec.assignments}
+        for o in spec.cost_overrides:
+            if (o.symbol, o.timeframe.value) not in arenas:
+                raise DomainError("invalid_override", f"a Cost Check override for {o.symbol} {o.timeframe.value} needs that Assignment", 422)
+
+    def _sync_cost_overrides(self, s: SessionRow, wanted: list | None) -> None:
+        """Keep overrides only for the Session's Arenas; with ``wanted`` (the editor's full set) add and
+        remove to match it. Every change is journaled."""
+        arenas = {(a.symbol, a.timeframe) for a in self.store.assignments(s.id)}
+        current = {(o.symbol, o.timeframe): o for o in self.store.cost_overrides(s.id)}
+        if wanted is None:
+            target = {k: o.reason for k, o in current.items() if k in arenas}
+        else:
+            target = {(o.symbol, o.timeframe.value): o.reason for o in wanted}
+        for (symbol, tf), o in current.items():
+            if (symbol, tf) not in target:
+                self.store.set_cost_override(s.id, symbol, tf, False, ts=self.now)
+                why = "" if (symbol, tf) in arenas else " (Assignment removed)"
+                self._j("state", f"Cost Check override removed for {symbol} {tf}{why}", s, symbol)
+        for (symbol, tf), reason in target.items():
+            if (symbol, tf) not in current or current[(symbol, tf)].reason != reason:
+                self.store.set_cost_override(s.id, symbol, tf, True, reason, self.now)
+                self._j("state", f"Cost Check overridden for {symbol} {tf}" + (f": {reason}" if reason else ""), s, symbol, level="warn")
+
+    async def set_cost_override(self, session_id: int, symbol: str, timeframe: str, enabled: bool, reason: str = "") -> None:
+        s = self.store.get_session(session_id)
+        if not any(a.symbol == symbol and a.timeframe == timeframe for a in self.store.assignments(session_id)):
+            raise DomainError("not_found", f"session {s.name!r} has no {symbol} {timeframe} Assignment", 404)
+        self.store.set_cost_override(session_id, symbol, timeframe, enabled, reason, self.now)
+        verb = "overridden" if enabled else "override removed"
+        self._j("state", f"Cost Check {verb} for {symbol} {timeframe}" + (f": {reason}" if reason else ""), s, symbol, level="warn" if enabled else "info")
 
     async def _adopt_orphans(self, announce: bool = True) -> int:
         """Record every owned position the database does not know (an Orphan: e.g. after an uncertain
@@ -345,7 +572,7 @@ class SessionManager:
                 continue
             sessions = sessions or {x.id: x for x in self.store.list_sessions()}
             s = sessions.get(sid)
-            a = next((x for x in self.store.assignments(sid) if x.symbol == p.symbol), None)
+            a = self._owner(s, p, self.store.assignments(sid)) if s else None
             self.store.add_trade(
                 TradeRow(
                     ticket=p.ticket,
@@ -364,6 +591,7 @@ class SessionManager:
                     initial_risk=abs(p.price_open - p.sl) if p.sl else 0.0,
                     adopted=True,
                     paper=p.ticket < 0,
+                    paper_epoch=self.store.paper_epoch() if p.ticket < 0 else 0,
                     login=self._login,
                 )
             )
@@ -412,13 +640,14 @@ class SessionManager:
 
     async def _stop(self, s: SessionRow, close_positions: bool, reason: str, alert: bool = False) -> SessionRow:
         s = self.store.update_session_fields(s.id, status="stopped", stopped_at=self.now, stop_reason=reason)
+        self._cancel_pending(s, None, None, f"session stopped: {reason}")
         self._learn(lambda L: L.on_session_stopped(s))
         for a in self.store.assignments(s.id):
             self._states.pop(a.id, None)
         closed = 0
         if close_positions:
-            closed = await self._close_all({s.magic}, reason)
-        left = sum(1 for p in self._positions if p.magic == s.magic)
+            closed = await self._close_all(self.store.session_magics(s.id), reason)
+        left = len(self._session_positions(s))
         tail = f"closed {closed} positions" if close_positions else f"left {left} positions open (server SL/TP protect them)"
         self._j("alert" if alert else "state", f"Session '{s.name}' stopped: {reason}; {tail}", s, level="warn" if alert else "info", alert=alert)
         return s
@@ -430,6 +659,7 @@ class SessionManager:
         for s in self.store.list_sessions():
             if s.status in (*ACTIVE, "interrupted"):
                 self.store.update_session_fields(s.id, status="stopped", stopped_at=self.now, stop_reason=reason)
+                self._cancel_pending(s, None, None, reason)
                 stopped.append(s.name)
         return stopped
 
@@ -518,12 +748,7 @@ class SessionManager:
             self._task = asyncio.create_task(self.run_forever(interval), name="engine")
 
     async def stop_loop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
+        await cancel_and_wait(self._task)
 
     async def tick_once(self) -> None:
         async with self._lock:
@@ -609,6 +834,7 @@ class SessionManager:
         for s in self.store.list_sessions():
             if s.status in ACTIVE and s.login and s.login != acct.login:
                 self.store.update_session_fields(s.id, status="interrupted", stop_reason=f"account switched from {s.login} to {acct.login}")
+                self._cancel_pending(s, None, None, "pinned login changed")
                 for a in self.store.assignments(s.id):
                     self._states.pop(a.id, None)
                 self._j("alert", f"Session '{s.name}' interrupted: the terminal switched from account {s.login} to {acct.login}. "
@@ -656,7 +882,7 @@ class SessionManager:
         for s in self.store.list_sessions():
             if s.status not in ACTIVE or not s.weekend_close or not in_weekend_close(self.now, s.weekend_close_time):
                 continue
-            mine = [p.ticket for p in self._positions if p.magic == s.magic]
+            mine = [p.ticket for p in self._session_positions(s)]
             if mine:
                 self._j("state", f"Weekend Close: closing {len(mine)} positions of '{s.name}' (Friday {s.weekend_close_time} server time)", s)
                 await self._close_confirmed(mine, "weekend close")
@@ -669,6 +895,9 @@ class SessionManager:
 
     def _roll_day(self) -> None:
         day = self.now // DAY
+        pds = self.store.get_setting("day_start:paper") or {}
+        if pds.get("day") != day:
+            self.store.set_setting("day_start:paper", {"day": day, "equity": self._paper_account().equity})
         ds = self.store.get_setting(self._ds_key()) or {}
         if ds.get("day") != day and self._account:
             self.store.set_setting(self._ds_key(), {"day": day, "equity": self._account.equity, "balance": self._account.balance})
@@ -763,9 +992,24 @@ class SessionManager:
                 await self._stop(s, close, f"AUTO-STOP: global daily loss {g:.2f} hit limit {g_cap:.2f}", alert=True)
             await self._refresh()
             active = [s for s in active if s.execution == "paper"]
+        paper = [s for s in active if s.execution == "paper"]
+        if paper:  # the Paper pool has its own day start and limits; they stop only Paper Sessions (D19)
+            p_ts, p_equity = self._paper_day_start()
+            pg = self._paper_global_pnl(p_ts)
+            pg_cap = -limits.daily_loss_pct_global / 100 * p_equity
+            if p_equity > 0 and pg <= pg_cap:
+                for s in paper:
+                    await self._stop(s, True, f"AUTO-STOP: Paper Account daily loss {pg:.2f} hit limit {pg_cap:.2f}", alert=True)
+                await self._refresh()
+                active = [s for s in active if s.execution != "paper"]
         for s in active:
-            pnl = self._session_pnl(s, day_ts)
-            cap = -s.daily_loss_pct / 100 * day_equity
+            if s.execution == "paper":
+                p_ts, p_equity = self._paper_day_start()
+                pnl = self.store.realized_paper(since=p_ts, session_id=s.id) + sum(p.profit for p in self._session_positions(s))
+                cap = -s.daily_loss_pct / 100 * p_equity
+            else:
+                pnl = self._session_pnl(s, day_ts)
+                cap = -s.daily_loss_pct / 100 * day_equity
             if pnl <= cap:
                 await self._stop(s, close or s.execution == "paper", f"AUTO-STOP: session daily loss {pnl:.2f} hit limit {cap:.2f}", alert=True)
                 await self._refresh()
@@ -789,6 +1033,7 @@ class SessionManager:
                 log.exception("assignment %s failed", a.id)
                 self._states.setdefault(a.id, AssignmentState()).status = f"error: {e}"
         await self._manage_positions(s, assigns)
+        await self._process_pending(s, assigns)
 
     async def _process_assignment(self, s: SessionRow, a: AssignmentRow) -> None:
         st = self._states.setdefault(a.id, AssignmentState())
@@ -807,9 +1052,10 @@ class SessionManager:
         params = strat.resolve(a.params)
         need = max(strat.lookback(params) + WARMUP_BARS, self._learn(lambda L: L.bars_needed(a), 0))
         bars, tick, info = await self.broker.run(lambda b: (b.closed_bars(a.symbol, tf, need), b.tick(a.symbol), b.symbol_info(a.symbol)))
+        self.spreads.sample(a.symbol, tick, self.now)
         a_series = atr_series(bars, params["atr_period"]) if len(bars) > params["atr_period"] else None
         st.atr = float(a_series.iloc[-1]) if a_series is not None else 0.0
-        pos = next((p for p in self._positions if p.magic == s.magic and p.symbol == a.symbol), None)
+        pos = self._position_of(s, a)
         sig = strat.run(bars, params, pos.side if pos else None)
         st.last_eval = self.now
         st.last_signal = sig.to_dict()
@@ -823,7 +1069,7 @@ class SessionManager:
         await self._act(s, a, sig, pos, bars, tick)
 
     async def _apply_pending(self, s: SessionRow, a: AssignmentRow) -> AssignmentRow:
-        change = self._learn(lambda L: L.pending(s.id, a.symbol))
+        change = self._learn(lambda L: L.pending(s.id, a.symbol, a.timeframe))
         if change is None:
             return a
         if change.kind == "auto_promotion":
@@ -833,9 +1079,16 @@ class SessionManager:
                 self._j("learning", f"Automatic promotion for {a.symbol} cancelled: account is live", s, a.symbol, level="warn")
                 return a
         # an auto_rollback is allowed on live: it only restores a Champion the operator already approved
-        mine = await self.broker.run(lambda b: b.positions(s.magic))
-        if any(p.symbol == a.symbol for p in mine):
+        now_open = await self.broker.run(lambda b: b.positions())
+        if self._position_of(s, a, now_open) is not None:
             return a  # not flat yet: try again at the next bar close
+        target = self._learn(lambda L: L.repo.candidate(change.candidate_key))
+        if target is not None:
+            [cost] = await self.cost_check(s, [a], target.strategy, target.param_dict)
+            if not cost["allowed"]:  # the Cost Check holds at a Promotion too (D26)
+                self._learn(lambda L: L.cancel(change, f"Cost Check: {cost['reason']}"))
+                self._j("learning", f"{change.kind.replace('_', ' ').capitalize()} for {a.symbol} {a.timeframe} cancelled — Cost Check: {cost['reason']}", s, a.symbol, level="warn")
+                return a
         cand = self._learn(lambda L: L.apply(change, s, a, self.now))
         if cand is None:
             return a
@@ -843,7 +1096,10 @@ class SessionManager:
             params = get_strategy(cand.strategy).resolve(cand.param_dict)
         except KeyError:
             return a
-        return self.store.update_assignment(a.id, strategy=cand.strategy, params=params)
+        a = self.store.update_assignment(a.id, strategy=cand.strategy, params=params)
+        self._sync_paper()  # a new strategy is a new identity with its own magic (ADR 0009)
+        self._cancel_pending(s, a, "entry", "Champion changed")
+        return a
 
     async def _act(self, s: SessionRow, a: AssignmentRow, sig: Signal, pos: Position | None, bars=None, tick=None) -> None:
         if sig.action == "none":
@@ -856,15 +1112,19 @@ class SessionManager:
             data={**sig.to_dict(), "strategy": a.strategy, "timeframe": a.timeframe},
         )
         if sig.action == "exit":
+            self._cancel_pending(s, a, "entry", "exit signal")
             if pos:
-                await self._close(s, pos, f"strategy exit: {sig.reason}")
+                await self._close(s, pos, f"{DEFERRABLE_REASONS[0]}: {sig.reason}", a)
                 await self._apply_pending(s, a)  # the old Champion just went flat
             return
+        if self._pending_for(s, a, "exit"):
+            self._j("info", f"{sig.action.upper()} signal skipped: an exit is waiting for the market to open", s, a.symbol)
+            return  # never open while a close is still outstanding
         if pos is not None:
             if pos.side == sig.action:
                 self._j("info", f"Already {pos.side} #{pos.ticket}; signal ignored", s, a.symbol)
                 return
-            if not await self._close(s, pos, "opposite signal"):
+            if not await self._close(s, pos, DEFERRABLE_REASONS[1], a):
                 return  # never open the opposite side while the old position may still be there
             # an always-in-market Champion is only flat between closing and reversing: a pending
             # Promotion/Rollback takes over right here, and the new Champion decides from the next bar
@@ -884,19 +1144,34 @@ class SessionManager:
         if screen is not None and not screen.allowed:
             self._j("filter", f"{sig.action.upper()} blocked by Signal Filter: {screen.note}", s, a.symbol, level="warn", data={"p_win": screen.p_win})
             return
-        await self._enter(s, a, sig, screen.record_id if screen else None)
+        record_id = screen.record_id if screen else None
+        outcome, why = await self._enter(s, a, sig, record_id)
+        if outcome == "transient":
+            self._defer_entry(s, a, sig, record_id, why)
 
-    async def _enter(self, s: SessionRow, a: AssignmentRow, sig: Signal, record_id: int | None = None) -> None:
+    @_order_in_flight
+    async def _enter(self, s: SessionRow, a: AssignmentRow, sig: Signal, record_id: int | None = None, deferred: str = "") -> tuple[str, str]:
+        """Gate and send one entry. Returns (outcome, reason): ``filled``, ``transient`` (a reject that
+        clears by itself — nothing journaled, the caller keeps a Pending Entry), ``rejected``,
+        ``failed`` or ``uncertain`` (journaled here, and the Learning Signal record gets its outcome)."""
         side = sig.action
         sym = a.symbol
         paper = s.execution == "paper"
         if self.store.get_session(s.id).status != "running":
-            return  # stopped meanwhile (Kill Switch / Auto-stop)
+            return "rejected", "session no longer running"  # stopped meanwhile (Kill Switch / Auto-stop)
         # Everything that comes from our own database is read up front...
         magics = self.store.all_magics()
-        day_ts, day_equity = self._day_start()
-        realized_session = self.store.realized_since(day_ts, s.id, self._login)
-        realized_global = self.store.realized_since(day_ts, login=self._login)
+        mine_magics = self.store.session_magics(s.id)
+        paper_acct = self._paper_account() if paper else None
+        if paper:  # the Paper pool (D19): its own day start and realised P&L, never the real Account's
+            day_ts, day_equity = self._paper_day_start()
+            epoch = self.store.paper_epoch()
+            realized_session = self.store.realized_paper(since=day_ts, session_id=s.id, epoch=epoch)
+            realized_global = self.store.realized_paper(since=day_ts, epoch=epoch)
+        else:
+            day_ts, day_equity = self._day_start()
+            realized_session = self.store.realized_since(day_ts, s.id, self._login)
+            realized_global = self.store.realized_since(day_ts, login=self._login)
         profile = self.store.to_profile(self.store.risk_profile(a.risk_profile_id))
         global_limits = self.store.global_limits()
         live_flags = self.store.get_setting("live_enabled", {}) or {}
@@ -915,14 +1190,15 @@ class SessionManager:
                 info, tick, acct, positions = b.symbol_info(sym), b.tick(sym), b.account(), b.positions()
                 if self._kill_seq != kill_seq:
                     return Rejected("kill_switch", "the Kill Switch fired while this entry was being prepared"), None, acct, positions, notes
-                mine = [p for p in positions if p.magic == s.magic]
-                owned = mine if paper else [p for p in positions if p.magic in magics and p.ticket > 0]
+                sizing = paper_acct if paper else acct  # the real ``acct`` is what goes back to self._account
+                mine = [p for p in positions if p.magic in mine_magics]
+                owned = [p for p in positions if p.magic in magics and (p.ticket < 0) == paper]
                 exposure = Exposure(
                     session_positions=len(mine),
                     global_positions=len(owned),
                     session_day_pnl=realized_session + sum(p.profit for p in mine),
-                    global_day_pnl=(realized_session if paper else realized_global) + sum(p.profit for p in owned),
-                    day_start_equity=day_equity or acct.equity,
+                    global_day_pnl=realized_global + sum(p.profit for p in owned),
+                    day_start_equity=day_equity or sizing.equity,
                 )
                 decision = check(
                     GateInput(
@@ -931,7 +1207,7 @@ class SessionManager:
                         side=side,  # type: ignore[arg-type]
                         sl_dist=sig.sl_dist,
                         tp_dist=sig.tp_dist,
-                        account=acct,
+                        account=sizing,
                         live_enabled=bool(live_flags.get(str(acct.login), False)),
                         profile=profile,
                         session_limits=session_limits,
@@ -945,13 +1221,13 @@ class SessionManager:
                 )
                 if isinstance(decision, Rejected):
                     return decision, None, acct, positions, notes
-                if paper and s.magic not in getattr(b, "paper_magics", ()):
+                if paper and a.magic not in getattr(b, "paper_magics", ()):
                     return Rejected("paper_routing", "Paper Session is not routed to the Paper book; order refused"), None, acct, positions, notes
                 if not paper:
                     margin_rej = check_margin(b.margin_required(sym, side, decision.volume), acct)
                     if margin_rej is not None:
                         return margin_rej, None, acct, positions, notes
-                res = b.market_order(sym, side, decision.volume, decision.sl, decision.tp, s.magic, comment)
+                res = b.market_order(sym, side, decision.volume, decision.sl, decision.tp, a.magic, comment)
                 if res.ok or res.uncertain or attempt == 2 or res.retcode not in RETRY_ONCE:
                     break
                 notes.append(f"retried once after: {res.message} ({res.retcode})")
@@ -961,11 +1237,13 @@ class SessionManager:
         decision, res, acct, self._positions, notes = await self.broker.run(gate_and_send)
         self._account = acct
         if isinstance(decision, Rejected):
+            if decision.code in TRANSIENT_REJECTS:
+                return "transient", decision.reason
             self._j("risk_reject", f"{side.upper()} rejected by Risk Gate: {decision.reason}", s, sym, level="warn", data=decision.to_dict())
             self._learn(lambda L: L.signal_outcome(record_id, rejected=True))
-            return
+            return "rejected", decision.reason
         if res.uncertain:
-            appeared = next((p for p in self._positions if p.magic == s.magic and p.symbol == sym and p.ticket not in before), None)
+            appeared = next((p for p in self._positions if p.magic == a.magic and p.symbol == sym and p.ticket not in before), None)
             self._j(
                 "order_fail",
                 f"{side.upper()} {decision.volume} {sym}: outcome UNCERTAIN ({res.message}, {res.retcode}) — not retried; "
@@ -977,17 +1255,19 @@ class SessionManager:
                 self._learn(lambda L: L.signal_outcome(record_id, ticket=appeared.ticket))
             else:
                 self._learn(lambda L: L.signal_outcome(record_id, rejected=True))
-            return
+            return "uncertain", res.message
         if not res.ok:
+            if res.retcode == MARKET_CLOSED:
+                return "transient", f"market closed ({res.retcode})"
             self._learn(lambda L: L.signal_outcome(record_id, rejected=True))
             tail = f" ({'; '.join(notes)})" if notes else ""
             self._j("order_fail", f"{side.upper()} {decision.volume} {sym} failed: {res.message} ({res.retcode}){tail}", s, sym, level="error", alert=True,
                     data={**res.to_dict(), "notes": notes})
-            return
+            return "failed", res.message
         # filled: trust the position, not the reply (some servers report price 0 on market execution)
         pos = next((p for p in self._positions if p.ticket == res.ticket), None)
         if pos is None:
-            pos = next((p for p in self._positions if p.magic == s.magic and p.symbol == sym and p.ticket not in before), None)
+            pos = next((p for p in self._positions if p.magic == a.magic and p.symbol == sym and p.ticket not in before), None)
         ticket = pos.ticket if pos else res.ticket
         price = pos.price_open if pos else (res.price or decision.entry)
         volume = pos.volume if pos else (res.volume or decision.volume)
@@ -996,12 +1276,14 @@ class SessionManager:
             notes.append(f"partial fill {volume} of {decision.volume} lots")
         if decision.note:
             notes.insert(0, decision.note)
+        if deferred:
+            notes.append(deferred)
         self.store.add_trade(
             TradeRow(
                 ticket=ticket,
                 session_id=s.id,
                 assignment_id=a.id,
-                magic=s.magic,
+                magic=a.magic,
                 symbol=sym,
                 side=side,
                 volume=volume,
@@ -1016,6 +1298,7 @@ class SessionManager:
                 signal_reason=sig.reason,
                 paper=paper,
                 login=acct.login,
+                paper_epoch=self.store.paper_epoch() if paper else 0,
             )
         )
         self._learn(lambda L: L.signal_outcome(record_id, ticket=ticket))
@@ -1028,12 +1311,17 @@ class SessionManager:
             sym,
             data={**decision.to_dict(), "ticket": ticket, "price": price, "volume": volume, "paper": paper, "notes": notes},
         )
+        return "filled", ""
 
-    async def _close_confirmed(self, tickets: list[int], reason: str) -> tuple[int, dict[int, str]]:
+    @_order_in_flight
+    async def _close_confirmed(self, tickets: list[int], reason: str, defer_market_closed: bool = False) -> tuple[int, dict[int, str]]:
         """Close positions and keep trying until the Account confirms they are gone (closes are
-        idempotent, ADR 0007). Returns (closed, {ticket: last failure message})."""
+        idempotent, ADR 0007). Returns (closed, {ticket: last failure message}). With
+        ``defer_market_closed`` a close the market refuses (shut) is not retried or alerted: its
+        failure note is ``DEFERRED`` and the caller keeps it as a pending exit (spec D12)."""
         remaining = list(dict.fromkeys(tickets))
         last: dict[int, str] = {}
+        deferred: set[int] = set()
         for attempt in range(1, self.close_attempts + 1):
             def close_and_check(b, todo=tuple(remaining)):
                 results = {t: b.close(t, reason) for t in todo}
@@ -1044,22 +1332,28 @@ class SessionManager:
             for t, r in results.items():
                 if t in open_now:
                     last[t] = f"{r.message} ({r.retcode})" if not r.ok else "position still open after a filled close"
-            remaining = [t for t in remaining if t in open_now]
+                    if defer_market_closed and not r.ok and r.retcode == MARKET_CLOSED:
+                        deferred.add(t)
+            remaining = [t for t in remaining if t in open_now and t not in deferred]
             if not remaining:
                 break
             if attempt < self.close_attempts:
                 await asyncio.sleep(self.close_retry_delay)
-        sessions = {x.magic: x for x in self.store.list_sessions()}
+        owners = self.store.all_magics()
+        sessions = {x.id: x for x in self.store.list_sessions()}
         failed = {t: last.get(t, "unknown") for t in remaining}
         for t, msg in failed.items():
             p = next((x for x in self._positions if x.ticket == t), None)
             self._j("order_fail", f"Close #{t} failed after {self.close_attempts} attempts: {msg} — close it in the terminal",
-                    sessions.get(p.magic) if p else None, p.symbol if p else None, level="error", alert=True)
+                    sessions.get(owners.get(p.magic)) if p else None, p.symbol if p else None, level="error", alert=True)
+        failed.update({t: DEFERRED for t in deferred})
         return len(tickets) - len(failed), failed
 
-    async def _close(self, s: SessionRow, pos: Position, reason: str) -> bool:
-        closed, failed = await self._close_confirmed([pos.ticket], reason)
+    async def _close(self, s: SessionRow, pos: Position, reason: str, a: AssignmentRow | None = None) -> bool:
+        closed, failed = await self._close_confirmed([pos.ticket], reason, defer_market_closed=a is not None)
         if failed:
+            if failed.get(pos.ticket) == DEFERRED and a is not None:
+                self._defer_exit(s, a, pos, reason)
             return False
         self._j("info", f"Closing #{pos.ticket} {pos.symbol}: {reason}", s, pos.symbol)
         await self._reconcile_closed()
@@ -1074,10 +1368,153 @@ class SessionManager:
         await self._reconcile_closed()
         return closed
 
+    # ---------------------------------------------------- Pending Entries (D5/D12/D13/D20)
+    def _pending_for(self, s: SessionRow, a: AssignmentRow, kind: str) -> list[PendingEntryRow]:
+        return [r for r in self.store.pending_entries(s.id) if r.symbol == a.symbol and r.timeframe == a.timeframe and r.kind == kind]
+
+    def _cancel_pending(self, s: SessionRow, a: AssignmentRow | None, kind: str | None, why: str, status: str = "cancelled") -> None:
+        for r in self.store.pending_entries(s.id):
+            if (a is None or (r.symbol, r.timeframe) == (a.symbol, a.timeframe)) and (kind is None or r.kind == kind):
+                self._end_pending(s, r, status, why)
+
+    def _end_pending(self, s: SessionRow, r: PendingEntryRow, status: str, why: str, journal: bool = True) -> None:
+        self.store.update_pending_entry(r.id, status=status, note=why, done_ts=self.now)
+        if r.kind == "entry" and status != "filled":
+            self._learn(lambda L: L.signal_outcome(r.record_id, rejected=True))
+        if journal:
+            what = f"{r.side.upper()} entry" if r.kind == "entry" else f"exit of #{r.ticket}"
+            self._j("info", f"Pending {what} ({r.timeframe}) {status}: {why}", s, r.symbol, data={"pending_id": r.id, "status": status})
+
+    def _defer_entry(self, s: SessionRow, a: AssignmentRow, sig: Signal, record_id: int | None, why: str) -> None:
+        """The Signal could not be sent now for a reason that clears by itself: keep it as a Pending
+        Entry, sent through ``_enter`` on every engine pass until it fills or its fill window ends.
+        Journaled once, here."""
+        self._cancel_pending(s, a, "entry", "a newer signal replaced it", status="superseded")
+        cand = self._learn(lambda L: L.champion_of(a))
+        row = self.store.add_pending_entry(
+            PendingEntryRow(
+                session_id=s.id, symbol=a.symbol, timeframe=a.timeframe, signal_bar_ts=int(sig.bar_time), candidate_key=cand.key if cand else a.strategy,
+                kind="entry", side=sig.action, sl_dist=sig.sl_dist, tp_dist=sig.tp_dist, reason=sig.reason, record_id=record_id, created_ts=self.now,
+            )
+        )
+        limit = fill_limit(Timeframe(a.timeframe).seconds, get_strategy(a.strategy).fill_window_s)
+        self._j(
+            "risk_reject",
+            f"{sig.action.upper()} deferred: {why} — pending until the market and the Trading Window are open (fills within {limit // 60} min of that)",
+            s, a.symbol, level="warn", data={"pending_id": row.id, "reason": why},
+        )
+
+    def _defer_exit(self, s: SessionRow, a: AssignmentRow, pos: Position, reason: str) -> None:
+        if any(r.ticket == pos.ticket for r in self._pending_for(s, a, "exit")):
+            return
+        self.store.add_pending_entry(
+            PendingEntryRow(
+                session_id=s.id, symbol=a.symbol, timeframe=a.timeframe, signal_bar_ts=self.now, candidate_key=a.strategy, kind="exit",
+                side=pos.side, reason=reason, ticket=pos.ticket, created_ts=self.now,
+            )
+        )
+        self._j("info", f"Exit of #{pos.ticket} {pos.symbol} deferred: market closed — it closes as soon as the market opens ({reason})", s, a.symbol)
+
+    async def _first_tradable(self, s: SessionRow, r: PendingEntryRow) -> int | None:
+        """The Next Tradable Time after the Signal's bar closed, as observed: the first M1 bar the
+        market printed with the Trading Window open, or now if the quote is fresh and the window open."""
+        window = TradingWindow.from_dict(s.window)
+        close = r.signal_bar_ts + Timeframe(r.timeframe).seconds
+        tick = await self.broker.run(lambda b: b.tick(r.symbol))
+        if self.now - tick.time > MAX_QUOTE_AGE:
+            return None  # still shut: no need to read bars on every pass (a weekend is 3,000 passes)
+        n = int(min(5000, max(3, (self.now - close) // 60 + 3)))
+        bars = await self.broker.run(lambda b: b.closed_bars(r.symbol, Timeframe.M1, n))
+        for t in bars["time"].to_numpy() if len(bars) else ():
+            if int(t) >= close and window.is_open(int(t)):
+                return int(t)
+        if self.now - tick.time <= MAX_QUOTE_AGE and window.is_open(self.now) and self.now >= close:
+            return self.now
+        return None
+
+    async def _process_pending(self, s: SessionRow, assigns: list[AssignmentRow]) -> None:
+        rows = self.store.pending_entries(s.id)
+        if not rows:
+            return
+        s = self.store.get_session(s.id)
+        by_arena = {(a.symbol, a.timeframe): a for a in assigns}
+        for r in rows:
+            a = by_arena.get((r.symbol, r.timeframe))
+            if a is None:
+                self._end_pending(s, r, "cancelled", "the Assignment was removed")
+                continue
+            if r.kind == "exit":
+                await self._retry_exit(s, a, r)
+            else:
+                await self._retry_entry(s, a, r)
+
+    @_order_in_flight
+    async def _retry_exit(self, s: SessionRow, a: AssignmentRow, r: PendingEntryRow) -> None:
+        """One close request per pass at most, and none while the quote is stale: a shut market
+        must not see a request a second (brokers throttle that). Any other failure alerts once per
+        distinct message and is retried quietly."""
+        pos = next((p for p in self._positions if p.ticket == r.ticket), None)
+        if pos is None:
+            self._end_pending(s, r, "closed", "the position is gone (stop-loss / take-profit or closed elsewhere)")
+            await self._reconcile_closed()
+            return
+
+        def close_once(b, ticket=pos.ticket, symbol=pos.symbol):
+            if b.server_time() - b.tick(symbol).time > MAX_QUOTE_AGE:
+                return None, None
+            res = b.close(ticket, r.reason)
+            return res, b.positions()
+
+        res, positions = await self.broker.run(close_once)
+        if res is None:
+            return  # still shut
+        self._positions = positions
+        if all(p.ticket != pos.ticket for p in positions):
+            self._end_pending(s, r, "closed", f"closed after the market opened ({(self.now - r.created_ts) // 60} min late)")
+            await self._reconcile_closed()
+            return
+        msg = f"{res.message} ({res.retcode})" if not res.ok else "position still open after a filled close"
+        if res.retcode != MARKET_CLOSED and msg != r.note:
+            self.store.update_pending_entry(r.id, note=msg)
+            self._j("order_fail", f"Deferred exit of #{pos.ticket} {pos.symbol} failed: {msg} — retrying every pass; close it in the terminal if it persists",
+                    s, pos.symbol, level="error", alert=True)
+
+    async def _retry_entry(self, s: SessionRow, a: AssignmentRow, r: PendingEntryRow) -> None:
+        cand = self._learn(lambda L: L.champion_of(a))
+        if cand is not None and cand.key != r.candidate_key:
+            self._end_pending(s, r, "cancelled", "Champion changed")
+            return
+        if s.weekend_close and in_weekend_close(self.now, s.weekend_close_time):
+            self._end_pending(s, r, "cancelled", f"Weekend Close (from Friday {s.weekend_close_time})")
+            return
+        if self._position_of(s, a) is not None:
+            self._end_pending(s, r, "superseded", "the Assignment already holds a position")
+            return
+        if r.first_tradable_ts is None:
+            first = await self._first_tradable(s, r)
+            if first is not None:
+                limit = fill_limit(Timeframe(r.timeframe).seconds, get_strategy(a.strategy).fill_window_s)
+                r = self.store.update_pending_entry(r.id, first_tradable_ts=first, expires_ts=first + limit)
+        if (r.expires_ts is not None and self.now >= r.expires_ts) or self.now - r.created_ts > PENDING_MAX_WAIT:
+            self._end_pending(s, r, "expired", "its fill window passed" if r.expires_ts else "the market never opened")
+            return
+        if s.status == "paused" or r.first_tradable_ts is None:
+            return  # a paused Session never sends; nothing to try while the market is shut
+        sig = Signal(r.side, r.reason, r.sl_dist, r.tp_dist, bar_time=r.signal_bar_ts)
+        delay = self.now - (r.signal_bar_ts + Timeframe(r.timeframe).seconds)
+        outcome, why = await self._enter(s, a, sig, r.record_id, deferred=f"Pending Entry filled {delay // 60} min after the signal")
+        if outcome == "transient":
+            return
+        if outcome == "filled":
+            ticket = next((t.ticket for t in self.store.open_trades() if t.assignment_id == a.id), None)
+            self.store.update_pending_entry(r.id, status="filled", ticket=ticket, done_ts=self.now, note=f"filled {delay}s after the signal")
+        else:  # rejected / failed / uncertain: journaled by _enter; never retried
+            self.store.update_pending_entry(r.id, status="rejected", done_ts=self.now, note=why)
+
     async def _manage_positions(self, s: SessionRow, assigns: list[AssignmentRow]) -> None:
-        by_symbol = {a.symbol: a for a in assigns}
-        for p in [p for p in self._positions if p.magic == s.magic]:
-            a = by_symbol.get(p.symbol)
+        idents = self.store.magic_identities()
+        for p in self._session_positions(s):
+            a = self._owner(s, p, assigns, idents)
             if a is None:
                 continue
             profile = self.store.to_profile(self.store.risk_profile(a.risk_profile_id))
@@ -1089,18 +1526,24 @@ class SessionManager:
             atr = st.atr if st else 0.0
 
             def manage_and_modify(b, p=p, initial=initial, profile=profile, atr=atr):
-                new_sl = manage(p, b.tick(p.symbol), b.symbol_info(p.symbol), atr, initial, profile)
+                tick = b.tick(p.symbol)
+                if b.server_time() - tick.time > MAX_QUOTE_AGE:
+                    return None, None  # shut (e.g. GOLD's break): no request at all, try when it reopens
+                new_sl = manage(p, tick, b.symbol_info(p.symbol), atr, initial, profile)
                 return new_sl, (b.modify(p.ticket, new_sl, p.tp) if new_sl is not None else None)
 
             new_sl, res = await self.broker.run(manage_and_modify)
             if res is None:
                 continue
             if res.ok:
+                self._modify_failed.pop(p.ticket, None)
                 if tr:
                     self.store.update_trade(p.ticket, sl=new_sl)
                 self._j("modify", f"Moved SL of #{p.ticket} {p.symbol} {p.sl} → {new_sl}", s, p.symbol, data={"ticket": p.ticket, "old": p.sl, "new": new_sl})
-            else:
-                self._j("order_fail", f"SL move #{p.ticket} failed: {res.message}", s, p.symbol, level="warn")
+            elif self._modify_failed.get(p.ticket) != res.message:
+                # retried every pass (e.g. through GOLD's daily break), journaled once per reason
+                self._modify_failed[p.ticket] = res.message
+                self._j("order_fail", f"SL move #{p.ticket} failed: {res.message} (retrying every pass)", s, p.symbol, level="warn")
 
     # ============================================================== read side
     def snapshot_account(self) -> AccountInfo | None:
@@ -1141,7 +1584,8 @@ class SessionManager:
                     "name": s.name,
                     "status": s.status,
                     "magic": s.magic,
-                    "open_positions": sum(1 for p in self._positions if p.magic == s.magic),
+                    "magics": sorted(self.store.session_magics(s.id)),
+                    "open_positions": len(self._session_positions(s)),
                     "day_pnl": round(self._session_pnl(s, day_ts), 2),
                     "stop_reason": s.stop_reason,
                     "execution": s.execution,

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Bell, TrendingUp, Wallet } from "lucide-react";
+import { Activity, Bell, NotebookPen, TrendingUp, Wallet } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { useLive } from "../api/live";
@@ -44,8 +44,25 @@ export default function Overview() {
         />
         <Kpi testId="kpi-floating" label="Floating" value={signed(floating)} tone={pnlClass(floating)} sub={`${owned.length} owned positions`} />
         <Kpi testId="kpi-sessions" label="Sessions" value={`${running} running`} sub={`${paused} paused · ${sessions.length} total`} icon={<Activity className="size-3.5" />} />
-        <Kpi label="Win rate (all time)" value={`${o.all_time.win_rate.toFixed(1)}%`} sub={`${o.all_time.trades} closed trades`} />
-        <Kpi label="Net (all time)" value={signed(o.all_time.net_profit)} tone={pnlClass(o.all_time.net_profit)} sub={`PF ${o.all_time.profit_factor ?? "—"} · DD ${money(o.all_time.max_drawdown)}`} />
+        <Kpi testId="kpi-real-win" label="Win rate (real, all time)" value={o.all_time.trades ? `${o.all_time.win_rate.toFixed(1)}%` : "—"} sub={`${o.all_time.trades} closed trades`} />
+        <Kpi label="Net (real, all time)" value={signed(o.all_time.net_profit)} tone={pnlClass(o.all_time.net_profit)} sub={`PF ${o.all_time.profit_factor ?? "—"} · DD ${money(o.all_time.max_drawdown)}`} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4" data-testid="overview-paper">
+        <Kpi
+          testId="kpi-paper-equity"
+          label="Paper Account equity"
+          value={money(o.paper_account.equity)}
+          sub={
+            <Link to="/account" className="hover:text-accent">
+              epoch {o.paper_account.epoch} · start {money(o.paper_account.start_balance)}
+            </Link>
+          }
+          icon={<NotebookPen className="size-3.5" />}
+        />
+        <Kpi label="Paper today" value={signed(o.paper_account.day_pnl)} tone={pnlClass(o.paper_account.day_pnl)} sub={`${o.today_paper.trades} closed today`} />
+        <Kpi label="Paper win rate" value={o.all_time_paper.trades ? `${o.all_time_paper.win_rate.toFixed(1)}%` : "—"} sub={`${o.all_time_paper.trades} closed trades this epoch`} />
+        <Kpi label="Paper net" value={signed(o.all_time_paper.net_profit)} tone={pnlClass(o.all_time_paper.net_profit)} sub={`PF ${o.all_time_paper.profit_factor ?? "—"} · DD ${money(o.all_time_paper.max_drawdown)}`} />
       </div>
 
       <div className="grid gap-5 xl:grid-cols-3">

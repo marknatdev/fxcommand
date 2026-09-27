@@ -9,37 +9,48 @@ Engine hooks (all called inside the engine lock, all cheap, never place orders):
     pending(session_id, symbol)         -> Promotion / Rollback waiting for the Assignment to be flat
     apply(change, s, a, now)            -> Candidate to switch to (engine updates the Assignment)
     on_session_started / on_session_stopped / on_new_day
-Operator commands: request_optimize, promote, rollback, set_auto_promote. Read side: overview, arena.
+Operator commands: request_optimize, promote, rollback, set_auto_promote, request_evidence.
+Read side: overview, arena, evidence, evidence_for, assignment_evidence, scorecard.
 
-CPU-heavy work (Optimizer Runs) runs on a dedicated learner thread with pure inputs and outputs;
-service state is only mutated on the event loop. Bars for Optimizer Runs are fetched through the
-engine's BrokerThread. Nothing here can send, modify or close an order.
+CPU-heavy work (Optimizer Runs, Evidence Runs) runs in the learning pool with pure inputs and
+outputs; service state is only mutated on the event loop. One queue serves both, Optimizer Runs
+first: an Evidence Run is low priority. Bars are fetched through the engine's BrokerThread; an
+Evidence Run reads its history in pages of at most ``CHUNK_BARS``, each its own short broker call,
+and waits while the engine has an order in flight (``order_busy``). Nothing here can send, modify
+or close an order.
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import time
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import pandas as pd
 
-from ..broker import BrokerThread, SymbolInfo, Tick, Timeframe
+from ..broker import BrokerError, BrokerThread, SymbolInfo, Tick, Timeframe
 from ..engine.schemas import DomainError
 from ..journal import Journal
 from ..risk import TradingWindow
+from ..risk.window import WeekendClose
+from ..risk.spreads import SpreadBook
 from ..store import AssignmentRow, SessionRow, Store, TradeRow
 from ..store.models import ChallengerRow, PendingChangeRow
 from ..strategies import Signal, get_strategy
 from ..strategies.base import WARMUP_BARS
+from ..tasks import cancel_and_wait
 from . import signal_filter as sf
 from .candidate import Candidate
 from .features import market_frame, vector
 from .objective import RStats, guardrails, r_stats, should_rollback
-from .optimizer import optimize_job
-from .paper import Costs, ExitRules, PaperTrader
+from .optimizer import TOP_K, evaluate_job, optimize_job
+from . import evidence as ev
+from . import research
+from .costs import CostModel
+from .paper import Costs, EntryGate, ExitRules, PaperTrader
 from .repo import LearningRepo
 
 log = logging.getLogger("fxcommand.learning")
@@ -50,6 +61,8 @@ RETENTION_DAYS = 180
 FEATURE_BARS = 160  # market features need ~100 bars of ATR rank + EMA50 warm-up
 AUTO_KINDS = ("auto_promotion", "auto_rollback")
 ACTIVE = ("running", "paused")
+BUSY_WAIT = 60.0  # seconds an Evidence page waits for an order in flight before reading anyway
+OPTIMIZE, EVIDENCE = 0, 1  # queue priorities: lower runs first
 
 
 def filter_key(symbol: str, timeframe: str, strategy: str) -> str:
@@ -82,7 +95,11 @@ class LearningService:
         self.journal = journal
         self.mode = mode
         self._arenas: dict[tuple[str, str], _Arena] = {}
-        self._queue: asyncio.Queue | None = None
+        self._queue: asyncio.PriorityQueue | None = None
+        self._seq = itertools.count()
+        self._evidence_queued: dict[str, int] = {}  # evidence key -> row id (queued or running)
+        self._submitted: dict[tuple[str, str], dict[str, int]] = {}  # arena -> reviewer Candidate key -> run id (queued)
+        self.order_busy = lambda: False  # set by the engine: True while an entry or close is in flight
         self._queued: dict[tuple[str, str], int] = {}  # arena -> run id (queued or running)
         self._worker: asyncio.Task | None = None
         # Optimizer Runs are CPU-bound pure Python: in the app they run in a separate process so they
@@ -91,6 +108,7 @@ class LearningService:
         self._server_time = 0
         self._known: set[str] = set()  # Candidate keys already stored
         self._filters: dict[str, sf.FilterState] = {}  # cache of learning_filters rows
+        self.spreads = SpreadBook(store)  # typical spreads (shared with the Cost Check through the store)
 
     # =============================================================== lifecycle
     @property
@@ -107,16 +125,12 @@ class LearningService:
         for r in self.repo.runs(limit=200):
             if r.status in ("queued", "running"):
                 self.repo.update_run(r.id, status="failed", note="interrupted by restart", finished_wall=time.time())
-        self._queue = asyncio.Queue()
+        self.repo.fail_unfinished_evidence("interrupted by restart")
+        self._queue = asyncio.PriorityQueue()
         self._worker = asyncio.create_task(self._work(), name="learner")
 
     async def stop(self) -> None:
-        if self._worker:
-            self._worker.cancel()
-            try:
-                await self._worker
-            except (asyncio.CancelledError, Exception):
-                pass
+        await cancel_and_wait(self._worker)
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _j(self, kind: str, msg: str, s: SessionRow | None = None, symbol: str | None = None, **kw) -> None:
@@ -149,6 +163,17 @@ class LearningService:
                 arena.open_rows[row.candidate_key] = row.id
             self._arenas[key] = arena
         return self._arenas[key]
+
+    def _typical_spread(self, symbol: str, tick: Tick, now: int) -> float:
+        """The spread Shadow Trades and Optimizer Runs are priced at (``SpreadBook``: recent good
+        quotes, never one from the daily break). Falls back to the current quote until one is known."""
+        typical = self.spreads.spread_for(symbol, tick, now)
+        return typical if typical is not None else max(tick.ask - tick.bid, 0.0)
+
+    @staticmethod
+    def _job_args(bars, champion, costs, rules, n_cands, run_id, window, tf, exclude, weekend_close: str | None = None) -> tuple:
+        """The Optimizer Run's arguments, as sent to the worker process (every one must pickle)."""
+        return (bars, champion, costs, rules, n_cands, run_id, window.to_dict(), tf.seconds, exclude, weekend_close)
 
     def _filter(self, symbol: str, timeframe: str, strategy: str) -> sf.FilterState:
         key = filter_key(symbol, timeframe, strategy)
@@ -189,11 +214,12 @@ class LearningService:
 
         profile = self.store.to_profile(self.store.risk_profile(a.risk_profile_id))
         rules = ExitRules.from_profile(profile, a.reverse_on_opposite)
-        window = TradingWindow.from_dict(s.window)
         tf_secs = Timeframe(a.timeframe).seconds
-        spread = max(tick.ask - tick.bid, 0.0)
-        spread_ok = tick.spread_points <= profile.max_spread_points
-        costs = Costs(spread=spread, slippage=info.point)
+        spread = self._typical_spread(a.symbol, tick, now)
+        spread_ok = round(spread / info.point, 1) <= profile.max_spread_points if info.point else True  # as Tick.spread_points
+        costs = CostModel.from_symbol(info, spread=spread, ref_price=float(bars["close"].iloc[-1]))
+        gate = EntryGate(s.window, tf_secs)
+        weekend = WeekendClose(s.weekend_close_time, tf_secs) if s.weekend_close else None
         # market features are only needed when some Candidate schedules an entry: compute lazily, once,
         # on a short tail of the window (same index as ``bars``)
         _mf: list[pd.DataFrame] = []
@@ -212,7 +238,9 @@ class LearningService:
             if tr is None:
                 tr = arena.traders[key] = PaperTrader(costs, rules)
             tr.costs, tr.rules = costs, rules
-            tr.allow_entry = lambda ts: spread_ok and window.is_open(ts + tf_secs)
+            tr.weekend = weekend
+            cand_gate = gate.for_strategy(cand.strategy)
+            tr.allow_entry = lambda ts, g=cand_gate: spread_ok and g(ts)
             frame = get_strategy(cand.strategy).signals(bars, cand.param_dict)
             cols = {k: frame[k].to_numpy() for k in ("long", "short", "exit_long", "exit_short", "sl_dist", "tp_dist")}
             atr = frame["info_atr"].to_numpy(dtype=float)
@@ -297,27 +325,28 @@ class LearningService:
         self.repo.update_signal(rec.id, r=round(trade.profit / trade.risk_amount, 5))
         if s is None:
             return
-        versions = self.repo.versions(s.id, trade.symbol)
+        tf = trade.timeframe
+        versions = self.repo.versions(s.id, trade.symbol, tf)
         last = versions[-1] if versions else None
         if not last or last.kind not in ("promotion", "auto_promotion") or not last.previous_key:
             return
-        if self.repo.pending(s.id, trade.symbol):
+        if self.repo.pending(s.id, trade.symbol, tf):
             return
-        live = self.repo.live_rs(s.id, trade.symbol, last.server_ts)
+        live = self.repo.live_rs(s.id, trade.symbol, last.server_ts, tf)
         old = self.repo.shadow_closed(trade.symbol, last.timeframe, last.previous_key, since=last.server_ts)
         if len(old) < 5:
             old = self.repo.shadow_closed(trade.symbol, last.timeframe, last.previous_key)[-50:]
         baseline = r_stats(x.r for x in old).mean if old else 0.0
         if should_rollback(live, baseline):
             self.repo.add_pending(
-                session_id=s.id, symbol=trade.symbol, candidate_key=last.previous_key, kind="auto_rollback",
+                session_id=s.id, symbol=trade.symbol, timeframe=tf, candidate_key=last.previous_key, kind="auto_rollback",
                 reason=f"last {len(live)} live trades averaged {sum(live[-20:]) / 20:+.2f}R vs previous champion {baseline:+.2f}R",
             )
             self._j("rollback", f"Auto-rollback queued for {trade.symbol}: promotion underperformed", s, trade.symbol, level="warn", alert=True)
 
     # ---------------------------------------------------- promotions & rollback
-    def pending(self, session_id: int, symbol: str) -> PendingChangeRow | None:
-        return self.repo.pending(session_id, symbol)
+    def pending(self, session_id: int, symbol: str, timeframe: str | None = None) -> PendingChangeRow | None:
+        return self.repo.pending(session_id, symbol, timeframe)
 
     def cancel(self, change: PendingChangeRow, reason: str) -> None:
         self.repo.update_pending(change.id, status="cancelled", reason=f"{change.reason} — cancelled: {reason}")
@@ -367,7 +396,10 @@ class LearningService:
         champ = self._shadow(ch.symbol, ch.timeframe, champion.key, ch.started_ts)
         oos = RStats(**ch.oos) if ch.oos else None
         champ_oos = RStats(**ch.champion_oos) if ch.champion_oos else None
-        checks = guardrails(mine, champ, oos, champ_oos, ch.trials, ch.robust)
+        trials = ch.trials
+        if ch.source == "reviewer":  # trials logged after the submission still raise its penalty
+            trials = max(trials, self.repo.trial_count(ch.symbol, ch.timeframe), TOP_K)
+        checks = guardrails(mine, champ, oos, champ_oos, trials, ch.robust)
         return {
             "shadow": mine.to_dict(),
             "champion_shadow": champ.to_dict(),
@@ -376,7 +408,7 @@ class LearningService:
         }
 
     def _consider_auto_promotion(self, s: SessionRow, a: AssignmentRow, champion: Candidate, is_demo: bool) -> None:
-        if not is_demo or not self.repo.slot(s.id, a.symbol).auto_promote or self.repo.pending(s.id, a.symbol):
+        if not is_demo or not self.repo.slot(s.id, a.symbol, a.timeframe).auto_promote or self.repo.pending(s.id, a.symbol, a.timeframe):
             return  # never automatic on a live account (checked again when applying)
         best = None
         for ch in self.repo.challengers(a.symbol, a.timeframe):
@@ -388,24 +420,32 @@ class LearningService:
         if best:
             ch, rep = best
             self.repo.add_pending(
-                session_id=s.id, symbol=a.symbol, candidate_key=ch.candidate_key, kind="auto_promotion", challenger_id=ch.id,
+                session_id=s.id, symbol=a.symbol, timeframe=a.timeframe, candidate_key=ch.candidate_key, kind="auto_promotion", challenger_id=ch.id,
                 reason=f"all Guardrails passed: shadow {rep['shadow']['mean']:+.2f}R/trade over {rep['shadow']['n']} trades vs champion {rep['champion_shadow']['mean']:+.2f}R",
             )
             self._j("promotion", f"Auto-promotion queued for {a.symbol} {a.timeframe} (applies when flat)", s, a.symbol)
 
     # ------------------------------------------------------------ operator commands
-    def _slot_assignment(self, session_id: int, symbol: str) -> tuple[SessionRow, AssignmentRow]:
+    def _slot_assignment(self, session_id: int, symbol: str, timeframe: str | None = None) -> tuple[SessionRow, AssignmentRow]:
+        """The Assignment for (symbol, timeframe). The timeframe may be left out while the Symbol
+        appears only once in the Session."""
         s = self.store.get_session(session_id)
-        a = next((x for x in self.store.assignments(session_id) if x.symbol == symbol), None)
-        if a is None:
+        same = [x for x in self.store.assignments(session_id) if x.symbol == symbol]
+        exact = [x for x in same if x.timeframe == timeframe]
+        if exact:
+            return s, exact[0]
+        if not same:
             raise DomainError("not_found", f"session {s.name!r} does not trade {symbol}", 404)
-        return s, a
+        if len(same) > 1:
+            tfs = ", ".join(x.timeframe for x in same)
+            raise DomainError("ambiguous_slot", f"session {s.name!r} trades {symbol} on {tfs}: say which timeframe", 422)
+        return s, same[0]
 
     def promote(self, challenger_id: int, session_id: int, force: bool = False) -> PendingChangeRow:
         ch = self.repo.challenger(challenger_id)
         if ch is None or ch.status != "active":
             raise DomainError("not_found", f"challenger {challenger_id} is not active", 404)
-        s, a = self._slot_assignment(session_id, ch.symbol)
+        s, a = self._slot_assignment(session_id, ch.symbol, ch.timeframe)
         if a.timeframe != ch.timeframe:
             raise DomainError("wrong_arena", f"{s.name} trades {a.symbol} on {a.timeframe}, the challenger is for {ch.timeframe}", 422)
         rep = self.challenger_report(ch, self.champion_of(a))
@@ -414,29 +454,29 @@ class LearningService:
             raise DomainError("guardrails_failed", "Guardrails not passed: " + "; ".join(failed), 409)
         cand = self.repo.candidate(ch.candidate_key)
         row = self.repo.add_pending(
-            session_id=s.id, symbol=a.symbol, candidate_key=ch.candidate_key, kind="promotion", challenger_id=ch.id,
+            session_id=s.id, symbol=a.symbol, timeframe=a.timeframe, candidate_key=ch.candidate_key, kind="promotion", challenger_id=ch.id,
             reason=("operator override of failed Guardrails" if not rep["promotable"] else "operator, all Guardrails passed"),
         )
         self._j("promotion", f"Promotion queued for {a.symbol} {a.timeframe}: {cand.label()} (applies when flat)", s, a.symbol)
         return row
 
-    def rollback(self, session_id: int, symbol: str) -> PendingChangeRow:
-        s, a = self._slot_assignment(session_id, symbol)
-        versions = self.repo.versions(session_id, symbol)
+    def rollback(self, session_id: int, symbol: str, timeframe: str | None = None) -> PendingChangeRow:
+        s, a = self._slot_assignment(session_id, symbol, timeframe)
+        versions = self.repo.versions(session_id, symbol, a.timeframe)
         target = next((v.previous_key for v in reversed(versions) if v.previous_key), None)
         if not target:
             raise DomainError("nothing_to_roll_back", f"{symbol} has no earlier Champion Version", 409)
-        row = self.repo.add_pending(session_id=s.id, symbol=symbol, candidate_key=target, kind="rollback", reason="operator")
+        row = self.repo.add_pending(session_id=s.id, symbol=symbol, timeframe=a.timeframe, candidate_key=target, kind="rollback", reason="operator")
         self._j("rollback", f"Rollback queued for {symbol}: back to {self.repo.candidate(target).label()} (applies when flat)", s, symbol)
         return row
 
-    def set_auto_promote(self, session_id: int, symbol: str, enabled: bool, is_live: bool) -> dict:
-        s, a = self._slot_assignment(session_id, symbol)
+    def set_auto_promote(self, session_id: int, symbol: str, enabled: bool, is_live: bool, timeframe: str | None = None) -> dict:
+        s, a = self._slot_assignment(session_id, symbol, timeframe)
         if enabled and is_live:
             raise DomainError("live_account", "auto-promotion is never allowed on a live account; promote manually", 409)
-        self.repo.set_auto_promote(session_id, symbol, enabled)
-        self._j("learning", f"Auto-promotion {'enabled' if enabled else 'disabled'} for {symbol}", s, symbol)
-        return {"session_id": session_id, "symbol": symbol, "auto_promote": enabled}
+        self.repo.set_auto_promote(session_id, symbol, enabled, a.timeframe)
+        self._j("learning", f"Auto-promotion {'enabled' if enabled else 'disabled'} for {symbol} {a.timeframe}", s, symbol)
+        return {"session_id": session_id, "symbol": symbol, "timeframe": a.timeframe, "auto_promote": enabled}
 
     # -------------------------------------------------------- session lifecycle
     def on_session_started(self, s: SessionRow, assigns: list[AssignmentRow], now: int) -> None:
@@ -444,8 +484,8 @@ class LearningService:
         for a in assigns:
             champ = self.champion_of(a)
             self.repo.ensure_candidate(champ)
-            self.repo.slot(s.id, a.symbol)
-            versions = self.repo.versions(s.id, a.symbol)
+            self.repo.slot(s.id, a.symbol, a.timeframe)
+            versions = self.repo.versions(s.id, a.symbol, a.timeframe)
             if not versions or versions[-1].candidate_key != champ.key:
                 kind = "initial" if not versions else "manual"
                 self.repo.add_version(session_id=s.id, symbol=a.symbol, timeframe=a.timeframe, candidate_key=champ.key, kind=kind, server_ts=now, reason="session start" if kind == "initial" else "edited in the session editor")
@@ -477,7 +517,7 @@ class LearningService:
         run = self.repo.add_run(symbol=symbol, timeframe=timeframe, trigger=trigger)
         self._queued[key] = run.id
         if self._queue is not None:
-            self._queue.put_nowait((symbol, timeframe, run.id))
+            self._queue.put_nowait((OPTIMIZE, next(self._seq), ("optimize", (symbol, timeframe, run.id))))
         return run.id
 
     async def drain(self) -> None:
@@ -497,15 +537,473 @@ class LearningService:
 
     async def _work(self) -> None:
         while True:
-            symbol, timeframe, run_id = await self._queue.get()
+            _, _, (kind, job) = await self._queue.get()
             try:
-                await self._run(symbol, timeframe, run_id)
-            except Exception as e:  # a failed run must never take the worker (or the engine) down
-                log.exception("optimizer run %s failed", run_id)
-                self.repo.update_run(run_id, status="failed", note=str(e)[:500], finished_wall=time.time())
+                if kind == "optimize":
+                    await self._work_optimize(*job)
+                elif kind == "challenger":
+                    await self._work_submission(*job)
+                else:
+                    await self._work_evidence(job)
             finally:
-                self._queued.pop((symbol, timeframe), None)
                 self._queue.task_done()
+
+    async def _work_submission(self, symbol: str, timeframe: str, run_id: int, cand: Candidate, note: str) -> None:
+        try:
+            await self._run_submission(symbol, timeframe, run_id, cand, note)
+        except Exception as e:
+            log.exception("reviewer submission %s failed", run_id)
+            self.repo.update_run(run_id, status="failed", note=str(e)[:500], finished_wall=time.time())
+        finally:
+            self._submitted.get((symbol, timeframe), {}).pop(cand.key, None)
+
+    async def _work_optimize(self, symbol: str, timeframe: str, run_id: int) -> None:
+        try:
+            await self._run(symbol, timeframe, run_id)
+        except Exception as e:  # a failed run must never take the worker (or the engine) down
+            log.exception("optimizer run %s failed", run_id)
+            self.repo.update_run(run_id, status="failed", note=str(e)[:500], finished_wall=time.time())
+        finally:
+            self._queued.pop((symbol, timeframe), None)
+
+    async def _work_evidence(self, evidence_id: int) -> None:
+        row = self.repo.evidence_row(evidence_id)
+        try:
+            await self._run_evidence(evidence_id)
+        except Exception as e:
+            log.exception("evidence run %s failed", evidence_id)
+            self.repo.update_evidence(evidence_id, status="failed", note=str(e)[:500], finished_wall=time.time())
+        finally:
+            if row is not None:
+                self._evidence_queued.pop(row.key, None)
+
+    # ------------------------------------------------------------ evidence runs
+    def spec_for(self, s: SessionRow, a: AssignmentRow) -> ev.EvidenceSpec:
+        """The Evidence an Assignment's settings call for: its Candidate, its Risk Profile's exit rules,
+        its Session's Trading Window and Weekend Close."""
+        profile = self.store.to_profile(self.store.risk_profile(a.risk_profile_id))
+        return ev.EvidenceSpec.of(
+            a.symbol, a.timeframe, a.strategy, a.params, ExitRules.from_profile(profile, a.reverse_on_opposite),
+            s.window, s.weekend_close_time if s.weekend_close else None,
+        )
+
+    def request_evidence(self, spec: ev.EvidenceSpec, trigger: str = "manual") -> dict:
+        """Queue an Evidence Run (low priority: after every queued Optimizer Run). The same settings
+        already queued or running are merged. Refused while the engine has an order in flight."""
+        if self.order_busy():
+            raise DomainError("busy", "an order is being sent right now: try the Evidence Run again in a moment", 409)
+        if spec.key in self._evidence_queued:
+            return ev.summary(self.repo.evidence_row(self._evidence_queued[spec.key]))
+        row = self.repo.add_evidence(**spec.row_fields(), trigger=trigger)
+        self._evidence_queued[spec.key] = row.id
+        if self._queue is not None:
+            self._queue.put_nowait((EVIDENCE, next(self._seq), ("evidence", row.id)))
+        return ev.summary(row)
+
+    async def _wait_for_orders(self) -> None:
+        waited = 0.0
+        while self.order_busy() and waited < BUSY_WAIT:
+            await asyncio.sleep(0.2)
+            waited += 0.2
+
+    async def _read_history(self, symbol: str, tf: Timeframe, warm_before: tuple[int, int] | None = None) -> tuple[pd.DataFrame, str, bool]:
+        """Every closed bar the feed has (up to ``MAX_EVIDENCE_BARS``, newest kept), read newest page
+        first. Returns (bars, note, complete): a page that fails or times out ends the read, and the
+        run is marked incomplete with the bars received. ``warm_before=(ts, n)`` stops once ``n`` bars
+        older than ``ts`` have been read."""
+        pages: list[pd.DataFrame] = []
+        got, note, complete, older = 0, "", True, 0
+        while True:
+            if warm_before is not None and older >= warm_before[1]:
+                break
+            if got >= ev.MAX_EVIDENCE_BARS:
+                note = f"history capped at the most recent {ev.MAX_EVIDENCE_BARS:,} bars"
+                break
+            n = min(ev.CHUNK_BARS, ev.MAX_EVIDENCE_BARS - got)
+            await self._wait_for_orders()
+            try:
+                page = await self.broker.run(lambda b, n=n, o=got: b.closed_bars(symbol, tf, n, o), timeout=ev.CHUNK_TIMEOUT)
+            except (BrokerError, asyncio.TimeoutError) as e:
+                note, complete = f"history read stopped after {got:,} bars: {type(e).__name__} {e}".strip(), False
+                break
+            if len(page) == 0:
+                break
+            pages.append(page)
+            got += len(page)
+            if warm_before is not None:
+                older += int((page["time"].to_numpy() < warm_before[0]).sum())
+            if len(page) < n:
+                break
+        if not pages:
+            return pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"]), note, complete
+        bars = pd.concat(pages[::-1], ignore_index=True).drop_duplicates("time").sort_values("time").reset_index(drop=True)
+        return bars, note, complete
+
+    async def _run_evidence(self, evidence_id: int) -> None:
+        row = self.repo.evidence_row(evidence_id)
+        spec = ev.EvidenceSpec.from_row(row)
+        self.repo.update_evidence(evidence_id, status="running")
+        tf = Timeframe(spec.timeframe)
+        symbol = spec.symbol
+        tick, info, now = await self.broker.run(lambda b: (b.tick(symbol), b.symbol_info(symbol), b.server_time()), timeout=ev.CHUNK_TIMEOUT)
+        spread = self.spreads.spread_for(symbol, tick, now)
+        if spread is None:
+            self.repo.update_evidence(evidence_id, status="failed", run_ts=now, finished_wall=time.time(),
+                                      note="no typical spread is known yet and the market is shut: run it when the market is open")
+            return
+        bars, note, complete = await self._read_history(symbol, tf)
+        if len(bars) == 0:
+            self.repo.update_evidence(evidence_id, status="failed", run_ts=now, finished_wall=time.time(), note=note or "the feed returned no history")
+            return
+        costs = CostModel.from_symbol(info, spread=ev.SPREAD_MULTIPLIER * spread, ref_price=float(bars["close"].iloc[-1]))
+        gate = EntryGate(spec.window, tf.seconds)
+        weekend = WeekendClose(spec.weekend_close, tf.seconds) if spec.weekend_close else None
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(self._pool, ev.evidence_job, bars, spec.candidate, costs, spec.rules, gate, weekend)
+        status = "done" if complete else "incomplete"
+        self.repo.update_evidence(evidence_id, status=status, run_ts=now, finished_wall=time.time(), costs=costs.to_dict(), note=note, **result)
+        self._server_time = now
+        label = f"{symbol} {spec.timeframe} {spec.candidate.label()}"
+        self._j("learning", f"Evidence {label}: {result['trades']} trades, {result['mean_r']:+.3f}R per trade on {result['bars']:,} bars"
+                + ("" if complete else " (incomplete)"), symbol=symbol)
+
+    def evidence(self, symbol: str | None = None, timeframe: str | None = None, strategy: str | None = None) -> list[dict]:
+        """The latest Evidence per key (the Strategies page's table)."""
+        seen, out = set(), []
+        for r in self.repo.evidence_rows(symbol=symbol, timeframe=timeframe, strategy=strategy, limit=1000):
+            if r.key not in seen:
+                seen.add(r.key)
+                out.append(ev.summary(r))
+        return out
+
+    def evidence_for(self, spec: ev.EvidenceSpec) -> dict:
+        """The badge: ``match`` (Evidence for exactly these settings), ``running``, ``mismatch``
+        (Evidence exists for this Strategy on this Arena, but for other settings) or ``none``."""
+        rows = self.repo.evidence_rows(key=spec.key, limit=20)
+        done = next((r for r in rows if r.status in ("done", "incomplete")), None)
+        if done is not None:
+            return {"status": "match", "key": spec.key, "evidence": ev.summary(done)}
+        if any(r.status in ("queued", "running") for r in rows):
+            return {"status": "running", "key": spec.key, "evidence": None}
+        other = self.repo.evidence_rows(symbol=spec.symbol, timeframe=spec.timeframe, strategy=spec.candidate.strategy, status=("done", "incomplete"), limit=1)
+        if other:
+            return {"status": "mismatch", "key": spec.key, "evidence": ev.summary(other[0])}
+        return {"status": "none", "key": spec.key, "evidence": None}
+
+    def assignment_evidence(self, s: SessionRow, a: AssignmentRow) -> dict:
+        """The badge for an Assignment; with Weekend Close on for H4/D1, also the Evidence without it
+        (spec D6: Weekend Close cuts a trend edge — show by how much)."""
+        spec = self.spec_for(s, a)
+        out = self.evidence_for(spec)
+        if s.weekend_close and a.timeframe in ("H4", "D1"):
+            out["without_weekend_close"] = self.evidence_for(spec.with_weekend_close(None))
+        return out
+
+    # ================================================= Claude Strategy Review
+    async def _server_now(self) -> int:
+        now = await self.broker.run(lambda b: b.server_time(), timeout=ev.CHUNK_TIMEOUT)
+        self._server_time = now
+        return now
+
+    def spec_from(
+        self, symbol: str, timeframe: str, strategy: str, params: dict | None = None, session_id: int | None = None,
+        risk_profile_id: int | None = None, reverse_on_opposite: bool = True, window: dict | None = None, weekend_close: str | None = None,
+    ) -> ev.EvidenceSpec:
+        """Evidence settings from an editor form or a request. A Session supplies its Trading Window and
+        Weekend Close; a Risk Profile its exit rules. Default: no breakeven, no trailing stop."""
+        try:
+            get_strategy(strategy)
+        except KeyError:
+            raise DomainError("unknown_strategy", f"unknown strategy {strategy!r}", 422) from None
+        if session_id is not None:
+            s = self.store.get_session(session_id)
+            window, weekend_close = s.window, (s.weekend_close_time if s.weekend_close else None)
+        rules = ExitRules(reverse_on_opposite=reverse_on_opposite)
+        if risk_profile_id is not None:
+            rules = ExitRules.from_profile(self.store.to_profile(self.store.risk_profile(risk_profile_id)), reverse_on_opposite)
+        return ev.EvidenceSpec.of(symbol, timeframe, strategy, params, rules, window, weekend_close)
+
+    def trial_summary(self) -> list[dict]:
+        now = self._server_time or int(time.time())
+        return [
+            {"symbol": k[0], "timeframe": k[1], **v, "holdout_from": research.holdout_from(now, k[1])}
+            for k, v in sorted(self.repo.trial_counts().items())
+        ]
+
+    async def record_trial(
+        self, symbol: str, timeframe: str, hypothesis: str, data_from: int, data_to: int, result: dict,
+        strategy: str | None = None, params: dict | None = None, source: str = "cli",
+    ) -> dict:
+        """Append a research trial to the ledger, whatever its result. Refused when its data reaches the
+        sealed holdout: research runs on the snapshot, which ends before it."""
+        tf = Timeframe(timeframe)
+        now = await self._server_now()
+        cutoff = research.holdout_from(now, tf.value)
+        if data_to + tf.seconds > cutoff:
+            raise DomainError("holdout", f"the trial's data reaches the sealed holdout (from {_day(cutoff)}): research only on the snapshot", 422)
+        if data_from > data_to:
+            raise DomainError("invalid", "data_from is after data_to", 422)
+        try:
+            ph = research.hypothesis_hash(strategy, params, hypothesis)
+        except KeyError:
+            raise DomainError("unknown_strategy", f"unknown strategy {strategy!r}", 422) from None
+        row = self.repo.add_trial(
+            symbol=symbol, timeframe=tf.value, hypothesis=hypothesis, strategy=strategy or "",
+            params=Candidate.of(strategy, params).param_dict if strategy else (params or {}), params_hash=ph,
+            data_from=data_from, data_to=data_to, result=result, source=source, ts=now,
+        )
+        return {**row.model_dump(), "arena_trials": self.repo.trial_count(symbol, tf.value)}
+
+    async def snapshot(self, symbol: str, timeframe: str, tail: int | None = None, arena_timeframe: str | None = None) -> dict:
+        """The research snapshot of an Arena: every closed bar before its sealed holdout, with the costs
+        today's typical spread implies. Read-only. ``arena_timeframe``: these bars are context for another
+        Arena (e.g. M15 bars for the GOLD M5 Arena) and end where *that* Arena's holdout starts."""
+        tf = Timeframe(timeframe)
+        now = await self._server_now()
+        cutoff = research.holdout_from(now, Timeframe(arena_timeframe or tf).value)
+        tick, info = await self.broker.run(lambda b: (b.tick(symbol), b.symbol_info(symbol)), timeout=ev.CHUNK_TIMEOUT)
+        spread = self.spreads.spread_for(symbol, tick, now)
+        if tail == 0:  # metadata only (the CLI's check of its cache): no history read
+            bars, note, complete = pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"]), "", True
+            total, first_ts = None, None
+        else:
+            bars, note, complete = await self._read_history(symbol, tf)
+            bars = research.research_bars(bars, cutoff, tf.seconds)
+            total = len(bars)
+            first_ts = int(bars["time"].iloc[0]) if total else None
+            if tail is not None:
+                bars = bars.iloc[-tail:]
+        # today's spread at today's price: older bars are priced by scaling from here (the Cost Model)
+        costs = CostModel.from_symbol(info, spread=spread, ref_price=float(tick.bid)) if spread is not None and tick.bid > 0 else None
+        return {
+            "symbol": symbol, "timeframe": tf.value, "server_time": now, "holdout_from": cutoff,
+            "bars_total": total, "first_ts": first_ts,
+            "complete": complete, "note": note,
+            "costs": costs.to_dict() if costs else None, "evidence_spread_multiplier": ev.SPREAD_MULTIPLIER,
+            "arena_trials": self.repo.trial_count(symbol, tf.value),
+            "arena": self._research_arena(symbol, tf.value),
+            "bars": {k: bars[k].tolist() for k in ("time", "open", "high", "low", "close", "volume")},
+        }
+
+    def _research_arena(self, symbol: str, timeframe: str) -> dict | None:
+        """The Champion and the settings research must use for an Arena a Session trades (None: a research-only
+        Arena, e.g. GOLD M5 scalping, judged against zero)."""
+        found = self._arena_assignment(symbol, timeframe)
+        if found is None:
+            return None
+        spec = self.spec_for(*found)
+        return {
+            "session": found[0].name, "champion": self.champion_of(found[1]).to_dict(),
+            "rules": asdict(spec.rules), "window": spec.window, "weekend_close": spec.weekend_close,
+        }
+
+    async def evaluate_holdout(self, symbol: str, timeframe: str, strategy: str, params: dict | None, hypothesis: str) -> dict:
+        """Score a finalist on the sealed holdout, once. The ledger row is written before the backtest, so
+        a second request — or a retry after a crash — is refused and the first result stands."""
+        tf = Timeframe(timeframe)
+        try:
+            cand = Candidate.of(strategy, params)
+        except KeyError:
+            raise DomainError("unknown_strategy", f"unknown strategy {strategy!r}", 422) from None
+        earlier = self.repo.holdout_trial(symbol, tf.value, cand.key)
+        if earlier is not None:
+            raise DomainError("holdout_used", f"{cand.label()} was already scored on the {symbol} {tf.value} holdout on {_day(earlier.ts)}: "
+                              f"{earlier.status} — the result is final", 409)
+        now = await self._server_now()
+        cutoff = research.holdout_from(now, tf.value)
+        tick = await self.broker.run(lambda b: b.tick(symbol), timeout=ev.CHUNK_TIMEOUT)
+        spread = self.spreads.spread_for(symbol, tick, now)
+        if spread is None:
+            raise DomainError("market_shut", "no typical spread is known yet and the market is shut: evaluate when it is open", 409)
+        found = self._arena_assignment(symbol, tf.value)
+        spec = self.spec_for(*found) if found else ev.EvidenceSpec.of(symbol, tf.value, strategy, params)
+        champion = self.champion_of(found[1]) if found else None
+        # reserve the one use before anything can fail — checked again with no await in between, so
+        # two concurrent requests can never both pass
+        if self.repo.holdout_trial(symbol, tf.value, cand.key) is not None:
+            raise DomainError("holdout_used", f"{cand.label()} is already being scored on the {symbol} {tf.value} holdout", 409)
+        row = self.repo.add_trial(
+            symbol=symbol, timeframe=tf.value, hypothesis=hypothesis, strategy=strategy, params=cand.param_dict, params_hash=cand.key,
+            data_from=cutoff, data_to=now, holdout_used=True, status="evaluating", source="holdout", ts=now,
+        )
+        try:
+            warm = max(get_strategy(c.strategy).lookback(get_strategy(c.strategy).resolve(c.param_dict)) for c in (cand, champion) if c) + WARMUP_BARS
+            bars, note, complete = await self._read_history(symbol, tf, warm_before=(cutoff, warm))
+            before = int((bars["time"].to_numpy() < cutoff).sum()) if len(bars) else 0
+            bars = bars.iloc[max(0, before - warm):].reset_index(drop=True)
+            info = await self.broker.run(lambda b: b.symbol_info(symbol), timeout=ev.CHUNK_TIMEOUT)
+            costs = CostModel.from_symbol(info, spread=ev.SPREAD_MULTIPLIER * spread, ref_price=float(bars["close"].iloc[-1]))
+            weekend = WeekendClose(spec.weekend_close, tf.seconds) if spec.weekend_close else None
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                self._pool, research.holdout_job, bars, cand, champion, costs, spec.rules, EntryGate(spec.window, tf.seconds), weekend, cutoff
+            )
+            result.update(note=note, complete=complete, champion_key=champion.key if champion else None)
+            status = "passed" if result["passed"] else "failed"
+        except Exception as e:
+            log.exception("holdout evaluation failed")
+            self.repo.update_trial(row.id, status="error", result={"error": str(e)[:500]})
+            raise
+        row = self.repo.update_trial(row.id, status=status, result=result)
+        c = result["candidate"]
+        self._j("learning", f"Holdout {symbol} {tf.value} {cand.label()}: {status} ({c['trades']} trades, {c['mean_r']:+.3f}R)", symbol=symbol)
+        return row.model_dump()
+
+    def submit_challenger(self, symbol: str, timeframe: str, strategy: str, params: dict | None, note: str = "") -> dict:
+        """A reviewer's Candidate for an Arena. It is judged like an Optimizer finalist (walk-forward,
+        neighbours) and then Shadow Trades under the same Guardrails. It never promotes, never touches
+        a Session and never retires another Challenger to make room."""
+        tf = Timeframe(timeframe).value
+        found = self._arena_assignment(symbol, tf)
+        if found is None:
+            raise DomainError("not_found", f"no session trades {symbol} {tf}", 404)
+        try:
+            cand = Candidate.of(strategy, params)
+        except KeyError:
+            raise DomainError("unknown_strategy", f"unknown strategy {strategy!r}", 422) from None
+        champion = self.champion_of(found[1])
+        if get_strategy(cand.strategy).family != get_strategy(champion.strategy).family:
+            raise DomainError("cross_family", f"{cand.label()} is not in the Champion's family ({champion.label()}): new families arrive as code for review", 422)
+        if cand.key == champion.key:
+            raise DomainError("is_champion", "that is the Champion already", 409)
+        # the review's loop: finalist, one score on the sealed holdout, and only a pass is submitted
+        # (its walk-forward reads the newest bars, which overlap the holdout: a failure must stay final)
+        held = self.repo.holdout_trial(symbol, tf, cand.key)
+        if held is None:
+            raise DomainError("holdout_required", f"score {cand.label()} on the {symbol} {tf} holdout first (POST /api/research/holdout)", 409)
+        if held.status == "evaluating":
+            raise DomainError("holdout_pending", "its holdout evaluation has not finished", 409)
+        if held.status != "passed":
+            raise DomainError("holdout_failed", f"{cand.label()} {held.status} the {symbol} {tf} holdout on {_day(held.ts)}: the result is final", 409)
+        active = self.repo.challengers(symbol, tf)
+        if any(c.candidate_key == cand.key for c in active) or cand.key in self._submitted.get((symbol, tf), {}):
+            raise DomainError("duplicate", "that Candidate is already a Challenger (or queued)", 409)
+        if len(active) + len(self._submitted.get((symbol, tf), {})) >= MAX_CHALLENGERS:
+            raise DomainError("full", f"{symbol} {tf} already has {MAX_CHALLENGERS} Challengers: submit again when one retires", 409)
+        run = self.repo.add_run(symbol=symbol, timeframe=tf, trigger="reviewer", champion_key=champion.key,
+                                note=f"reviewer: {note}"[:500], result={"candidate": cand.to_dict()})
+        self._submitted.setdefault((symbol, tf), {})[cand.key] = run.id
+        if self._queue is not None:
+            self._queue.put_nowait((OPTIMIZE, next(self._seq), ("challenger", (symbol, tf, run.id, cand, note))))
+        return {"run_id": run.id, "status": "queued", "candidate": cand.to_dict()}
+
+    async def _run_submission(self, symbol: str, timeframe: str, run_id: int, cand: Candidate, note: str) -> None:
+        found = self._arena_assignment(symbol, timeframe)
+        if found is None:
+            self.repo.update_run(run_id, status="failed", note="no session trades this arena any more", finished_wall=time.time())
+            return
+        s, a = found
+        champion = self.champion_of(a)
+        self.repo.update_run(run_id, status="running", started_wall=time.time())
+        tf = Timeframe(timeframe)
+        n_bars = int(self.store.app_settings()["learning_bars"])
+        bars, tick, info, now = await self.broker.run(
+            lambda b: (b.closed_bars(symbol, tf, n_bars), b.tick(symbol), b.symbol_info(symbol), b.server_time())
+        )
+        spec = self.spec_for(s, a)
+        costs = CostModel.from_symbol(info, spread=self._typical_spread(symbol, tick, now), ref_price=float(bars["close"].iloc[-1]) if len(bars) else None)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            self._pool, evaluate_job, bars, champion, cand, costs, spec.rules, spec.window, tf.seconds, spec.weekend_close or None, run_id
+        )
+        self._server_time = now
+        if result.insufficient:
+            self.repo.update_run(run_id, status="insufficient", note=result.insufficient, result=result.to_dict(), finished_wall=time.time())
+            return
+        if len(self.repo.challengers(symbol, timeframe)) >= MAX_CHALLENGERS:
+            self.repo.update_run(run_id, status="failed", note="the Arena filled up with Challengers meanwhile", result=result.to_dict(), finished_wall=time.time())
+            return
+        judged = result.finalists[0]
+        self.repo.ensure_candidate(cand)
+        self.repo.add_challenger(
+            symbol=symbol, timeframe=timeframe, candidate_key=cand.key, started_ts=now, run_id=run_id,
+            oos=judged.wf.oos.to_dict(), champion_oos=result.champion.wf.oos.to_dict(),
+            trials=max(self.repo.trial_count(symbol, timeframe), TOP_K), robust=judged.robust,
+            note=f"submitted by the Strategy Review: {note}"[:500], source="reviewer",
+        )
+        verdict = "qualifies" if result.picks else "does not qualify on walk-forward yet"
+        self.repo.update_run(run_id, status="done", note=f"reviewer Challenger {cand.label()} installed; {verdict}", result=result.to_dict(), finished_wall=time.time())
+        self._j("learning", f"Strategy Review Challenger for {symbol} {timeframe}: {cand.label()} ({verdict})", symbol=symbol)
+
+    def add_review(self, title: str, summary: str, report: str = "", arenas: list | None = None, finalists: list | None = None,
+                   actions: list | None = None, period_from: int | None = None, period_to: int | None = None) -> dict:
+        """Store a review report and send its summary to Telegram (one Alert)."""
+        counts = self.repo.trial_counts()
+        ledger = {f"{k[0]} {k[1]}": v for k, v in counts.items()}
+        row = self.repo.add_review(
+            title=title, summary=summary, report=report, arenas=arenas or [], finalists=finalists or [], actions=actions or [],
+            period_from=period_from, period_to=period_to, ledger=ledger, ts=self._server_time or int(time.time()),
+        )
+        self._j("alert", f"Strategy Review: {title} — {summary}", level="info", alert=True, data={"review_id": row.id})
+        return row.model_dump()
+
+    async def scorecard(self) -> list[dict]:
+        """Per Arena: the Paper Account's record against the band the backtest says it should fall in,
+        and what one minimum lot would risk on the real Account. Advisory; it never blocks."""
+        arenas: dict[tuple[str, str], tuple[SessionRow, AssignmentRow]] = {}
+        for s in self.store.list_sessions():
+            for a in self.store.assignments(s.id):
+                cur = arenas.get((a.symbol, a.timeframe))
+                rank = (s.execution == "paper", s.status in ACTIVE)
+                if cur is None or rank > (cur[0].execution == "paper", cur[0].status in ACTIVE):
+                    arenas[(a.symbol, a.timeframe)] = (s, a)
+        out = []
+        for (symbol, timeframe), (s, a) in sorted(arenas.items()):
+            badge = self.evidence_for(self.spec_for(s, a))
+            rs = self.repo.evidence_row(badge["evidence"]["id"]).rs if badge["status"] == "match" else []
+            paper_rs = [self._trade_r(t) for t in self.store.paper_closed_trades(symbol, timeframe, a.strategy)]
+            n = len(paper_rs)
+            mean = sum(paper_rs) / n if n else 0.0
+            rng = ev.band(rs, n) if rs and n else None
+            strat = get_strategy(a.strategy)
+            p = strat.resolve(a.params)
+            tf = Timeframe(timeframe)
+            stop, risk = None, None
+            try:
+                acct, info, bars = await self.broker.run(
+                    lambda b, k=strat.lookback(p) + WARMUP_BARS: (b.account(), b.symbol_info(symbol), b.closed_bars(symbol, tf, k)),
+                    timeout=ev.CHUNK_TIMEOUT,
+                )
+                if len(bars):
+                    stop = float(strat.signals(bars, p)["sl_dist"].iloc[-1])
+                    vpp = float(info.trade_tick_value) / float(info.trade_tick_size) if info.trade_tick_size else 0.0
+                    risk = ev.min_lot_risk_pct(float(info.volume_min), stop, vpp, float(acct.balance))
+            except BrokerError:
+                pass
+            out.append({
+                "symbol": symbol, "timeframe": timeframe, "strategy": a.strategy,
+                "session": {"id": s.id, "name": s.name, "status": s.status, "execution": s.execution},
+                "evidence": badge,
+                "paper": {"trades": n, "mean_r": round(mean, 4), "total_r": round(sum(paper_rs), 3), "epoch": self.store.paper_epoch()},
+                "band": list(rng) if rng else None,
+                "band_level": ev.BAND_LEVEL,
+                "verdict": self._verdict(badge["status"] == "match", rs, n, mean, rng),
+                "min_lot_risk_pct": risk,
+                "stop": stop if stop == stop else None,
+                "note": "counts every Paper trade of this Strategy on the Arena in this Paper epoch, whatever its parameters",
+            })
+        return out
+
+    @staticmethod
+    def _verdict(matched: bool, rs: list, n: int, mean: float, rng) -> str:
+        if not matched:
+            return "no evidence"
+        if not rs:
+            return "the backtest took no trades"
+        if n < ev.MIN_SCORECARD_TRADES:
+            return "too few trades"
+        return ev.verdict(n, mean, rng)
+
+    @staticmethod
+    def _trade_r(t: TradeRow) -> float:
+        """A closed trade's result in R: profit over the money it risked (swap included); the price
+        move over the initial stop when the risk was not recorded (an adopted Orphan)."""
+        if t.risk_amount and t.risk_amount > 0 and t.profit is not None:
+            return float(t.profit) / float(t.risk_amount)
+        if t.initial_risk and t.close_price is not None:
+            move = t.close_price - t.open_price if t.side == "long" else t.open_price - t.close_price
+            return move / t.initial_risk
+        return 0.0
 
     async def _run(self, symbol: str, timeframe: str, run_id: int) -> None:
         found = self._arena_assignment(symbol, timeframe)
@@ -524,12 +1022,11 @@ class LearningService:
         profile = self.store.to_profile(self.store.risk_profile(a.risk_profile_id))
         rules = ExitRules.from_profile(profile, a.reverse_on_opposite)
         window = TradingWindow.from_dict(s.window)
-        costs = Costs(spread=max(tick.ask - tick.bid, 0.0), slippage=info.point)
+        costs = CostModel.from_symbol(info, spread=self._typical_spread(symbol, tick, now), ref_price=float(bars["close"].iloc[-1]) if len(bars) else None)
         exclude = {c.candidate_key for c in self.repo.challengers(symbol, timeframe)} | {champion.key}
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            self._pool, optimize_job, bars, champion, costs, rules, n_cands, run_id, window.to_dict(), tf.seconds, exclude
-        )
+        result = await loop.run_in_executor(self._pool, optimize_job, *self._job_args(bars, champion, costs, rules, n_cands, run_id, window, tf, exclude,
+                                                                                                  s.weekend_close_time if s.weekend_close else None))
         self._server_time = now
         if result.insufficient:
             self.repo.update_run(run_id, status="insufficient", note=result.insufficient, result=result.to_dict(), finished_wall=time.time())
@@ -601,7 +1098,7 @@ class LearningService:
             challengers.append({"id": ch.id, "candidate": c.to_dict(), "started_ts": ch.started_ts, "note": ch.note, "oos": ch.oos, "robust": ch.robust, **self.challenger_report(ch, champion)})
         runs = self.repo.runs(a.symbol, a.timeframe, limit=1)
         fstate = self._filter(a.symbol, a.timeframe, a.strategy)
-        pend = self.repo.pending(s.id, a.symbol)
+        pend = self.repo.pending(s.id, a.symbol, a.timeframe)
         return {
             "symbol": a.symbol,
             "timeframe": a.timeframe,
@@ -611,9 +1108,9 @@ class LearningService:
             "filter": {k: v for k, v in fstate.to_dict().items() if k not in ("mean", "std")},
             "last_run": runs[0].model_dump(exclude={"result"}) if runs else None,
             "pending": pend.model_dump() if pend else None,
-            "auto_promote": self.repo.slot(s.id, a.symbol).auto_promote,
+            "auto_promote": self.repo.slot(s.id, a.symbol, a.timeframe).auto_promote,
             "auto_promote_allowed": not is_live,
-            "versions": len(self.repo.versions(s.id, a.symbol)),
+            "versions": len(self.repo.versions(s.id, a.symbol, a.timeframe)),
         }
 
     def arena(self, symbol: str, timeframe: str, is_live: bool) -> dict:
@@ -638,3 +1135,7 @@ class LearningService:
         runs = [r.model_dump() for r in self.repo.runs(symbol, timeframe, limit=10)]
         signals = [r.model_dump(exclude={"features"}) for r in self.repo.signals(symbol, timeframe, limit=30)]
         return {**summary, "curves": curves, "history": versions, "runs": runs, "signals": signals}
+
+
+def _day(ts: int) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(ts))

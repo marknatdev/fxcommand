@@ -17,6 +17,7 @@ dependencies = [
 [project.scripts]
 fxcommand = "fxcommand.main:run"
 fxcommand-mcp = "fxcommand.mcp_server:main"
+fxcommand-research = "fxcommand.research_cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]

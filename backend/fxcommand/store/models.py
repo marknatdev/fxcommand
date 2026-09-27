@@ -42,6 +42,65 @@ class AssignmentRow(SQLModel, table=True):
     risk_profile_id: int = Field(foreign_key="risk_profiles.id")
     reverse_on_opposite: bool = True
     enabled: bool = True
+    magic: int = 0  # from magic_identities; set whenever the row is written (ADR 0009)
+
+
+class MagicIdentityRow(SQLModel, table=True):
+    """One Magic Number per (Session, Symbol, Strategy, Timeframe), never reused (ADR 0009). Rows
+    outlive Assignment edits and Session deletion, so an identity always gets its magic back."""
+
+    __tablename__ = "magic_identities"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: int = Field(index=True)
+    symbol: str
+    strategy: str
+    timeframe: str
+    magic: int = Field(unique=True)
+    created_wall: float = 0
+
+
+class PendingEntryRow(SQLModel, table=True):
+    """A Signal the engine could not act on yet (spec D5/D12/D20): an entry waiting for the market
+    or the Trading Window to open, or a strategy exit waiting for the market. Keyed by Arena and
+    bar (never by assignment id); sent only through ``SessionManager._enter`` / the close path."""
+
+    __tablename__ = "pending_entries"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: int = Field(index=True)
+    symbol: str
+    timeframe: str
+    signal_bar_ts: int  # open time of the Signal's bar
+    candidate_key: str
+    kind: str = "entry"  # entry | exit
+    side: str = ""  # long | short (entry)
+    sl_dist: float = 0.0
+    tp_dist: float = 0.0
+    reason: str = ""  # the Signal's reason
+    record_id: Optional[int] = None  # Learning Signal record (the Signal Filter screens only when the Signal arrives)
+    ticket: Optional[int] = None  # exit: the position to close; entry: the fill
+    created_ts: int = 0
+    first_tradable_ts: Optional[int] = None  # Next Tradable Time, as observed
+    expires_ts: Optional[int] = None
+    status: str = Field(default="pending", index=True)  # pending | filled | expired | cancelled | rejected | superseded | closed
+    note: str = ""
+    done_ts: Optional[int] = None
+
+
+class CostOverrideRow(SQLModel, table=True):
+    """The operator let an Assignment start although its Cost Check fails (spec D4). Keyed by
+    (Session, Symbol, Timeframe): since ADR 0009 a Symbol can be in a Session twice, and an override
+    for GOLD H1 must not cover a GOLD M1 scalper."""
+
+    __tablename__ = "cost_overrides"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: int = Field(index=True)
+    symbol: str
+    timeframe: str
+    reason: str = ""
+    set_ts: int = 0
 
 
 class RiskProfileRow(SQLModel, table=True):
@@ -88,6 +147,7 @@ class TradeRow(SQLModel, table=True):
     adopted: bool = False
     paper: bool = False
     login: Optional[int] = Field(default=None, index=True)  # Account the trade lives on (None: recorded before logins were kept)
+    paper_epoch: int = 0  # Paper Account epoch (a reset starts a new one; older rows are archived, never deleted)
 
 
 class JournalRow(SQLModel, table=True):
@@ -140,12 +200,14 @@ class PaperPositionRow(SQLModel, table=True):
     status: str = Field(default="open", index=True)  # open | closed
     price_close: Optional[float] = None
     time_close: Optional[int] = Field(default=None, index=True)
-    profit: Optional[float] = None
+    profit: Optional[float] = None  # includes swap
     reason: str = ""
+    swap: float = 0.0  # charged at the rollovers held through (spec D28)
+    epoch: int = 0  # Paper Account epoch
 
 
 # ------------------------------------------------------------------ learning
-# All learning records are keyed by Arena (symbol, timeframe) or by (session_id, symbol) — never by
+# All learning records are keyed by Arena (symbol, timeframe) or by (session_id, symbol, timeframe) — never by
 # assignment id, which changes whenever a Session is edited.
 
 
@@ -180,6 +242,7 @@ class LearningSlotRow(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     session_id: int = Field(index=True)
     symbol: str
+    timeframe: str = ""  # "" = written before a Symbol could appear twice in a Session
     auto_promote: bool = False
 
 
@@ -199,6 +262,7 @@ class ChallengerRow(SQLModel, table=True):
     trials: int = 10
     robust: Optional[bool] = None
     note: str = ""
+    source: str = "optimizer"  # optimizer | reviewer (a Claude Strategy Review submission)
 
 
 class ShadowTradeRow(SQLModel, table=True):
@@ -273,6 +337,7 @@ class PendingChangeRow(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     session_id: int = Field(index=True)
     symbol: str
+    timeframe: str = ""  # "" = written before a Symbol could appear twice in a Session
     candidate_key: str
     kind: str  # promotion | auto_promotion | rollback | auto_rollback
     reason: str = ""
@@ -280,3 +345,84 @@ class PendingChangeRow(SQLModel, table=True):
     status: str = Field(default="pending", index=True)  # pending | applied | cancelled
     created_wall: float = 0
     applied_ts: Optional[int] = None
+
+
+class EvidenceRow(SQLModel, table=True):
+    """One Evidence Run: a read-only Backtest of a Candidate on an Arena's full history at 2× the
+    typical spread (spec D11, D23). Local DB only: never committed, never exposed beyond read-only MCP."""
+
+    __tablename__ = "evidence_runs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    key: str = Field(index=True)  # learning.evidence.evidence_key: every setting the result depends on
+    symbol: str = Field(index=True)
+    timeframe: str
+    strategy: str
+    candidate_key: str
+    params: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    exit_rules: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    exit_rules_hash: str = ""
+    window: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    window_hash: str = ""
+    weekend_close: str = ""  # "" = off, else Friday close time "HH:MM"
+    cost_version: int = 0
+    costs: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))  # the CostModel used
+    status: str = Field(default="queued", index=True)  # queued | running | done | incomplete | failed
+    trigger: str = "manual"
+    requested_wall: float = 0
+    finished_wall: Optional[float] = None
+    run_ts: Optional[int] = None  # server time the history was read
+    bars: int = 0
+    first_ts: Optional[int] = None
+    last_ts: Optional[int] = None
+    trades: int = 0
+    mean_r: float = 0.0
+    sqn: float = 0.0
+    win_rate: float = 0.0
+    total_r: float = 0.0
+    max_dd_r: float = 0.0
+    periods: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # [{label, from_ts, to_ts, n, mean}]
+    rs: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # every trade's R (rounded), for the scorecard band
+    note: str = ""
+
+
+class ResearchTrialRow(SQLModel, table=True):
+    """The trial ledger (spec D44): every research backtest of a hypothesis, whatever its result, and
+    every one-time evaluation on the sealed holdout. The per-Arena count feeds the selection penalty."""
+
+    __tablename__ = "research_trials"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    symbol: str = Field(index=True)
+    timeframe: str = Field(index=True)
+    hypothesis: str
+    strategy: str = ""
+    params: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    params_hash: str = Field(index=True)  # the Candidate key (or a hash of the hypothesis without parameters)
+    data_from: Optional[int] = None
+    data_to: Optional[int] = None
+    result: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    holdout_used: bool = Field(default=False, index=True)
+    status: str = "recorded"  # recorded | evaluating | passed | failed (holdout rows)
+    source: str = "cli"  # cli | reviewer | holdout
+    ts: int = 0  # server time
+    wall: float = 0
+
+
+class ReviewRow(SQLModel, table=True):
+    """A Claude Strategy Review report (spec D45): local DB only, shown on the Reviews page."""
+
+    __tablename__ = "reviews"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str
+    summary: str  # a few lines: the Telegram message
+    report: str = ""  # markdown
+    period_from: Optional[int] = None
+    period_to: Optional[int] = None
+    arenas: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # ["GOLD H4", ...]
+    finalists: list[Any] = Field(default_factory=list, sa_column=Column(JSON))
+    actions: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # challengers submitted, PR links
+    ledger: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))  # trials per Arena when submitted
+    ts: int = 0
+    wall: float = 0

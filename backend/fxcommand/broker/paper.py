@@ -23,8 +23,13 @@ from .types import ClosedTrade, OrderResult, Position, Side, SymbolInfo, Timefra
 
 SLIPPAGE_POINTS = 1
 MAX_CATCHUP_BARS = 5000
+MAX_QUOTE_AGE = 120  # seconds; an older quote means the market is shut (as the Risk Gate judges it)
+# closes the engine can defer until the market opens (strategy exits, reversals); the book refuses
+# them while the quote is stale, as the real market would. Stop / Kill Switch closes still settle.
+DEFERRABLE_REASONS = ("strategy exit", "opposite signal")
 
 RET_DONE = 10009
+RET_MARKET_CLOSED = 10018
 RET_INVALID_VOLUME = 10014
 RET_INVALID_STOPS = 10016
 RET_NOT_FOUND = 10036
@@ -61,6 +66,7 @@ class PaperRepo(Protocol):
     def paper_update(self, ticket: int, **fields) -> None: ...
     def paper_closed_since(self, since: int) -> list: ...
     def paper_next_ticket(self) -> int: ...
+    def paper_epoch(self) -> int: ...
 
 
 class PaperBook:
@@ -73,16 +79,49 @@ class PaperBook:
         diff = price_close - price_open if side == "long" else price_open - price_close
         return diff / info.trade_tick_size * info.trade_tick_value * volume
 
+    @staticmethod
+    def _swap(info: SymbolInfo, row, until: int) -> float:
+        """Swap in money for the rollovers held through, by the symbol's swap mode (spec D28)."""
+        from ..learning.costs import CostModel  # local import: the broker package stays learning-free at import time
+
+        price_units = CostModel.from_symbol(info, spread=0.0).swap_for(row.side, row.price_open, row.time, int(until))
+        return price_units / info.trade_tick_size * info.trade_tick_value * row.volume if info.trade_tick_size else 0.0
+
     def _settle(self, ro, row, price: float, reason: str, when: int) -> None:
         info = ro.symbol_info(row.symbol)
         price = round(price, info.digits)
-        profit = round(self._money(info, row.side, row.price_open, price, row.volume), 2)
-        self.repo.paper_update(row.ticket, status="closed", price_close=price, time_close=int(when), profit=profit, reason=reason)
+        swap = round(self._swap(info, row, when), 2)
+        profit = round(self._money(info, row.side, row.price_open, price, row.volume) + swap, 2)
+        self.repo.paper_update(row.ticket, status="closed", price_close=price, time_close=int(when), profit=profit, reason=reason, swap=swap)
 
     # ---------------------------------------------------------------- sync
+    @staticmethod
+    def _catchup_bars(ro, symbol: str, checked: int, now: int) -> list[tuple[int, int, float, float, float]]:
+        """(time, seconds, open, high, low) of every closed bar since ``checked``, oldest first: M1
+        where the M1 history reaches, H1 and then D1 for an older gap (a long downtime). At most
+        ``MAX_CATCHUP_BARS`` per timeframe, so one call stays well inside the broker timeout."""
+        segments = []
+        for tf in (Timeframe.M1, Timeframe.H1, Timeframe.D1):
+            n = int(min(MAX_CATCHUP_BARS, max(3, (now - checked) // tf.seconds + 3)))
+            bars = ro.closed_bars(symbol, tf, n)
+            segments.insert(0, (tf, bars))
+            if len(bars) == 0 or int(bars["time"].iloc[0]) <= checked:
+                break
+        out: list[tuple[int, int, float, float, float]] = []
+        for i, (tf, bars) in enumerate(segments):
+            if len(bars) == 0:
+                continue
+            finer_start = next((int(b["time"].iloc[0]) for _, b in segments[i + 1:] if len(b)), None)
+            for t, o, h, l in zip(bars["time"].to_numpy(), bars["open"].to_numpy(), bars["high"].to_numpy(), bars["low"].to_numpy()):
+                t = int(t)
+                if t < checked or (finer_start is not None and t + tf.seconds > finer_start):
+                    continue  # before the last check, or covered by the finer timeframe
+                out.append((t, tf.seconds, float(o), float(h), float(l)))
+        return out
+
     def sync(self, ro) -> None:
-        """Settle SL/TP hits since the last check: closed M1 bars first (SL before TP, gaps at the
-        open), then the current tick."""
+        """Settle SL/TP hits since the last check: closed bars first (SL before TP, gaps at the
+        open; M1, or H1/D1 for a gap older than the M1 history), then the current tick."""
         now = ro.server_time()
         for row in self.repo.paper_open():
             info = ro.symbol_info(row.symbol)
@@ -91,30 +130,25 @@ class PaperBook:
             slip = SLIPPAGE_POINTS * info.point
             long = row.side == "long"
             checked = row.checked_to or row.time
-            n = min(MAX_CATCHUP_BARS, max(3, (now - checked) // 60 + 3))
-            bars = ro.closed_bars(row.symbol, Timeframe.M1, int(n))
             done = False
-            for t, o, h, l in zip(bars["time"].to_numpy(), bars["open"].to_numpy(), bars["high"].to_numpy(), bars["low"].to_numpy()):
-                t = int(t)
-                if t < checked:
-                    continue
+            for t, secs, o, h, l in self._catchup_bars(ro, row.symbol, checked, now):
                 if long:
                     if row.sl and l <= row.sl:
-                        self._settle(ro, row, min(row.sl, o) - slip, "sl", t + 60)
+                        self._settle(ro, row, min(row.sl, o) - slip, "sl", t + secs)
                         done = True
                     elif row.tp and h >= row.tp:
-                        self._settle(ro, row, max(row.tp, o), "tp", t + 60)
+                        self._settle(ro, row, max(row.tp, o), "tp", t + secs)
                         done = True
                 else:
                     if row.sl and h + spread >= row.sl:
-                        self._settle(ro, row, max(row.sl, o + spread) + slip, "sl", t + 60)
+                        self._settle(ro, row, max(row.sl, o + spread) + slip, "sl", t + secs)
                         done = True
                     elif row.tp and l + spread <= row.tp:
-                        self._settle(ro, row, min(row.tp, o + spread), "tp", t + 60)
+                        self._settle(ro, row, min(row.tp, o + spread), "tp", t + secs)
                         done = True
                 if done:
                     break
-                checked = t + 60
+                checked = t + secs
             if done:
                 continue
             if long:
@@ -156,7 +190,7 @@ class PaperBook:
         self.repo.paper_add(
             PaperPositionRow(
                 ticket=ticket, symbol=symbol, side=side, volume=round(volume, 2), price_open=price, sl=sl, tp=tp or 0.0,
-                magic=magic, time=now, comment=comment[:31], checked_to=now,
+                magic=magic, time=now, comment=comment[:31], checked_to=now, epoch=self.repo.paper_epoch(),
             )
         )
         return OrderResult(True, RET_DONE, "paper fill", ticket=ticket, price=price, volume=round(volume, 2))
@@ -176,6 +210,8 @@ class PaperBook:
         if row is None:
             return OrderResult(False, RET_NOT_FOUND, f"paper position {ticket} not found")
         tick = ro.tick(row.symbol)
+        if comment.startswith(DEFERRABLE_REASONS) and ro.server_time() - tick.time > MAX_QUOTE_AGE:
+            return OrderResult(False, RET_MARKET_CLOSED, "market closed (no fresh quote)")
         slip = SLIPPAGE_POINTS * ro.symbol_info(row.symbol).point
         price = tick.bid - slip if row.side == "long" else tick.ask + slip
         self._settle(ro, row, price, "manual" if comment == "manual" else "expert", ro.server_time())
@@ -190,10 +226,11 @@ class PaperBook:
             info = ro.symbol_info(r.symbol)
             tick = ro.tick(r.symbol)
             cur = tick.bid if r.side == "long" else tick.ask
+            swap = self._swap(info, r, ro.server_time())  # like MT5 via Mt5Broker: profit includes swap so far
             out.append(
                 Position(
                     ticket=r.ticket, symbol=r.symbol, side=r.side, volume=r.volume, price_open=r.price_open, price_current=cur,
-                    sl=r.sl, tp=r.tp, profit=round(self._money(info, r.side, r.price_open, cur, r.volume), 2),
+                    sl=r.sl, tp=r.tp, profit=round(self._money(info, r.side, r.price_open, cur, r.volume) + swap, 2),
                     magic=r.magic, time=r.time, comment=r.comment,
                 )
             )

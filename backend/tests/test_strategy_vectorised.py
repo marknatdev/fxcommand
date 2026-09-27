@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from fxcommand.broker.sim import SimBroker
+from fxcommand.broker.sim import LEGACY_SYMBOLS, SimBroker
 from fxcommand.broker.types import Timeframe
 from fxcommand.strategies import STRATEGIES
 from fxcommand.strategies.base import WARMUP_BARS
@@ -19,7 +19,7 @@ GOLDEN = json.loads((Path(__file__).parent / "fixtures" / "golden_signals.json")
 
 @pytest.fixture(scope="module")
 def series():
-    sim = SimBroker(seed=5, start=MON_08, history_days=10)
+    sim = SimBroker(seed=5, start=MON_08, history_days=10, symbols=LEGACY_SYMBOLS)
     sim.step(600)
     return {
         ("EURUSD", "M1"): sim.closed_bars("EURUSD", Timeframe.M1, 1200).reset_index(drop=True),

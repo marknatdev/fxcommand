@@ -35,6 +35,14 @@ class AssignmentIn(BaseModel):
         return v.strip()
 
 
+class CostOverrideIn(BaseModel):
+    """Start this Arena of the Session even though its Cost Check fails (journaled)."""
+
+    symbol: str = Field(min_length=1, max_length=40)
+    timeframe: Timeframe
+    reason: str = Field("", max_length=300)
+
+
 class SessionIn(BaseModel):
     name: str = Field(min_length=1, max_length=60)
     notes: str = ""
@@ -47,6 +55,8 @@ class SessionIn(BaseModel):
     weekend_close: bool = False
     weekend_close_time: str = "22:30"  # Friday, server time
     confirm_login: int | None = None  # typed account number: switching to Broker execution on a LIVE account
+    # Cost Check overrides: None leaves them unchanged; a list is the full set (others are removed)
+    cost_overrides: list[CostOverrideIn] | None = None
 
     @field_validator("weekend_close_time")
     @classmethod

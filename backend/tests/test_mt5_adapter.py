@@ -5,6 +5,7 @@ real order — this is how the order paths are verified without ever trading (AD
 import pytest
 
 from fxcommand.broker import mt5 as mt5_module
+from fxcommand.broker import Timeframe
 from fxcommand.broker.mt5 import Mt5Broker
 
 from .fake_mt5 import FakeMt5
@@ -51,6 +52,7 @@ def test_account_terminal_and_symbol_facts(broker, fake):
     assert t.connected and t.algo_trading and t.ping_ms == 42.0 and t.build == 6182
     info = broker.symbol_info("EURUSD")
     assert info.trade_mode == "full" and info.freeze_level == 3
+    assert (info.swap_long, info.swap_short, info.swap_mode, info.swap_rollover3days) == (-7.5, 1.9, 1, 3)
     fake.account.margin_mode = 0
     assert broker.account().margin_mode == "netting"
     fake.term.trade_allowed = False
@@ -118,3 +120,10 @@ def test_close_and_history(broker, fake):
 def test_every_order_carries_a_stop(broker, fake):
     r = broker.market_order("EURUSD", "long", 0.1, 0.0, 0.0, magic=1)
     assert not r.ok and not fake.requests
+
+
+def test_closed_bars_pages_back_through_history(broker, fake):
+    newest = broker.closed_bars("EURUSD", Timeframe.H1, 3)
+    older = broker.closed_bars("EURUSD", Timeframe.H1, 3, offset=3)
+    assert [c[2:] for c in fake.rate_calls[-2:]] == [(1, 3), (4, 3)]  # start_pos 1 skips the forming bar
+    assert int(older["time"].iloc[-1]) < int(newest["time"].iloc[0])

@@ -91,6 +91,7 @@ export interface SessionSummary {
   name: string;
   status: SessionStatus;
   magic: number;
+  magics: number[]; // one per Assignment (ADR 0009); magic is the first one
   open_positions: number;
   day_pnl: number;
   stop_reason: string;
@@ -218,6 +219,7 @@ export interface Session {
   name: string;
   status: SessionStatus;
   magic: number;
+  magics?: number[]; // one per Assignment (ADR 0009); magic is the first one
   auto_resume: boolean;
   window: TradingWindow;
   window_text: string;
@@ -232,6 +234,8 @@ export interface Session {
   login: number | null;
   weekend_close: boolean;
   weekend_close_time: string;
+  weekend_close_warning?: boolean;
+  cost_overrides?: CostOverride[];
   assignments: Assignment[];
   open_positions: number;
   day_pnl: number;
@@ -264,6 +268,14 @@ export interface SessionInput {
   weekend_close: boolean;
   weekend_close_time: string;
   confirm_login?: number | null;
+  cost_overrides?: { symbol: string; timeframe: Timeframe; reason: string }[] | null;
+}
+
+export interface CostOverride {
+  symbol: string;
+  timeframe: Timeframe;
+  reason: string;
+  set_ts: number;
 }
 
 export interface StrategyParam {
@@ -283,8 +295,10 @@ export interface StrategyInfo {
   description: string;
   params: StrategyParam[];
   stats: Stats;
+  stats_paper: Stats;
   assignments: number;
   by_symbol: Record<string, Stats>;
+  by_symbol_paper: Record<string, Stats>;
 }
 
 export interface RiskProfile {
@@ -365,6 +379,9 @@ export interface Overview extends Snapshot {
   recent: JournalEntry[];
   today: Stats;
   all_time: Stats;
+  today_paper: Stats;
+  all_time_paper: Stats;
+  paper_account: PaperAccount;
 }
 
 export interface AppSettings {
@@ -521,4 +538,149 @@ export interface ArenaDetail extends ArenaT {
   history: { id: number; version: number; kind: string; reason: string; label: string; candidate_key: string; server_ts: number; session_id: number }[];
   runs: OptimizerRunT[];
   signals: { id: number; ts: number; side: string; p_win: number | null; filter_mode: string; decision: string; ticket: number | null; r: number | null }[];
+}
+
+/* ------------------------------------------------ better strategies (spec v5) */
+export interface CostCheckRow {
+  symbol: string;
+  timeframe: Timeframe;
+  strategy: string;
+  cost_r?: number;
+  swap_r?: number;
+  threshold?: number;
+  blocked?: boolean;
+  reason?: string;
+  spread?: number | null;
+  stop?: number;
+  override: boolean;
+  allowed: boolean;
+  error?: string;
+}
+
+export interface CostCheckResult {
+  threshold: number;
+  assignments: CostCheckRow[];
+}
+
+export interface EvidencePeriod {
+  label: string;
+  from_ts: number;
+  to_ts: number;
+  n: number;
+  mean: number;
+}
+
+export interface Evidence {
+  id: number;
+  key: string;
+  symbol: string;
+  timeframe: Timeframe;
+  strategy: string;
+  label: string;
+  candidate_key: string;
+  params: Record<string, number | boolean>;
+  exit_rules: Record<string, number | boolean>;
+  weekend_close: string;
+  status: "queued" | "running" | "done" | "incomplete" | "failed";
+  trigger: string;
+  requested_wall: number;
+  finished_wall: number | null;
+  run_ts: number | null;
+  bars: number;
+  first_ts: number | null;
+  last_ts: number | null;
+  trades: number;
+  mean_r: number;
+  sqn: number;
+  win_rate: number;
+  total_r: number;
+  max_dd_r: number;
+  periods: EvidencePeriod[];
+  note: string;
+}
+
+export interface EvidenceBadge {
+  status: "match" | "running" | "mismatch" | "none";
+  key: string;
+  evidence: Evidence | null;
+  without_weekend_close?: EvidenceBadge;
+}
+
+export interface EvidenceRequest {
+  symbol: string;
+  timeframe: Timeframe;
+  strategy: string;
+  params?: Record<string, number | boolean>;
+  session_id?: number | null;
+  risk_profile_id?: number | null;
+  reverse_on_opposite?: boolean;
+  window?: TradingWindow | null;
+  weekend_close?: boolean;
+  weekend_close_time?: string;
+}
+
+export interface PaperAccount {
+  start_balance: number;
+  epoch: number;
+  currency: string;
+  balance: number;
+  equity: number;
+  open_pnl: number;
+  realized: number;
+  day_start_equity: number;
+  day_pnl: number;
+  open_positions: number;
+  active_sessions: string[];
+}
+
+export interface ScorecardRow {
+  symbol: string;
+  timeframe: Timeframe;
+  strategy: string;
+  session: { id: number; name: string; status: SessionStatus; execution: Execution };
+  evidence: EvidenceBadge;
+  paper: { trades: number; mean_r: number; total_r: number; epoch: number };
+  band: [number, number] | null;
+  band_level: number;
+  verdict: string;
+  min_lot_risk_pct: number | null;
+  stop: number | null;
+  note: string;
+}
+
+export interface ResearchTrial {
+  id: number;
+  symbol: string;
+  timeframe: Timeframe;
+  hypothesis: string;
+  strategy: string;
+  params: Record<string, number | boolean>;
+  params_hash: string;
+  data_from: number | null;
+  data_to: number | null;
+  result: Record<string, unknown>;
+  holdout_used: boolean;
+  status: string;
+  source: string;
+  ts: number;
+}
+
+export interface TrialsView {
+  arenas: { symbol: string; timeframe: Timeframe; trials: number; holdout_uses: number; holdout_from: number }[];
+  trials: ResearchTrial[];
+}
+
+export interface Review {
+  id: number;
+  title: string;
+  summary: string;
+  report?: string;
+  period_from: number | null;
+  period_to: number | null;
+  arenas: string[];
+  finalists: Record<string, unknown>[];
+  actions: Record<string, unknown>[];
+  ledger: Record<string, { trials: number; holdout_uses: number }>;
+  ts: number;
+  wall: number;
 }

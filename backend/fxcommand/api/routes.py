@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from ..broker import BrokerError, Timeframe
-from ..engine import DomainError, SessionIn, trade_stats
+from ..engine import AssignmentIn, DomainError, SessionIn, trade_stats
 from ..journal import journal_dict
 from ..notify import mask, telegram_from_settings
 from ..risk import RiskLimits, TradingWindow
@@ -41,16 +41,21 @@ def session_dict(r, s: SessionRow, with_detail: bool = False) -> dict:
     trades = store.trades(session_id=s.id, limit=5000)
     d = {
         **s.model_dump(),
+        "magics": snap.get("magics", [s.magic]),
+        # Weekend Close cuts the tested edge of trades held for days (D6): the editor warns with this
+        "weekend_close_warning": bool(s.weekend_close and any(a.timeframe in ("H4", "D1") for a in assigns)),
         "window_text": TradingWindow.from_dict(s.window).describe(),
+        "cost_overrides": [{"symbol": o.symbol, "timeframe": o.timeframe, "reason": o.reason, "set_ts": o.set_ts} for o in store.cost_overrides(s.id)],
         "assignments": [
             {**a.model_dump(), "risk_profile_name": profiles.get(a.risk_profile_id), "state": states.get(a.id)} for a in assigns
         ],
         "open_positions": snap.get("open_positions", 0),
         "day_pnl": snap.get("day_pnl", 0.0),
-        "stats": trade_stats(trades),
+        # the Session's current Execution Mode only: a Session switched between Paper and Broker never mixes them (D16)
+        "stats": trade_stats(t for t in trades if t.paper == (s.execution == "paper")),
     }
     if with_detail:
-        d["positions"] = [p for p in mgr.positions_view() if p["magic"] == s.magic]
+        d["positions"] = [p for p in mgr.positions_view() if p["session_id"] == s.id]
         d["trades"] = [trade_dict(t) for t in trades[:300]]
         d["journal"] = [journal_dict(j) for j in store.journal(session_id=s.id, limit=150)]
         d["equity"] = _pnl_curve(trades)
@@ -79,13 +84,19 @@ async def overview(request: Request):
     snap = r.manager.snapshot()
     today = r.store.trades(since=snap["day_start"], limit=5000)
     closed_today = [t for t in today if t.status == "closed"]
+    all_trades = r.store.trades(limit=100_000)
+    epoch = r.store.paper_epoch()
     return {
         **snap,
         "equity_curve": [{"ts": e.ts, "equity": e.equity, "balance": e.balance} for e in r.store.equity_curve(limit=1000)],
         "alerts": [journal_dict(j) for j in r.store.journal(alerts_only=True, limit=20)],
         "recent": [journal_dict(j) for j in r.store.journal(limit=15)],
-        "today": trade_stats(closed_today),
-        "all_time": trade_stats(r.store.trades(limit=100_000)),
+        # the real Account and the Paper Account are never mixed (D16); Paper = the current epoch
+        "today": trade_stats(t for t in closed_today if not t.paper),
+        "all_time": trade_stats(t for t in all_trades if not t.paper),
+        "today_paper": trade_stats(t for t in closed_today if t.paper and t.paper_epoch == epoch),
+        "all_time_paper": trade_stats(t for t in all_trades if t.paper and t.paper_epoch == epoch),
+        "paper_account": r.manager.paper_account_view(),
     }
 
 
@@ -220,18 +231,20 @@ async def bars(request: Request, symbol: str, timeframe: Timeframe = Timeframe.M
 async def strategies(request: Request):
     r = rt(request)
     trades = r.store.trades(limit=100_000)
+    epoch = r.store.paper_epoch()
     assigns = r.store.all_assignments()
     out = []
     for key, s in STRATEGIES.items():
-        mine = [t for t in trades if t.strategy == key]
+        mine = [t for t in trades if t.strategy == key and not t.paper]
+        paper = [t for t in trades if t.strategy == key and t.paper and t.paper_epoch == epoch]
         out.append(
             {
                 **s.describe(),
-                "stats": trade_stats(mine),
+                "stats": trade_stats(mine),  # the real Account only (D16)
+                "stats_paper": trade_stats(paper),  # the Paper Account, current epoch
                 "assignments": sum(1 for a in assigns if a.strategy == key),
-                "by_symbol": {
-                    sym: trade_stats([t for t in mine if t.symbol == sym]) for sym in sorted({t.symbol for t in mine})
-                },
+                "by_symbol": {sym: trade_stats([t for t in mine if t.symbol == sym]) for sym in sorted({t.symbol for t in mine})},
+                "by_symbol_paper": {sym: trade_stats([t for t in paper if t.symbol == sym]) for sym in sorted({t.symbol for t in paper})},
             }
         )
     return out
@@ -373,16 +386,21 @@ async def trades(
     status: str | None = None,
     since: int | None = None,
     until: int | None = None,
+    account: Literal["real", "paper"] | None = None,
     limit: int = Query(1000, ge=1, le=20_000),
 ):
     r = rt(request)
     rows = r.store.trades(session_id=session_id, symbol=symbol, status=status, since=since, until=until, limit=limit)
     if strategy:
         rows = [t for t in rows if t.strategy == strategy]
+    if account is not None:
+        rows = [t for t in rows if t.paper == (account == "paper")]
     names = {s.id: s.name for s in r.store.list_sessions()}
     return {
         "trades": [{**trade_dict(t), "session_name": names.get(t.session_id)} for t in rows],
         "stats": trade_stats(rows),
+        "stats_real": trade_stats(t for t in rows if not t.paper),
+        "stats_paper": trade_stats(t for t in rows if t.paper),
         "curve": _pnl_curve(rows),
     }
 
@@ -478,6 +496,7 @@ class SettingsIn(BaseModel):
     close_on_auto_stop: bool | None = None
     equity_snapshot_seconds: int | None = Field(None, ge=60, le=86400)
     default_window: dict[str, Any] | None = None
+    cost_check_max_r: float | None = Field(None, ge=0.01, le=10)
 
 
 def _notify_view(r) -> dict:
@@ -595,14 +614,14 @@ async def learning_promote(request: Request, challenger_id: int, body: PromoteIn
 
 
 @router.post("/learning/slots/{session_id}/{symbol}/rollback")
-async def learning_rollback(request: Request, session_id: int, symbol: str):
-    return rt(request).learning.rollback(session_id, symbol).model_dump()
+async def learning_rollback(request: Request, session_id: int, symbol: str, timeframe: str | None = None):
+    return rt(request).learning.rollback(session_id, symbol, timeframe).model_dump()
 
 
 @router.put("/learning/slots/{session_id}/{symbol}/auto-promote")
-async def learning_auto_promote(request: Request, session_id: int, symbol: str, body: AutoPromoteIn):
+async def learning_auto_promote(request: Request, session_id: int, symbol: str, body: AutoPromoteIn, timeframe: str | None = None):
     r = rt(request)
-    return r.learning.set_auto_promote(session_id, symbol, body.enabled, _is_live(r))
+    return r.learning.set_auto_promote(session_id, symbol, body.enabled, _is_live(r), timeframe)
 
 
 @router.delete("/learning/pending/{pending_id}", status_code=204)
@@ -612,6 +631,220 @@ async def learning_cancel_pending(request: Request, pending_id: int):
     if row is None:
         raise DomainError("not_found", f"no pending change {pending_id}", 404)
     service.cancel(row, "operator")
+
+
+# ============================================================ cost check
+@router.get("/sessions/{session_id}/cost-check")
+async def session_cost_check(request: Request, session_id: int):
+    """Each Assignment's cost (spread + slippage) in R of its typical stop, and whether it may start.
+    The override is part of the Session update payload (``cost_overrides``)."""
+    r = rt(request)
+    s = r.store.get_session(session_id)
+    return {"threshold": float(r.store.app_settings()["cost_check_max_r"]), "assignments": await r.manager.cost_check(s)}
+
+
+class CostPreviewIn(BaseModel):
+    session_id: int | None = None
+    assignments: list[AssignmentIn] = Field(min_length=1, max_length=50)
+
+
+@router.post("/cost-check")
+async def cost_check_preview(request: Request, body: CostPreviewIn):
+    """The Cost Check for an editor's unsaved Assignments (read-only)."""
+    r = rt(request)
+    return {"threshold": float(r.store.app_settings()["cost_check_max_r"]), "assignments": await r.manager.cost_check_preview(body.session_id, body.assignments)}
+
+
+# ============================================================== evidence
+class EvidenceIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=40)
+    timeframe: Timeframe
+    strategy: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    session_id: int | None = None  # its Trading Window and Weekend Close
+    risk_profile_id: int | None = None  # its exit rules (default: no breakeven, no trailing stop)
+    reverse_on_opposite: bool = True
+    window: dict[str, Any] | None = None
+    weekend_close: bool = False
+    weekend_close_time: str = "22:30"
+
+
+def _evidence_spec(r, body: EvidenceIn):
+    return r.learning.spec_from(
+        body.symbol, body.timeframe.value, body.strategy, body.params, body.session_id, body.risk_profile_id,
+        body.reverse_on_opposite, body.window, body.weekend_close_time if body.weekend_close else None,
+    )
+
+
+@router.get("/evidence")
+async def evidence_list(request: Request, symbol: str | None = None, timeframe: Timeframe | None = None, strategy: str | None = None):
+    return rt(request).learning.evidence(symbol, timeframe.value if timeframe else None, strategy)
+
+
+@router.get("/evidence/{evidence_id}")
+async def evidence_get(request: Request, evidence_id: int):
+    from ..learning.evidence import summary
+
+    row = rt(request).learning.repo.evidence_row(evidence_id)
+    if row is None:
+        raise DomainError("not_found", f"evidence {evidence_id} not found", 404)
+    return summary(row)
+
+
+@router.post("/evidence/match")
+async def evidence_match(request: Request, body: EvidenceIn):
+    """The editor's badge for settings that may not be saved yet (read-only)."""
+    r = rt(request)
+    spec = _evidence_spec(r, body)
+    out = r.learning.evidence_for(spec)
+    if spec.weekend_close and body.timeframe.value in ("H4", "D1"):
+        out["without_weekend_close"] = r.learning.evidence_for(spec.with_weekend_close(None))
+    return out
+
+
+@router.post("/evidence/run", status_code=202)
+async def evidence_run(request: Request, body: EvidenceIn):
+    """Queue an Evidence Run (dashboard only: not exposed to MCP)."""
+    r = rt(request)
+    return r.learning.request_evidence(_evidence_spec(r, body))
+
+
+@router.get("/sessions/{session_id}/evidence")
+async def session_evidence(request: Request, session_id: int):
+    r = rt(request)
+    s = r.store.get_session(session_id)
+    return [
+        {"assignment_id": a.id, "symbol": a.symbol, "timeframe": a.timeframe, "strategy": a.strategy, **r.learning.assignment_evidence(s, a)}
+        for a in r.store.assignments(session_id)
+    ]
+
+
+@router.get("/scorecard")
+async def scorecard(request: Request):
+    return await rt(request).learning.scorecard()
+
+
+# ========================================================== paper account
+class PaperAccountIn(BaseModel):
+    start_balance: float = Field(gt=0, le=10_000_000)
+
+
+class PaperResetIn(BaseModel):
+    confirm: str
+    start_balance: float | None = Field(None, gt=0, le=10_000_000)
+
+
+@router.get("/paper-account")
+async def paper_account(request: Request):
+    return rt(request).manager.paper_account_view()
+
+
+@router.put("/paper-account")
+async def put_paper_account(request: Request, body: PaperAccountIn):
+    r = rt(request)
+    await r.manager.set_paper_start_balance(body.start_balance)
+    return r.manager.paper_account_view()
+
+
+@router.post("/paper-account/reset")
+async def reset_paper_account(request: Request, body: PaperResetIn):
+    r = rt(request)
+    await r.manager.reset_paper_account(body.confirm, body.start_balance)
+    return r.manager.paper_account_view()
+
+
+# ======================================================= strategy review
+class TrialIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=40)
+    timeframe: Timeframe
+    hypothesis: str = Field(min_length=1, max_length=2000)
+    strategy: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    data_from: int
+    data_to: int
+    result: dict[str, Any] = Field(default_factory=dict)
+    source: Literal["cli", "reviewer"] = "cli"
+
+
+class HoldoutIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=40)
+    timeframe: Timeframe
+    strategy: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    hypothesis: str = Field(min_length=1, max_length=2000)
+
+
+class ReviewIn(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    summary: str = Field(min_length=1, max_length=1000)
+    report: str = Field("", max_length=200_000)
+    arenas: list[str] = Field(default_factory=list)
+    finalists: list[dict[str, Any]] = Field(default_factory=list)
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    period_from: int | None = None
+    period_to: int | None = None
+
+
+class ChallengerIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=40)
+    timeframe: Timeframe
+    strategy: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    note: str = Field("", max_length=500)
+
+
+@router.get("/research/snapshot")
+async def research_snapshot(
+    request: Request, symbol: str, timeframe: Timeframe, tail: int | None = Query(None, ge=0, le=1_000_000), arena_timeframe: Timeframe | None = None
+):
+    """Closed bars of an Arena before its sealed holdout (read-only), with today's costs. With
+    ``arena_timeframe`` the bars are another Arena's context and end at that Arena's holdout."""
+    return await rt(request).learning.snapshot(symbol, timeframe.value, tail, arena_timeframe.value if arena_timeframe else None)
+
+
+@router.get("/research/trials")
+async def research_trials(request: Request, symbol: str | None = None, timeframe: Timeframe | None = None, limit: int = Query(100, ge=1, le=5000)):
+    service = rt(request).learning
+    rows = service.repo.trials(symbol, timeframe.value if timeframe else None, limit)
+    return {"arenas": service.trial_summary(), "trials": [t.model_dump() for t in rows]}
+
+
+@router.post("/research/trials", status_code=201)
+async def research_add_trial(request: Request, body: TrialIn):
+    return await rt(request).learning.record_trial(
+        body.symbol, body.timeframe.value, body.hypothesis, body.data_from, body.data_to, body.result, body.strategy, body.params, body.source
+    )
+
+
+@router.post("/research/holdout")
+async def research_holdout(request: Request, body: HoldoutIn):
+    """Score a finalist once on the sealed holdout; recorded in the ledger; a failure is final."""
+    return await rt(request).learning.evaluate_holdout(body.symbol, body.timeframe.value, body.strategy, body.params, body.hypothesis)
+
+
+@router.get("/reviews")
+async def reviews(request: Request, limit: int = Query(50, ge=1, le=500)):
+    return [rv.model_dump(exclude={"report"}) for rv in rt(request).learning.repo.reviews(limit)]
+
+
+@router.get("/reviews/{review_id}")
+async def review(request: Request, review_id: int):
+    row = rt(request).learning.repo.review(review_id)
+    if row is None:
+        raise DomainError("not_found", f"review {review_id} not found", 404)
+    return row.model_dump()
+
+
+@router.post("/reviews", status_code=201)
+async def add_review(request: Request, body: ReviewIn):
+    return rt(request).learning.add_review(**body.model_dump())
+
+
+@router.post("/learning/challengers", status_code=202)
+async def submit_challenger(request: Request, body: ChallengerIn):
+    """A reviewer's Candidate for an Arena: judged by walk-forward, then Shadow Trades under the same
+    Guardrails. Never promotes and never touches a Session."""
+    return rt(request).learning.submit_challenger(body.symbol, body.timeframe.value, body.strategy, body.params, body.note)
 
 
 # ======================================================== sim test controls

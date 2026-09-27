@@ -4,6 +4,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { api } from "../api/client";
 import { ModeBadge } from "../components/Layout";
+import { PaperAccountCard, ScorecardCard } from "../components/paper";
 import { PreflightPanel } from "../components/Preflight";
 import { Badge, Button, Card, ConfirmDialog, Dialog, ErrorBox, Field, Kpi, Loading, PageHeader, Switch } from "../components/ui";
 import { money, serverTime } from "../lib/format";
@@ -116,6 +117,9 @@ export default function Account() {
           )}
         </Card>
       </div>
+
+      <PaperAccountCard />
+      <ScorecardCard />
 
       <Card title="Pre-flight check" testId="preflight-card">
         <p className="mb-3 text-sm text-dim">

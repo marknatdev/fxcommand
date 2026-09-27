@@ -19,6 +19,7 @@ if (!process.env.FXC_E2E_DB) {
 
 export default defineConfig({
   testDir: "./tests",
+  globalSetup: "./global-setup.ts",
   fullyParallel: false,
   workers: 1, // one backend, one engine: tests share its state and run in file order
   retries: 0,
