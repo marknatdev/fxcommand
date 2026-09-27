@@ -178,3 +178,23 @@ def test_context_ends_at_the_arenas_holdout(client):
 
     bars = pd.DataFrame({"time": [0, 900, 1800, 2700]})
     assert list(cli.context_until(bars, "M15", 2700)["time"]) == [0, 900, 1800]  # a bar counts once it has closed
+
+
+def test_research_is_judged_from_2010():
+    """GOLD H4 history reaches 2001, but the research periods start in 2010: older bars only warm up."""
+    import numpy as np
+    import pandas as pd
+
+    from fxcommand.learning.research import RESEARCH_START
+
+    t0 = RESEARCH_START - 400 * 86400  # starts in 2008
+    n = 3000
+    t = t0 + np.arange(n) * 86400
+    rng = np.random.default_rng(3)
+    close = 1000 + np.cumsum(rng.normal(0, 5, n))
+    bars = pd.DataFrame({"time": t, "open": close, "high": close + 3, "low": close - 3, "close": close, "volume": 1.0})
+    cand = Candidate.of("ema_cross", {"fast": 3, "slow": 8, "atr_period": 5, "sl_atr": 2.0, "tp_atr": 4.0})
+    r = evaluate_hypothesis(bars, cand, None, CostModel(spread=0.5), ExitRules(), EntryGate(None, 86400), None, trials=1)
+    assert r["first_ts"] == RESEARCH_START
+    assert r["candidate"]["periods"][0]["label"] == "2010–17" and r["candidate"]["periods"][0]["from_ts"] == RESEARCH_START
+    assert r["candidate"]["trades"] == sum(p["n"] for p in r["candidate"]["periods"])  # nothing from 2008–09 counts

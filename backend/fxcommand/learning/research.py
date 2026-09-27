@@ -83,6 +83,9 @@ def holdout_job(
 
 # ------------------------------------------------------------ research evaluation (the CLI)
 MIN_RESEARCH_TRADES = 30
+# Research is judged from 2010 (the spec's research periods 2010–17, 2018–21, 2022–26): older history
+# (GOLD H4 reaches 2001) only warms indicators up, so a hypothesis cannot pass on years no period checks
+RESEARCH_START = calendar.timegm((2010, 1, 1, 0, 0, 0))
 RESEARCH_NEIGHBOURS = 4
 NEIGHBOUR_SCALE = 0.12  # the Optimizer's own neighbourhood (optimizer._judge_robustness)
 
@@ -90,6 +93,7 @@ NEIGHBOUR_SCALE = 0.12  # the Optimizer's own neighbourhood (optimizer._judge_ro
 def _summary(trades, first: int, last: int) -> dict:
     from .evidence import periods
 
+    trades = [t for t in trades if t.signal_time >= first]  # the bars before ``first`` are warm-up only
     rs = np.array([t.r for t in trades], dtype=float)
     close = np.array([t.close_time for t in trades], dtype=np.int64)
     st = r_stats(rs)
@@ -119,11 +123,12 @@ def evaluate_hypothesis(
     - an SQN above max(Champion's, 0) plus the selection penalty for ``trials`` ledger trials;
     - every neighbouring parameter set (the Optimizer's neighbourhood) still positive.
 
+    Only trades signalled from ``RESEARCH_START`` (2010) count; earlier bars warm indicators up.
     Win rate is reported, never optimised (D48)."""
     from .objective import deflation
     from .candidate import perturb
 
-    first, last = int(bars["time"].iloc[0]), int(bars["time"].iloc[-1])
+    first, last = max(int(bars["time"].iloc[0]), RESEARCH_START), int(bars["time"].iloc[-1])
     run = lambda c: _summary(backtest(bars, c, costs, rules, gate, weekend=weekend), first, last)  # noqa: E731
     cand = run(candidate)
     champ = run(champion) if champion is not None else None
