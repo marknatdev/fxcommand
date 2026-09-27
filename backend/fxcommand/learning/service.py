@@ -310,13 +310,16 @@ class LearningService:
         note = f"P(win) {p:.2f} < {state.threshold:.2f}" if blocked and p is not None else ""
         return Screen(not blocked, p, state.mode, rec.id, note)
 
-    def signal_outcome(self, record_id: int | None, ticket: int | None = None, rejected: bool = False) -> None:
+    def signal_outcome(
+        self, record_id: int | None, ticket: int | None = None, rejected: bool = False,
+        fill_delay_s: int | None = None, fill_spread_points: float | None = None,
+    ) -> None:
         if record_id is None:
             return
         if rejected:
             self.repo.update_signal(record_id, decision="rejected")
         elif ticket is not None:
-            self.repo.update_signal(record_id, ticket=ticket)
+            self.repo.update_signal(record_id, ticket=ticket, fill_delay_s=fill_delay_s, fill_spread_points=fill_spread_points)
 
     def on_live_close(self, trade: TradeRow, s: SessionRow | None) -> None:
         rec = self.repo.signal_by_ticket(trade.ticket)

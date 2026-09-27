@@ -414,3 +414,14 @@ async def test_auto_rollback_applies_on_a_live_account(tmp_path):
     assert h.assignment(s).strategy == "ema_cross"
     assert h.L.repo.versions(s.id, "EURUSD")[-1].kind == "auto_rollback"
     await h.close()
+
+
+async def test_an_entry_at_the_bar_close_records_a_short_fill_delay_and_its_spread(lh):
+    s = await lh.session("Fill")
+    await lh.mgr.start(s.id)
+    for _ in range(80):
+        await lh.bars(1)
+        if lh.store.trades(session_id=s.id):
+            break
+    [r] = [x for x in lh.L.repo.signals("EURUSD", "M1", limit=50) if x.ticket is not None][:1]
+    assert 0 <= r.fill_delay_s <= 60 and r.fill_spread_points > 0  # sent right after the bar closed

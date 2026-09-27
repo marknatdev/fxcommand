@@ -221,7 +221,10 @@ function ArenaDetails({ arena }: { arena: ArenaT }) {
             {d.signals.slice(0, 24).map((s) => (
               <span
                 key={s.id}
-                title={`${shortTime(s.ts)} ${s.side} P(win) ${s.p_win?.toFixed(2) ?? "—"} (${s.filter_mode})${s.r !== null ? ` → ${r2(s.r)}R` : ""}`}
+                title={`${shortTime(s.ts)} ${s.side} P(win) ${s.p_win?.toFixed(2) ?? "—"} (${s.filter_mode})${s.r !== null ? ` → ${r2(s.r)}R` : ""}${
+                  s.fill_delay_s != null ? ` · filled ${fillDelay(s.fill_delay_s)} after the bar closed at ${s.fill_spread_points ?? "—"} points spread` : ""
+                }`}
+                data-testid="signal-chip"
                 className={cn(
                   "rounded border px-1.5 py-0.5 text-[10px] num",
                   s.decision === "blocked" ? "border-warn/40 text-warn" : s.decision === "rejected" ? "border-line-2 text-faint" : (s.r ?? 0) > 0 ? "border-up/40 text-up" : "border-line-2 text-dim",
@@ -406,6 +409,9 @@ export function ArenaCard({ arena, liveAccount }: { arena: ArenaT; liveAccount: 
     </Card>
   );
 }
+
+/** A fill delay for people: "4 s", "3 min", "1 h 05". */
+const fillDelay = (secs: number) => (secs < 60 ? `${secs} s` : secs < 3600 ? `${Math.round(secs / 60)} min` : `${Math.floor(secs / 3600)} h ${String(Math.round((secs % 3600) / 60)).padStart(2, "0")}`);
 
 export default function Learning() {
   const qc = useQueryClient();

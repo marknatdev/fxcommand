@@ -537,7 +537,7 @@ export interface ArenaDetail extends ArenaT {
   curves: Record<string, { ts: number; r: number }[]>;
   history: { id: number; version: number; kind: string; reason: string; label: string; candidate_key: string; server_ts: number; session_id: number }[];
   runs: OptimizerRunT[];
-  signals: { id: number; ts: number; side: string; p_win: number | null; filter_mode: string; decision: string; ticket: number | null; r: number | null }[];
+  signals: { id: number; ts: number; side: string; p_win: number | null; filter_mode: string; decision: string; ticket: number | null; r: number | null; fill_delay_s?: number | null; fill_spread_points?: number | null }[];
 }
 
 /* ------------------------------------------------ better strategies (spec v5) */

@@ -1190,6 +1190,7 @@ class SessionManager:
         window = TradingWindow.from_dict(s.window)
         comment = f"fxc s{s.id} {a.strategy}"
         kill_seq = self._kill_seq
+        sent: dict = {}  # the tick the order went out at (fill spread, D32)
 
         def gate_and_send(b):
             # ...and the market-dependent part runs as ONE broker-thread call, so the tick the
@@ -1237,6 +1238,7 @@ class SessionManager:
                     margin_rej = check_margin(b.margin_required(sym, side, decision.volume), acct)
                     if margin_rej is not None:
                         return margin_rej, None, acct, positions, notes
+                sent.update(spread_points=tick.spread_points, time=tick.time)
                 res = b.market_order(sym, side, decision.volume, decision.sl, decision.tp, a.magic, comment)
                 if res.ok or res.uncertain or attempt == 2 or res.retcode not in RETRY_ONCE:
                     break
@@ -1311,7 +1313,13 @@ class SessionManager:
                 paper_epoch=self.store.paper_epoch() if paper else 0,
             )
         )
-        self._learn(lambda L: L.signal_outcome(record_id, ticket=ticket))
+        # fill quality (D32): from the Signal bar's close to the fill, and the spread the order was sent at
+        filled_at = pos.time if pos and pos.time else self.now
+        delay = max(0, int(filled_at - (sig.bar_time + Timeframe(a.timeframe).seconds))) if sig.bar_time else None
+        spread_pts = sent.get("spread_points")
+        self._learn(lambda L: L.signal_outcome(record_id, ticket=ticket, fill_delay_s=delay, fill_spread_points=spread_pts))
+        if delay is not None and delay >= 60:
+            notes.append(f"filled {delay // 60} min after the signal bar closed")
         tag = "PAPER " if paper else ""
         tail = f" — {'; '.join(notes)}" if notes else ""
         self._j(
@@ -1319,7 +1327,8 @@ class SessionManager:
             f"{tag}Opened {side} {volume} {sym} #{ticket} @ {price} SL {decision.sl} TP {decision.tp or '—'} (risk {risk_amount:.2f} {acct.currency}){tail}",
             s,
             sym,
-            data={**decision.to_dict(), "ticket": ticket, "price": price, "volume": volume, "paper": paper, "notes": notes},
+            data={**decision.to_dict(), "ticket": ticket, "price": price, "volume": volume, "paper": paper, "notes": notes,
+                  "fill_delay_s": delay, "fill_spread_points": spread_pts},
         )
         return "filled", ""
 

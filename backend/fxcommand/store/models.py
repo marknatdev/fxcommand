@@ -329,6 +329,10 @@ class SignalRecordRow(SQLModel, table=True):
     decision: str = "taken"  # taken | blocked | rejected
     ticket: Optional[int] = Field(default=None, index=True)
     r: Optional[float] = None
+    # how the entry was filled (spec D32): seconds from the Signal bar's close to the fill, and the spread
+    # (points) of the tick the order was sent at — a Pending Entry sent after the daily break shows its wait here
+    fill_delay_s: Optional[int] = None
+    fill_spread_points: Optional[float] = None
 
 
 class PendingChangeRow(SQLModel, table=True):
