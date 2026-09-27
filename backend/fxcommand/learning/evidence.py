@@ -22,7 +22,7 @@ import pandas as pd
 
 from ..risk.window import TradingWindow, WeekendClose
 from .candidate import Candidate
-from .costs import COST_MODEL_VERSION, CostModel
+from .costs import COST_MODEL_VERSION, CostModel, rollover_nights
 from .objective import r_stats
 from .paper import EntryGate, ExitRules, backtest
 
@@ -161,7 +161,10 @@ def evidence_job(
     close_ts = np.array([t.close_time for t in trades], dtype=np.int64)
     st = r_stats(rs)
     first, last = (int(bars["time"].iloc[0]), int(bars["time"].iloc[-1])) if len(bars) else (0, 0)
+    nights = [rollover_nights(t.open_time, t.close_time, costs.triple_weekday) for t in trades]
     return {
+        "avg_nights": round(float(np.mean(nights)), 3) if trades else None,  # swap nights per trade (the Cost Check shows swap)
+        "long_share": round(sum(t.side == "long" for t in trades) / len(trades), 3) if trades else None,
         "bars": int(len(bars)),
         "first_ts": first,
         "last_ts": last,

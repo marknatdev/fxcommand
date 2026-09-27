@@ -31,6 +31,7 @@ from ..broker.types import AccountInfo
 from ..journal import EventBus, Journal
 from ..tasks import cancel_and_wait
 from ..risk import Exposure, GateInput, LiveCaps, Rejected, RiskLimits, TradingWindow, check, check_margin, manage
+from ..learning.costs import CostModel
 from ..risk.costcheck import CostEstimate, estimate_cost
 from ..risk.gate import MAX_QUOTE_AGE
 from ..risk.spreads import SpreadBook
@@ -498,14 +499,23 @@ class SessionManager:
             )
             spread = self.spreads.spread_for(a.symbol, tick, self.now)
             stop = float(strat.signals(bars, p)["sl_dist"].iloc[-1]) if len(bars) else 0.0
+            # swap is shown beside the cost, never blocks (D38): nights per trade from Evidence or Shadow Trades
+            hold = self._learn(lambda L, a=a, key=key, p=p: L.expected_hold(a.symbol, a.timeframe, key, p))
+            swap = 0.0
+            if hold:
+                cm = CostModel.from_symbol(info, spread=spread or 0.0)
+                long = hold["long_share"] if hold["long_share"] is not None else 1.0
+                per_night = long * cm.swap_per_night("long", tick.bid) + (1 - long) * cm.swap_per_night("short", tick.bid)
+                swap = per_night * hold["nights"]
             if spread is None:
                 est = CostEstimate(float("inf"), 0.0, threshold, True, "no typical spread known yet and the market is shut: start when it is open")
             else:
-                est = estimate_cost(spread, info.point, stop if stop == stop else 0.0, threshold)
+                est = estimate_cost(spread, info.point, stop if stop == stop else 0.0, threshold, swap=swap)
             override = self.store.cost_override(s.id, a.symbol, a.timeframe) if s is not None else None
             out.append({
                 "symbol": a.symbol, "timeframe": a.timeframe, "strategy": key, **est.to_dict(), "spread": spread, "stop": stop,
                 "override": override is not None, "allowed": not est.blocked or override is not None,
+                "swap_nights": hold["nights"] if hold else None, "swap_source": hold["source"] if hold else None,
             })
         return out
 

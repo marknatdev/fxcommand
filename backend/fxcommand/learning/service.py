@@ -984,6 +984,28 @@ class LearningService:
             })
         return out
 
+    def expected_hold(self, symbol: str, timeframe: str, strategy: str, params: dict | None) -> dict | None:
+        """How many swap nights a trade of this Candidate typically pays, and how many of its trades are
+        long: from its Evidence (the same Candidate, else the same Strategy on the Arena), else its closed
+        Shadow Trades. None while neither exists. Read by the Cost Check to show swap beside the cost."""
+        from .costs import rollover_nights
+
+        cand = Candidate.of(strategy, params)
+        rows = [r for r in self.repo.evidence_rows(symbol=symbol, timeframe=timeframe, status=("done", "incomplete"), limit=50)
+                if r.avg_nights is not None and r.trades]
+        same = [r for r in rows if r.candidate_key == cand.key]
+        other = [r for r in rows if r.strategy == strategy]
+        for pick, source in ((same, "Evidence"), (other, f"Evidence of another {get_strategy(strategy).title} parameter set")):
+            if pick:
+                return {"nights": pick[0].avg_nights, "long_share": pick[0].long_share, "trades": pick[0].trades, "source": source}
+        shadows = self.repo.shadow_closed(symbol, timeframe, cand.key, limit=500)
+        shadows = [t for t in shadows if t.close_ts]
+        if shadows:
+            nights = [rollover_nights(t.open_ts, t.close_ts) for t in shadows]
+            return {"nights": round(sum(nights) / len(nights), 3), "long_share": round(sum(t.side == "long" for t in shadows) / len(shadows), 3),
+                    "trades": len(shadows), "source": "Shadow Trades"}
+        return None
+
     @staticmethod
     def _verdict(matched: bool, rs: list, n: int, mean: float, rng) -> str:
         if not matched:

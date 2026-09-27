@@ -383,6 +383,8 @@ class EvidenceRow(SQLModel, table=True):
     max_dd_r: float = 0.0
     periods: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # [{label, from_ts, to_ts, n, mean}]
     rs: list[Any] = Field(default_factory=list, sa_column=Column(JSON))  # every trade's R (rounded), for the scorecard band
+    avg_nights: Optional[float] = None  # swap nights charged per trade (MT5 rollovers): the Cost Check's swap estimate
+    long_share: Optional[float] = None
     note: str = ""
 
 

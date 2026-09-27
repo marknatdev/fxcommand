@@ -321,3 +321,37 @@ def test_optimizer_runs_apply_the_sessions_weekend_close():
     off = optimize_job(*pickle.loads(pickle.dumps(args)))
     on = optimize_job(*pickle.loads(pickle.dumps(args[:-1] + ("22:30",))))
     assert off.champion.wf.to_dict() != on.champion.wf.to_dict()
+
+
+# ------------------------------------------------------------ swap beside the Cost Check
+async def test_the_cost_check_shows_swap_from_the_evidence_and_never_blocks_on_it(eh):
+    s = await eh.mgr.create_session(SessionIn(name="Swap", daily_loss_pct=90, assignments=[
+        AssignmentIn(symbol="GOLD", timeframe="H4", strategy="trend_breakout"), AssignmentIn(symbol="GOLD", timeframe="H1", strategy="session_drift")]))
+    before = {c["timeframe"]: c for c in await eh.mgr.cost_check(s)}
+    assert before["H4"]["swap_nights"] is None and before["H4"]["swap_r"] == 0.0  # nothing known yet
+    trend = await run(eh, ev.EvidenceSpec.of(*TREND))
+    drift = await run(eh, ev.EvidenceSpec.of("GOLD", "H1", "session_drift"))
+    assert trend.avg_nights > 1 and trend.long_share == 1.0  # long-only, held for days
+    assert drift.avg_nights == 0  # the Reopen trade is flat by 04:00: never pays swap
+    after = {c["timeframe"]: c for c in await eh.mgr.cost_check(s)}
+    h4, h1 = after["H4"], after["H1"]
+    info, tick = eh.sim.symbol_info("GOLD"), eh.sim.tick("GOLD")
+    per_night = CostModel.from_symbol(info, 0.0).swap_per_night("long", tick.bid)
+    assert per_night < 0 and h4["swap_r"] == pytest.approx(per_night * trend.avg_nights / h4["stop"], abs=1e-3)
+    assert h4["swap_source"] == "Evidence" and h4["swap_nights"] == trend.avg_nights
+    assert h4["cost_r"] == before["H4"]["cost_r"] and h4["allowed"] == before["H4"]["allowed"]  # swap never changes the verdict
+    assert h1["swap_r"] == 0.0 and h1["swap_nights"] == 0
+
+
+async def test_nights_come_from_shadow_trades_when_there_is_no_evidence(eh):
+    from fxcommand.store.models import ShadowTradeRow
+
+    cand = Candidate.of("trend_breakout", None)
+    wed = MON_08 + 2 * DAY
+    with eh.L.repo._db() as db:
+        db.add(ShadowTradeRow(symbol="GOLD", timeframe="H4", candidate_key=cand.key, side="long", open_ts=wed, close_ts=wed + DAY,
+                              signal_ts=wed, entry=2000, sl=1990, tp=0, risk=10, status="closed", r=1.0))
+        db.commit()
+    hold = eh.L.expected_hold("GOLD", "H4", "trend_breakout", None)
+    assert hold == {"nights": 3.0, "long_share": 1.0, "trades": 1, "source": "Shadow Trades"}  # Wednesday night counts three
+    assert eh.L.expected_hold("GOLD", "H1", "session_drift", None) is None
