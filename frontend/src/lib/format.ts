@@ -45,4 +45,6 @@ export const strategyTitle: Record<string, string> = {
   ema_cross: "EMA Cross",
   donchian_breakout: "Donchian Breakout",
   rsi_reversion: "RSI Mean Reversion",
+  trend_breakout: "GOLD Trend",
+  session_drift: "GOLD Reopen Drift",
 };

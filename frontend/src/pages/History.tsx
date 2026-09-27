@@ -10,12 +10,17 @@ const KINDS = ["signal", "risk_reject", "order", "order_fail", "close", "modify"
 function TradesTab() {
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: api.sessions });
   const strategies = useQuery({ queryKey: ["strategies"], queryFn: api.strategies });
-  const [f, setF] = useState<{ session_id?: number; symbol?: string; strategy?: string; status?: string }>({});
+  // the real account and the Paper Account are never mixed in one set of statistics (D16)
+  const [f, setF] = useState<{ session_id?: number; symbol?: string; strategy?: string; status?: string; account: "real" | "paper" }>({ account: "real" });
   const q = useQuery({ queryKey: ["trades", f], queryFn: () => api.trades({ ...f, limit: 2000 }), refetchInterval: 8000 });
   const symbols = Array.from(new Set((sessions.data ?? []).flatMap((s) => s.assignments.map((a) => a.symbol)))).sort();
   return (
     <div className="space-y-4">
       <Card bodyClass="flex flex-wrap gap-3">
+        <select className="field w-44" value={f.account} onChange={(e) => setF({ ...f, account: e.target.value as "real" | "paper" })} data-testid="filter-account">
+          <option value="real">Real account</option>
+          <option value="paper">Paper Account</option>
+        </select>
         <select className="field w-48" value={f.session_id ?? ""} onChange={(e) => setF({ ...f, session_id: e.target.value ? +e.target.value : undefined })} data-testid="filter-session">
           <option value="">All sessions</option>
           {(sessions.data ?? []).map((s) => (
@@ -50,6 +55,7 @@ function TradesTab() {
         <ErrorBox error={q.error} />
       ) : (
         <>
+          <div className="label" data-testid="history-account">{f.account === "paper" ? "Paper Account (every epoch)" : "Real account"}</div>
           <StatsGrid stats={q.data!.stats} />
           <Card title="Cumulative P&L (closed trades)">
             {q.data!.curve.length > 1 ? <ValueChart data={q.data!.curve} dataKey="value" baseline={0} testId="history-curve" /> : <Empty>Needs at least two closed trades</Empty>}

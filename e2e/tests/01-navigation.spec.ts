@@ -7,6 +7,7 @@ const PAGES: [string, string, string][] = [
   ["symbols", "/symbols", "Symbols"],
   ["strategies", "/strategies", "Strategies"],
   ["learning", "/learning", "Learning"],
+  ["reviews", "/reviews", "Strategy Reviews"],
   ["risk", "/risk", "Risk"],
   ["positions", "/positions", "Positions & Orders"],
   ["history", "/history", "History & Journal"],

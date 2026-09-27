@@ -462,12 +462,12 @@ New catalog entries only. The existing strategies' behaviour and golden rows are
 - [x] MCP: read-only `get_evidence`, `get_scorecard`, `get_research_snapshot` (≤ 500 bars; the CLI reads the full snapshot over HTTP) and `get_trials`; write tools `submit_review` and `submit_challenger` only. The whole tool set is pinned by a test. The original operator tools (start/pause/resume/stop Session, Kill Switch, run learning) are unchanged: keeping the reviewer away from them is decided with milestone 9
 
 ### 8. UI
-- [ ] Session editor: several Assignments per Symbol, Evidence badges, Cost Check with override, weekend warning
-- [ ] Start dialog: Cost Check result and block
-- [ ] Strategies page: Evidence table and "Run evidence"
-- [ ] Account page: Paper Account and scorecard
-- [ ] Overview, History, Strategies: Paper Account and real account split
-- [ ] Reviews page
+- [x] Session editor: a Symbol once per Timeframe (e.g. GOLD H4 + GOLD H1), an Evidence badge per Assignment for the form's current settings (`/api/evidence/match`, with a "Run evidence" button), the Cost Check per Assignment for unsaved settings (`POST /api/cost-check`) with an override switch and a journaled reason (saved as the Session's full `cost_overrides` set), and the Weekend Close warning for H4/D1 with the Evidence without Weekend Close beside it
+- [x] Start dialog: Cost Check result per Assignment above the Pre-flight Check; Start is disabled while one fails without an override
+- [x] Strategies page: Evidence table (settings, status, trades, mean R, SQN, max drawdown, per period, history range) and "Run evidence"; statistics split real / Paper
+- [x] Account page: Paper Account (equity, start balance, realised, floating, today; start balance edit and typed `RESET PAPER` reset, both disabled while Paper is active) and the graduation scorecard
+- [x] Overview, History, Strategies: Paper Account and real account split (Overview adds Paper KPIs; History filters by account, real by default; the API returns them apart)
+- [x] Reviews page: reports (expandable, markdown shown as text, action links only for https URLs), the trial ledger per Arena with the holdout start, and holdout results
 
 ### 9. Claude Strategy Review
 - [x] `research_trials` ledger table (built in milestone 7); the per-Arena count feeds the selection penalty of reviewer Challengers, read again whenever their Guardrails are judged and never below an Optimizer pick's (`TOP_K`)

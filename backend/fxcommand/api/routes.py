@@ -11,7 +11,7 @@ from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from ..broker import BrokerError, Timeframe
-from ..engine import DomainError, SessionIn, trade_stats
+from ..engine import AssignmentIn, DomainError, SessionIn, trade_stats
 from ..journal import journal_dict
 from ..notify import mask, telegram_from_settings
 from ..risk import RiskLimits, TradingWindow
@@ -51,7 +51,8 @@ def session_dict(r, s: SessionRow, with_detail: bool = False) -> dict:
         ],
         "open_positions": snap.get("open_positions", 0),
         "day_pnl": snap.get("day_pnl", 0.0),
-        "stats": trade_stats(trades),
+        # the Session's current Execution Mode only: a Session switched between Paper and Broker never mixes them (D16)
+        "stats": trade_stats(t for t in trades if t.paper == (s.execution == "paper")),
     }
     if with_detail:
         d["positions"] = [p for p in mgr.positions_view() if p["session_id"] == s.id]
@@ -83,13 +84,19 @@ async def overview(request: Request):
     snap = r.manager.snapshot()
     today = r.store.trades(since=snap["day_start"], limit=5000)
     closed_today = [t for t in today if t.status == "closed"]
+    all_trades = r.store.trades(limit=100_000)
+    epoch = r.store.paper_epoch()
     return {
         **snap,
         "equity_curve": [{"ts": e.ts, "equity": e.equity, "balance": e.balance} for e in r.store.equity_curve(limit=1000)],
         "alerts": [journal_dict(j) for j in r.store.journal(alerts_only=True, limit=20)],
         "recent": [journal_dict(j) for j in r.store.journal(limit=15)],
-        "today": trade_stats(closed_today),
-        "all_time": trade_stats(r.store.trades(limit=100_000)),
+        # the real Account and the Paper Account are never mixed (D16); Paper = the current epoch
+        "today": trade_stats(t for t in closed_today if not t.paper),
+        "all_time": trade_stats(t for t in all_trades if not t.paper),
+        "today_paper": trade_stats(t for t in closed_today if t.paper and t.paper_epoch == epoch),
+        "all_time_paper": trade_stats(t for t in all_trades if t.paper and t.paper_epoch == epoch),
+        "paper_account": r.manager.paper_account_view(),
     }
 
 
@@ -224,18 +231,20 @@ async def bars(request: Request, symbol: str, timeframe: Timeframe = Timeframe.M
 async def strategies(request: Request):
     r = rt(request)
     trades = r.store.trades(limit=100_000)
+    epoch = r.store.paper_epoch()
     assigns = r.store.all_assignments()
     out = []
     for key, s in STRATEGIES.items():
-        mine = [t for t in trades if t.strategy == key]
+        mine = [t for t in trades if t.strategy == key and not t.paper]
+        paper = [t for t in trades if t.strategy == key and t.paper and t.paper_epoch == epoch]
         out.append(
             {
                 **s.describe(),
-                "stats": trade_stats(mine),
+                "stats": trade_stats(mine),  # the real Account only (D16)
+                "stats_paper": trade_stats(paper),  # the Paper Account, current epoch
                 "assignments": sum(1 for a in assigns if a.strategy == key),
-                "by_symbol": {
-                    sym: trade_stats([t for t in mine if t.symbol == sym]) for sym in sorted({t.symbol for t in mine})
-                },
+                "by_symbol": {sym: trade_stats([t for t in mine if t.symbol == sym]) for sym in sorted({t.symbol for t in mine})},
+                "by_symbol_paper": {sym: trade_stats([t for t in paper if t.symbol == sym]) for sym in sorted({t.symbol for t in paper})},
             }
         )
     return out
@@ -377,16 +386,21 @@ async def trades(
     status: str | None = None,
     since: int | None = None,
     until: int | None = None,
+    account: Literal["real", "paper"] | None = None,
     limit: int = Query(1000, ge=1, le=20_000),
 ):
     r = rt(request)
     rows = r.store.trades(session_id=session_id, symbol=symbol, status=status, since=since, until=until, limit=limit)
     if strategy:
         rows = [t for t in rows if t.strategy == strategy]
+    if account is not None:
+        rows = [t for t in rows if t.paper == (account == "paper")]
     names = {s.id: s.name for s in r.store.list_sessions()}
     return {
         "trades": [{**trade_dict(t), "session_name": names.get(t.session_id)} for t in rows],
         "stats": trade_stats(rows),
+        "stats_real": trade_stats(t for t in rows if not t.paper),
+        "stats_paper": trade_stats(t for t in rows if t.paper),
         "curve": _pnl_curve(rows),
     }
 
@@ -627,6 +641,18 @@ async def session_cost_check(request: Request, session_id: int):
     r = rt(request)
     s = r.store.get_session(session_id)
     return {"threshold": float(r.store.app_settings()["cost_check_max_r"]), "assignments": await r.manager.cost_check(s)}
+
+
+class CostPreviewIn(BaseModel):
+    session_id: int | None = None
+    assignments: list[AssignmentIn] = Field(min_length=1, max_length=50)
+
+
+@router.post("/cost-check")
+async def cost_check_preview(request: Request, body: CostPreviewIn):
+    """The Cost Check for an editor's unsaved Assignments (read-only)."""
+    r = rt(request)
+    return {"threshold": float(r.store.app_settings()["cost_check_max_r"]), "assignments": await r.manager.cost_check_preview(body.session_id, body.assignments)}
 
 
 # ============================================================== evidence

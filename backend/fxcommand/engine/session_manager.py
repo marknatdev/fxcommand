@@ -502,11 +502,25 @@ class SessionManager:
                 est = CostEstimate(float("inf"), 0.0, threshold, True, "no typical spread known yet and the market is shut: start when it is open")
             else:
                 est = estimate_cost(spread, info.point, stop if stop == stop else 0.0, threshold)
-            override = self.store.cost_override(s.id, a.symbol, a.timeframe)
+            override = self.store.cost_override(s.id, a.symbol, a.timeframe) if s is not None else None
             out.append({
                 "symbol": a.symbol, "timeframe": a.timeframe, "strategy": key, **est.to_dict(), "spread": spread, "stop": stop,
                 "override": override is not None, "allowed": not est.blocked or override is not None,
             })
+        return out
+
+    async def cost_check_preview(self, session_id: int | None, assignments: list) -> list[dict]:
+        """The Cost Check for an editor's unsaved Assignments (``AssignmentIn``), with the saved Session's
+        overrides. Read-only; one result per Assignment, an ``error`` where it cannot be priced."""
+        s = self.store.get_session(session_id) if session_id is not None else None
+        out = []
+        for a in assignments:
+            tf = Timeframe(a.timeframe).value
+            row = AssignmentRow(session_id=session_id or 0, symbol=a.symbol, timeframe=tf, strategy=a.strategy, params=a.params, risk_profile_id=0)
+            try:
+                out.extend(await self.cost_check(s, [row]))
+            except (KeyError, BrokerError, ValueError) as e:
+                out.append({"symbol": a.symbol, "timeframe": tf, "strategy": a.strategy, "error": str(e.args[0] if e.args else e), "allowed": False, "override": False})
         return out
 
     @staticmethod

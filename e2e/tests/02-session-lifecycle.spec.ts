@@ -35,7 +35,8 @@ test("create a multi-symbol session through the editor", async ({ page }) => {
   await page.getByTestId("add-assignment").click();
   await expect(rows).toHaveCount(2);
   await rows.nth(1).getByTestId("assignment-symbol").fill("EURUSD");
-  await expect(rows.nth(1)).toContainText("Already in this session");
+  await rows.nth(1).getByTestId("assignment-timeframe").selectOption("M1");
+  await expect(rows.nth(1)).toContainText("Already in this session on M1"); // another Timeframe would be allowed (ADR 0009)
   await rows.nth(1).getByTestId("assignment-symbol").fill("NOTASYMBOL");
   await expect(rows.nth(1)).toContainText("Not offered by the broker");
   await rows.nth(1).getByTestId("assignment-symbol").fill("GBPUSD");

@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { api } from "../api/client";
 import type { JournalEntry, PositionView, SessionStatus, Stats, Trade } from "../api/types";
 import { cn, digitsFor, money, price, serverTime, shortTime, strategyTitle } from "../lib/format";
+import { CostCheckLine } from "./evidence";
 import { PreflightList } from "./Preflight";
 import { Badge, Button, ConfirmDialog, Empty, ErrorBox, Kpi, Loading, Pnl, SideBadge, Switch } from "./ui";
 
@@ -83,11 +84,14 @@ export function SessionControls({ id, name, status, size = "sm" }: { id: number;
   );
 }
 
-/** Start confirmation with the Pre-flight Check; blocked while a blocking check fails. */
+/** Start confirmation with the Pre-flight Check and the Cost Check; blocked while a blocking check fails. */
 function StartDialog({ id, name, restart, onClose, onStart }: { id: number; name: string; restart: boolean; onClose: () => void; onStart: () => Promise<unknown> }) {
   // never show a cached answer: conditions change (Algo Trading button, quotes, spread)
   const q = useQuery({ queryKey: ["preflight", id, "start"], queryFn: () => api.preflight(id), gcTime: 0, refetchInterval: 5000 });
+  const cost = useQuery({ queryKey: ["cost-check", id, "start"], queryFn: () => api.costCheck(id), gcTime: 0 });
   const report = q.data;
+  const costBlocked = (cost.data?.assignments ?? []).filter((c) => !c.allowed);
+  const blocked = !report || !report.ok || !cost.data || costBlocked.length > 0;
   return (
     <ConfirmDialog
       open
@@ -96,8 +100,8 @@ function StartDialog({ id, name, restart, onClose, onStart }: { id: number; name
       variant="success"
       title={`${restart ? "Restart" : "Start"} session '${name}'?`}
       description={restart ? "Open positions with this Session's magic number are re-adopted." : "The Session acts from the next bar close."}
-      confirmLabel={report && !report.ok ? "Blocked by pre-flight" : restart ? "Restart" : "Start"}
-      confirmDisabled={!report || !report.ok}
+      confirmLabel={report && !report.ok ? "Blocked by pre-flight" : costBlocked.length ? "Blocked by the Cost Check" : restart ? "Restart" : "Start"}
+      confirmDisabled={blocked}
       onConfirm={async () => {
         try {
           await onStart();
@@ -107,7 +111,31 @@ function StartDialog({ id, name, restart, onClose, onStart }: { id: number; name
         }
       }}
     >
-      {q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : <PreflightList report={report!} compact />}
+      <div className="space-y-3">
+        <div className="space-y-1.5" data-testid="start-cost-check">
+          <div className="label">Cost Check (spread + slippage, limit {cost.data ? `${cost.data.threshold.toFixed(2)}R` : "…"})</div>
+          {cost.isLoading ? (
+            <Loading />
+          ) : cost.error ? (
+            <ErrorBox error={cost.error} />
+          ) : (
+            cost.data!.assignments.map((c) => (
+              <div key={`${c.symbol}|${c.timeframe}`} className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="w-24 font-medium">
+                  {c.symbol} {c.timeframe}
+                </span>
+                <CostCheckLine row={c} testId="start-cost-row" />
+              </div>
+            ))
+          )}
+          {costBlocked.length > 0 && (
+            <p className="text-xs text-down" data-testid="start-cost-blocked">
+              {costBlocked.map((c) => `${c.symbol} ${c.timeframe}`).join(", ")} cost too much of the stop. Override it per Assignment in the session editor if you accept the cost.
+            </p>
+          )}
+        </div>
+        {q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : <PreflightList report={report!} compact />}
+      </div>
     </ConfirmDialog>
   );
 }

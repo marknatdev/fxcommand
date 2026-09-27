@@ -291,3 +291,37 @@ async def test_two_concurrent_holdout_requests_score_once(tmp_path):
     assert len(errors) == 1 and errors[0].code == "holdout_used"
     assert [t.holdout_used for t in h.L.repo.trials("GOLD", "H4")] == [True]
     await h.close()
+
+
+# ------------------------------------------------------------------ UI support
+def test_the_cost_check_previews_unsaved_assignments(client):
+    body = {"assignments": [{**TREND}, {"symbol": "GOLD", "timeframe": "M1", "strategy": "ema_cross", "params": FAST},
+                            {"symbol": "NOPE", "timeframe": "H1", "strategy": "ema_cross"}]}
+    r = client.post("/api/cost-check", json=body).json()
+    trend, scalp, bad = r["assignments"]
+    assert r["threshold"] == 0.15 and trend["allowed"] and not scalp["allowed"] and scalp["override"] is False
+    assert bad["allowed"] is False and bad["error"]
+    s = client.post("/api/sessions", json={"name": "S", "daily_loss_pct": 50, "assignments": body["assignments"][:2],
+                                           "cost_overrides": [{"symbol": "GOLD", "timeframe": "M1"}]}).json()
+    r = client.post("/api/cost-check", json={**body, "session_id": s["id"]}).json()
+    assert r["assignments"][1]["override"] and r["assignments"][1]["allowed"]  # the saved Session's override counts
+
+
+def test_statistics_never_mix_the_real_account_and_the_paper_account(client):
+    from fxcommand.store import TradeRow
+
+    store = client.app.state.rt.store
+    for ticket, paper, profit, epoch in ((1, False, 10.0, 0), (-1, True, -4.0, 0), (-2, True, 100.0, 5)):
+        store.add_trade(TradeRow(ticket=ticket, magic=1, symbol="GOLD", side="long", volume=0.01, strategy="trend_breakout", timeframe="H4",
+                                 open_time=MON_08, open_price=2000, status="closed", close_time=MON_08 + 60, close_price=2001,
+                                 profit=profit, paper=paper, paper_epoch=epoch))
+    o = client.get("/api/overview").json()
+    assert o["all_time"]["trades"] == 1 and o["all_time"]["net_profit"] == 10.0
+    assert o["all_time_paper"]["trades"] == 1 and o["all_time_paper"]["net_profit"] == -4.0  # this epoch only
+    assert o["paper_account"]["epoch"] == 0
+    [trend] = [s for s in client.get("/api/strategies").json() if s["key"] == "trend_breakout"]
+    assert trend["stats"]["net_profit"] == 10.0 and trend["stats_paper"]["net_profit"] == -4.0
+    real = client.get("/api/trades", params={"account": "real"}).json()
+    assert [t["ticket"] for t in real["trades"]] == [1] and real["stats"]["net_profit"] == 10.0
+    paper = client.get("/api/trades", params={"account": "paper"}).json()
+    assert paper["stats"]["trades"] == 2 and paper["stats_real"]["trades"] == 0
