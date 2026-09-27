@@ -183,9 +183,11 @@ class PaperTrader:
         return PaperTrade(p.side, p.open_time, t, p.signal_time, p.entry, exit_price, r, reason, p.features, p.p_win)
 
     def _spread(self, price: float) -> float:
-        # the recorded spread is passed only when there is one, so cost objects with the older
-        # one-argument ``spread_at(price)`` keep working
-        return self.costs.spread_at(price, self._bar_spread) if self._bar_spread > 0 else self.costs.spread_at(price)
+        # the recorded spread is passed only to costs that floor on it, so cost objects with the older
+        # one-argument ``spread_at(price)`` keep working whatever the caller supplies
+        if self._bar_spread > 0 and getattr(self.costs, "bar_floor", 0):
+            return self.costs.spread_at(price, self._bar_spread)
+        return self.costs.spread_at(price)
 
     def _market_exit(self, o: float) -> float:
         p = self.position

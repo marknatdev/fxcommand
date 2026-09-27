@@ -150,6 +150,22 @@ def test_cost_objects_with_the_older_one_argument_spread_at_still_work():
 
     tr = PaperTrader(Legacy(), ExitRules(reverse_on_opposite=False))
     tr.on_bar(MON, 100, 101, 99, 100, 1.0, {**NO_SIGNAL, "long": True, "sl_dist": 5.0}, bar_spread=0.0)
-    opened, _ = tr.on_bar(MON + 3600, 100, 101, 99, 100, 1.0, NO_SIGNAL)
+    opened, _ = tr.on_bar(MON + 3600, 100, 101, 99, 100, 1.0, NO_SIGNAL, bar_spread=7.0)  # ignored: no floor
     assert opened.entry == pytest.approx(102.0)
     assert CostModel(1.0, 0.1).version == COST_MODEL_VERSION and CostModel(1.0).bar_floor == 0.0
+
+
+def test_an_old_database_gains_the_trusted_history_column(tmp_path):
+    import sqlite3
+
+    from fxcommand.store import Store
+
+    db = tmp_path / "old.db"
+    Store(f"sqlite:///{db}")
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE evidence_runs DROP COLUMN history_from")  # as before this change
+    con.commit()
+    con.close()
+    Store(f"sqlite:///{db}")  # Store._add_missing_columns
+    cols = {r[1]: r[4] for r in sqlite3.connect(db).execute("PRAGMA table_info(evidence_runs)")}
+    assert "history_from" in cols and cols["history_from"] in ("0", "'0'")
