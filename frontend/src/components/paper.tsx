@@ -125,7 +125,7 @@ export function ScorecardCard() {
   return (
     <Card title="Graduation scorecard" testId="scorecard-card" bodyClass="space-y-3">
       <p className="text-xs text-dim">
-        Advisory: does the Paper record look like its backtest? The band is where the mean R of that many trades falls 90% of the time in the Evidence. Min-lot risk is what one
+        Advisory: does the Paper record of each Arena&apos;s current parameter set look like its backtest? A Promotion starts a new record. The band is where the mean R of that many trades falls 90% of the time in the Evidence. Min-lot risk is what one
         minimum lot at today&apos;s stop would risk on the real account. Nothing here blocks anything; going live is your decision.
       </p>
       {q.isLoading ? (
@@ -154,6 +154,7 @@ export function ScorecardCard() {
                 <tr key={`${c.symbol}|${c.timeframe}`} data-testid="scorecard-row">
                   <td className="td whitespace-nowrap font-medium">
                     {c.symbol} {c.timeframe}
+                    <div className="text-[11px] font-normal text-faint" data-testid="scorecard-candidate">{c.paper.candidate}</div>
                   </td>
                   <td className="td text-xs">
                     {c.session.name} {c.session.execution === "paper" && <Badge tone="accent">paper</Badge>}
@@ -161,7 +162,10 @@ export function ScorecardCard() {
                   <td className="td">
                     <EvidenceBadgeView badge={c.evidence} />
                   </td>
-                  <td className="td num text-right">{c.paper.trades}</td>
+                  <td className="td num text-right" title={c.note}>
+                    {c.paper.trades}
+                    {c.paper.unattributed > 0 && <div className="text-[11px] text-faint">+{c.paper.unattributed} not counted</div>}
+                  </td>
                   <td className={`td num text-right ${pnlClass(c.paper.mean_r)}`}>{c.paper.trades ? r2(c.paper.mean_r, 3) : "—"}</td>
                   <td className="td num whitespace-nowrap text-xs">{c.band ? `${r2(c.band[0], 3)} … ${r2(c.band[1], 3)}` : "—"}</td>
                   <td className="td">

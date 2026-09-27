@@ -952,9 +952,13 @@ class LearningService:
                     arenas[(a.symbol, a.timeframe)] = (s, a)
         out = []
         for (symbol, timeframe), (s, a) in sorted(arenas.items()):
-            badge = self.evidence_for(self.spec_for(s, a))
+            spec = self.spec_for(s, a)
+            badge = self.evidence_for(spec)
             rs = self.repo.evidence_row(badge["evidence"]["id"]).rs if badge["status"] == "match" else []
-            paper_rs = [self._trade_r(t) for t in self.store.paper_closed_trades(symbol, timeframe, a.strategy)]
+            # only this parameter set's Paper trades: a Promotion starts a new record (trades recorded before the
+            # parameter set was kept cannot be attributed and are counted separately)
+            paper_rs = [self._trade_r(t) for t in self.store.paper_closed_trades(symbol, timeframe, a.strategy, candidate_key=spec.candidate.key)]
+            unattributed = len(self.store.paper_closed_trades(symbol, timeframe, a.strategy, candidate_key=""))
             n = len(paper_rs)
             mean = sum(paper_rs) / n if n else 0.0
             rng = ev.band(rs, n) if rs and n else None
@@ -977,13 +981,15 @@ class LearningService:
                 "symbol": symbol, "timeframe": timeframe, "strategy": a.strategy,
                 "session": {"id": s.id, "name": s.name, "status": s.status, "execution": s.execution},
                 "evidence": badge,
-                "paper": {"trades": n, "mean_r": round(mean, 4), "total_r": round(sum(paper_rs), 3), "epoch": self.store.paper_epoch()},
+                "paper": {"trades": n, "mean_r": round(mean, 4), "total_r": round(sum(paper_rs), 3), "epoch": self.store.paper_epoch(),
+                          "candidate": spec.candidate.label(), "unattributed": unattributed},
                 "band": list(rng) if rng else None,
                 "band_level": ev.BAND_LEVEL,
                 "verdict": self._verdict(badge["status"] == "match", rs, n, mean, rng),
                 "min_lot_risk_pct": risk,
                 "stop": stop if stop == stop else None,
-                "note": "counts every Paper trade of this Strategy on the Arena in this Paper epoch, whatever its parameters",
+                "note": f"counts this epoch's Paper trades of {spec.candidate.label()} only"
+                        + (f"; {unattributed} earlier trades have no parameter record and are not counted" if unattributed else ""),
             })
         return out
 

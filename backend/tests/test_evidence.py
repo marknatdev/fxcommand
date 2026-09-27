@@ -290,17 +290,23 @@ async def test_the_scorecard_sets_the_paper_record_against_the_backtest_band(eh)
     await eh.mgr.create_session(SessionIn(name="Other", daily_loss_pct=90, assignments=[AssignmentIn(symbol="EURUSD", timeframe="M15", strategy="ema_cross")]))
     [a] = eh.store.assignments(s.id)
     row = await run(eh, eh.L.spec_for(s, a))
+    mine = Candidate.of("trend_breakout", None).key
     for i, r in enumerate([-1.0] * 12):  # a Paper record far below what the backtest allows
         eh.store.add_trade(TradeRow(ticket=-(i + 1), session_id=s.id, magic=a.magic, symbol="GOLD", side="long", volume=0.01, strategy="trend_breakout",
-                                    timeframe="H4", open_time=MON_08, open_price=2000, status="closed", close_time=MON_08 + 3600,
-                                    close_price=1990, profit=r * 5.0, risk_amount=5.0, paper=True))
+                                    timeframe="H4", candidate_key=mine, open_time=MON_08, open_price=2000, status="closed",
+                                    close_time=MON_08 + 3600, close_price=1990, profit=r * 5.0, risk_amount=5.0, paper=True))
+    for ticket, key in ((-50, Candidate.of("trend_breakout", {"entry": 40}).key), (-51, ""), (-52, "")):  # another parameter set; unrecorded
+        eh.store.add_trade(TradeRow(ticket=ticket, session_id=s.id, magic=a.magic, symbol="GOLD", side="long", volume=0.01, strategy="trend_breakout",
+                                    timeframe="H4", candidate_key=key, open_time=MON_08, open_price=2000, status="closed",
+                                    close_time=MON_08 + 3600, close_price=2100, profit=50.0, risk_amount=5.0, paper=True))
     eh.store.add_trade(TradeRow(ticket=-99, session_id=s.id, magic=a.magic, symbol="GOLD", side="long", volume=0.01, strategy="trend_breakout",
                                 timeframe="H4", open_time=MON_08, open_price=2000, status="closed", close_time=MON_08, close_price=2100,
                                 profit=500.0, risk_amount=5.0, paper=True, paper_epoch=7))  # an archived epoch: not counted
     cards = {(c["symbol"], c["timeframe"]): c for c in await eh.L.scorecard()}
     gold = cards[("GOLD", "H4")]
     assert gold["session"]["execution"] == "paper" and gold["evidence"]["evidence"]["id"] == row.id
-    assert gold["paper"]["trades"] == 12 and gold["paper"]["mean_r"] == -1.0
+    assert gold["paper"]["trades"] == 12 and gold["paper"]["mean_r"] == -1.0  # only this parameter set's trades
+    assert gold["paper"]["unattributed"] == 2 and "2 earlier trades" in gold["note"]
     assert gold["band"] == list(ev.band(row.rs, 12)) and gold["verdict"] == "below the backtest"
     info, acct = eh.sim.symbol_info("GOLD"), eh.sim.account()
     expected = ev.min_lot_risk_pct(info.volume_min, gold["stop"], info.trade_tick_value / info.trade_tick_size, acct.balance)

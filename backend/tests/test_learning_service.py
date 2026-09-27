@@ -425,3 +425,16 @@ async def test_an_entry_at_the_bar_close_records_a_short_fill_delay_and_its_spre
             break
     [r] = [x for x in lh.L.repo.signals("EURUSD", "M1", limit=50) if x.ticket is not None][:1]
     assert 0 <= r.fill_delay_s <= 60 and r.fill_spread_points > 0  # sent right after the bar closed
+
+
+async def test_a_trade_remembers_the_parameter_set_that_opened_it(lh):
+    from fxcommand.learning.candidate import Candidate
+
+    s = await lh.session("Key")
+    await lh.mgr.start(s.id)
+    for _ in range(80):
+        await lh.bars(1)
+        if lh.store.trades(session_id=s.id):
+            break
+    [t] = lh.store.trades(session_id=s.id)[:1]
+    assert t.candidate_key == Candidate.of("ema_cross", FAST).key

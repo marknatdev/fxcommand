@@ -641,7 +641,7 @@ export interface ScorecardRow {
   strategy: string;
   session: { id: number; name: string; status: SessionStatus; execution: Execution };
   evidence: EvidenceBadge;
-  paper: { trades: number; mean_r: number; total_r: number; epoch: number };
+  paper: { trades: number; mean_r: number; total_r: number; epoch: number; candidate: string; unattributed: number };
   band: [number, number] | null;
   band_level: number;
   verdict: string;

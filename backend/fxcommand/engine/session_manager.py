@@ -31,6 +31,7 @@ from ..broker.types import AccountInfo
 from ..journal import EventBus, Journal
 from ..tasks import cancel_and_wait
 from ..risk import Exposure, GateInput, LiveCaps, Rejected, RiskLimits, TradingWindow, check, check_margin, manage
+from ..learning.candidate import Candidate
 from ..learning.costs import CostModel
 from ..risk.costcheck import CostEstimate, estimate_cost
 from ..risk.gate import MAX_QUOTE_AGE
@@ -1301,6 +1302,7 @@ class SessionManager:
                 volume=volume,
                 strategy=a.strategy,
                 timeframe=a.timeframe,
+                candidate_key=Candidate.of(a.strategy, a.params).key,
                 open_time=pos.time if pos else self.now,
                 open_price=price,
                 sl=decision.sl,

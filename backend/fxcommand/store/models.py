@@ -132,6 +132,7 @@ class TradeRow(SQLModel, table=True):
     volume: float
     strategy: str = ""
     timeframe: str = ""
+    candidate_key: str = ""  # the parameter set that opened it (Candidate key); "" = recorded before it was kept
     open_time: int
     open_price: float
     sl: float = 0.0
