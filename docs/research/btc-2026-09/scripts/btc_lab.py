@@ -46,7 +46,7 @@ class BarCost:
     def __init__(self, spread: float, slip: float, swap_on: bool = True):
         self.spread, self.slip, self.swap_on = spread, slip, swap_on
 
-    def spread_at(self, price):
+    def spread_at(self, price, recorded=0.0):
         return self.spread
 
     def slippage_at(self, price):

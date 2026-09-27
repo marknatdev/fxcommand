@@ -101,9 +101,10 @@ class CostModel:
     point: float = 0.01
     value_per_price: float = 1.0  # account currency per 1.0 price move per lot (tick_value / tick_size)
     ref_price: float | None = None  # today's price; None switches price scaling off
+    version: int = COST_MODEL_VERSION
+    # added after ``version`` so positional construction keeps its meaning
     swap_every_night: bool = False  # 7 nights a week, no triple day (a symbol that trades every day)
     bar_floor: float = 0.0  # x the bar's recorded spread as the least spread charged; 0 = off
-    version: int = COST_MODEL_VERSION
 
     def scale(self, price: float) -> float:
         return price / self.ref_price if self.ref_price and price > 0 else 1.0

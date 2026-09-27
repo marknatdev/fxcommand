@@ -135,3 +135,21 @@ def test_research_judges_from_the_trusted_history_start():
     cand = Candidate.of("trend_breakout", {"entry": 20, "exit": 10})
     r = research.evaluate_hypothesis(bars, cand, None, CostModel(spread=40.0), ExitRules(), None, None, 1, history_from=Y2018)
     assert r["first_ts"] == Y2018
+
+
+def test_cost_objects_with_the_older_one_argument_spread_at_still_work():
+    class Legacy:
+        def spread_at(self, price):
+            return 2.0
+
+        def slippage_at(self, price):
+            return 0.0
+
+        def swap_for(self, side, entry_price, open_ts, close_ts):
+            return 0.0
+
+    tr = PaperTrader(Legacy(), ExitRules(reverse_on_opposite=False))
+    tr.on_bar(MON, 100, 101, 99, 100, 1.0, {**NO_SIGNAL, "long": True, "sl_dist": 5.0}, bar_spread=0.0)
+    opened, _ = tr.on_bar(MON + 3600, 100, 101, 99, 100, 1.0, NO_SIGNAL)
+    assert opened.entry == pytest.approx(102.0)
+    assert CostModel(1.0, 0.1).version == COST_MODEL_VERSION and CostModel(1.0).bar_floor == 0.0

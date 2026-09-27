@@ -182,10 +182,15 @@ class PaperTrader:
         self.last_r = r
         return PaperTrade(p.side, p.open_time, t, p.signal_time, p.entry, exit_price, r, reason, p.features, p.p_win)
 
+    def _spread(self, price: float) -> float:
+        # the recorded spread is passed only when there is one, so cost objects with the older
+        # one-argument ``spread_at(price)`` keep working
+        return self.costs.spread_at(price, self._bar_spread) if self._bar_spread > 0 else self.costs.spread_at(price)
+
     def _market_exit(self, o: float) -> float:
         p = self.position
         slip = self.costs.slippage_at(o)
-        return o - slip if p.side == "long" else o + self.costs.spread_at(o, self._bar_spread) + slip
+        return o - slip if p.side == "long" else o + self._spread(o) + slip
 
     # ------------------------------------------------------------ one bar
     def on_bar(
@@ -205,7 +210,7 @@ class PaperTrader:
         closed: list[PaperTrade] = []
         opened: OpenPaper | None = None
         self._bar_spread = bar_spread
-        spread, slip = self.costs.spread_at(o, bar_spread), self.costs.slippage_at(o)
+        spread, slip = self._spread(o), self.costs.slippage_at(o)
 
         # 1. orders scheduled at the previous close fill at this open
         if self._close and self.position:
