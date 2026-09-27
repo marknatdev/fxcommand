@@ -156,7 +156,8 @@ class CostModel:
         ``floor_mult`` multiplies the recorded bar spread when the symbol's profile asks for a floor
         (Evidence and research pass their spread multiplier, so both prices are doubled alike)."""
         point = float(info.point)
-        rollover = int(getattr(info, "swap_rollover3days", 3))
+        raw = getattr(info, "swap_rollover3days", None)
+        rollover = 3 if raw is None else int(raw)  # not reported: Wednesday, as before
         every = swap_every_night(rollover)
         tick_size = float(getattr(info, "trade_tick_size", 0) or point)
         tick_value = float(getattr(info, "trade_tick_value", 0) or 0)

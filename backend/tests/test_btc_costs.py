@@ -56,6 +56,12 @@ def test_btc_costs_count_every_night_and_gold_keeps_the_wednesday_triple():
     assert btc.swap_for("short", 42_000.0, MON, MON + DAY) == pytest.approx(-23.3342 / 2)
 
 
+def test_a_symbol_that_reports_no_triple_day_keeps_wednesday():
+    for info in (btc_info(name="X", swap_rollover3days=None), SimpleNamespace(name="X", point=0.01)):
+        cm = CostModel.from_symbol(info, spread=1.0)
+        assert not cm.swap_every_night and cm.triple_weekday == 2
+
+
 # ------------------------------------------------------------------ the recorded-spread floor
 def test_the_profile_floor_applies_to_btc_only_and_scales_with_the_evidence_multiplier():
     btc = CostModel.from_symbol(btc_info(), spread=80.0, ref_price=84_000.0, floor_mult=2.0)
