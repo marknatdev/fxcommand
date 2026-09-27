@@ -58,7 +58,7 @@ def test_symbols_ticks_and_bars(mt5_broker):
     for tf in (Timeframe.M1, Timeframe.M15, Timeframe.H1):
         bars = mt5_broker.closed_bars(sample, tf, 50)
         assert len(bars) > 0, f"no {tf.value} bars"
-        assert list(bars.columns) == ["time", "open", "high", "low", "close", "volume"]
+        assert list(bars.columns) == ["time", "open", "high", "low", "close", "volume", "spread"]
         assert bars["time"].is_monotonic_increasing
         # the forming bar is excluded: the newest closed bar has ended by the server clock
         assert int(bars["time"].iloc[-1]) + tf.seconds <= mt5_broker.server_time() + 1
@@ -122,6 +122,21 @@ def test_gold_reopen_timing_and_spread(mt5_broker):
         assert 0 not in h1_times, "an H1 bar stamped 00:00: the break is not where the engine expects it"
         assert d1 is None or len(d1) == 0 or int(d1[0]["time"]) == day
     print(f"  (the Gold Reopen profile allows 100 points; the terminal quotes {mt5.symbol_info(sym).spread} points now, point {info.point})")
+
+
+def test_btcusd_costs_count_every_night(mt5_broker):
+    """BTCUSD (spec-btc-strategies): the terminal reports no valid triple-swap day, so the Cost Model
+    charges swap every night; its profile floors each bar at the spread it recorded. Read-only."""
+    from fxcommand.learning.costs import CostModel
+
+    if "BTCUSD" not in mt5_broker.symbols():
+        pytest.skip("no BTCUSD on this terminal")
+    info, tick = mt5_broker.symbol_info("BTCUSD"), mt5_broker.tick("BTCUSD")
+    cm = CostModel.from_symbol(info, tick.ask - tick.bid, ref_price=tick.bid)
+    print(f"BTCUSD swap_rollover3days={info.swap_rollover3days} every night={cm.swap_every_night} floor={cm.bar_floor} spread={tick.ask - tick.bid:.2f}")
+    assert cm.swap_every_night == (not 0 <= info.swap_rollover3days <= 6) and cm.bar_floor == 1.0
+    bars = mt5_broker.closed_bars("BTCUSD", Timeframe.H4, 20)
+    assert (bars["spread"] > 0).all()
 
 
 def test_positions_and_history_read(mt5_broker):

@@ -50,8 +50,9 @@ from .optimizer import TOP_K, evaluate_job, optimize_job
 from . import evidence as ev
 from . import research
 from .costs import CostModel
-from .paper import Costs, EntryGate, ExitRules, PaperTrader
+from .paper import Costs, EntryGate, ExitRules, PaperTrader, bar_spreads
 from .repo import LearningRepo
+from .seeds import SEEDS
 
 log = logging.getLogger("fxcommand.learning")
 
@@ -122,6 +123,8 @@ class LearningService:
             n = self.repo.void_open_shadows()
             if n:
                 log.info("voided %d open Shadow Trades from a previous simulated market", n)
+        if self.mode == "mt5":  # research on the real feed; a simulated market has no such history
+            self.seed_research()
         for r in self.repo.runs(limit=200):
             if r.status in ("queued", "running"):
                 self.repo.update_run(r.id, status="failed", note="interrupted by restart", finished_wall=time.time())
@@ -230,6 +233,7 @@ class LearningService:
             return _mf[0].loc[i]
 
         o, h, l, c = (bars[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
+        recorded = bar_spreads(bars, costs)  # the bars' own spreads: a floor where the symbol's profile asks for one
         filters = {st: self._filter(a.symbol, a.timeframe, st) for st in {x.strategy for x in cands.values()}}
         touched: set[str] = set()
 
@@ -253,7 +257,7 @@ class LearningService:
 
                 opened, closed = tr.on_bar(
                     int(times[i]), o[i], h[i], l[i], c[i], float(atr[i]) if atr[i] == atr[i] else 0.0,
-                    {k: v[i] for k, v in cols.items()}, make_features,
+                    {k: v[i] for k, v in cols.items()}, make_features, float(recorded[i]) if recorded is not None else 0.0,
                 )
                 for t in closed:
                     sid = arena.open_rows.pop(key, None)
@@ -658,17 +662,43 @@ class LearningService:
         if len(bars) == 0:
             self.repo.update_evidence(evidence_id, status="failed", run_ts=now, finished_wall=time.time(), note=note or "the feed returned no history")
             return
-        costs = CostModel.from_symbol(info, spread=ev.SPREAD_MULTIPLIER * spread, ref_price=float(bars["close"].iloc[-1]))
+        costs = CostModel.from_symbol(info, spread=ev.SPREAD_MULTIPLIER * spread, ref_price=float(bars["close"].iloc[-1]), floor_mult=ev.SPREAD_MULTIPLIER)
         gate = EntryGate(spec.window, tf.seconds)
         weekend = WeekendClose(spec.weekend_close, tf.seconds) if spec.weekend_close else None
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(self._pool, ev.evidence_job, bars, spec.candidate, costs, spec.rules, gate, weekend)
+        result = await loop.run_in_executor(self._pool, ev.evidence_job, bars, spec.candidate, costs, spec.rules, gate, weekend, spec.history_from)
         status = "done" if complete else "incomplete"
         self.repo.update_evidence(evidence_id, status=status, run_ts=now, finished_wall=time.time(), costs=costs.to_dict(), note=note, **result)
         self._server_time = now
         label = f"{symbol} {spec.timeframe} {spec.candidate.label()}"
         self._j("learning", f"Evidence {label}: {result['trades']} trades, {result['mean_r']:+.3f}R per trade on {result['bars']:,} bars"
                 + ("" if complete else " (incomplete)"), symbol=symbol)
+
+    def seed_research(self, seeds: tuple = SEEDS) -> int:
+        """Load research done outside the app into the trial ledger, once per seed (spec-btc-strategies
+        D17): its trials raise the selection penalty, and its holdout row makes a second look refused."""
+        added = 0
+        for seed in seeds:
+            source = f"seed:{seed['id']}"
+            if self.repo.has_trial_source(source):
+                continue
+            for t in seed["trials"]:
+                self.repo.add_trial(
+                    symbol=seed["symbol"], timeframe=t["timeframe"], hypothesis=t["hypothesis"], strategy="", params={},
+                    params_hash=research.hypothesis_hash(None, None, t["hypothesis"]), data_from=seed["data_from"], data_to=seed["data_to"],
+                    result=t["result"], source=source, ts=seed["data_to"],
+                )
+                added += 1
+            h = seed["holdout"]
+            cand = Candidate.of(h["strategy"], h["params"])
+            self.repo.add_trial(
+                symbol=seed["symbol"], timeframe=h["timeframe"], hypothesis=h["hypothesis"], strategy=h["strategy"], params=cand.param_dict,
+                params_hash=cand.key, data_from=h["data_from"], data_to=h["data_to"], result=h["result"], holdout_used=True,
+                status=h["status"], source=source, ts=h["data_to"],
+            )
+            added += 1
+            log.info("research seed %s: %d ledger rows", seed["id"], len(seed["trials"]) + 1)
+        return added
 
     def evidence(self, symbol: str | None = None, timeframe: str | None = None, strategy: str | None = None) -> list[dict]:
         """The latest Evidence per key (the Strategies page's table)."""
@@ -783,9 +813,10 @@ class LearningService:
             "bars_total": total, "first_ts": first_ts,
             "complete": complete, "note": note,
             "costs": costs.to_dict() if costs else None, "evidence_spread_multiplier": ev.SPREAD_MULTIPLIER,
+            "trusted_from": research.trusted_from(symbol),
             "arena_trials": self.repo.trial_count(symbol, tf.value),
             "arena": self._research_arena(symbol, tf.value),
-            "bars": {k: bars[k].tolist() for k in ("time", "open", "high", "low", "close", "volume")},
+            "bars": {k: bars[k].tolist() for k in ("time", "open", "high", "low", "close", "volume", "spread") if k in bars.columns},
         }
 
     def _research_arena(self, symbol: str, timeframe: str) -> dict | None:
@@ -835,7 +866,7 @@ class LearningService:
             before = int((bars["time"].to_numpy() < cutoff).sum()) if len(bars) else 0
             bars = bars.iloc[max(0, before - warm):].reset_index(drop=True)
             info = await self.broker.run(lambda b: b.symbol_info(symbol), timeout=ev.CHUNK_TIMEOUT)
-            costs = CostModel.from_symbol(info, spread=ev.SPREAD_MULTIPLIER * spread, ref_price=float(bars["close"].iloc[-1]))
+            costs = CostModel.from_symbol(info, spread=ev.SPREAD_MULTIPLIER * spread, ref_price=float(bars["close"].iloc[-1]), floor_mult=ev.SPREAD_MULTIPLIER)
             weekend = WeekendClose(spec.weekend_close, tf.seconds) if spec.weekend_close else None
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
@@ -993,10 +1024,11 @@ class LearningService:
             })
         return out
 
-    def expected_hold(self, symbol: str, timeframe: str, strategy: str, params: dict | None) -> dict | None:
+    def expected_hold(self, symbol: str, timeframe: str, strategy: str, params: dict | None, every_night: bool = False) -> dict | None:
         """How many swap nights a trade of this Candidate typically pays, and how many of its trades are
         long: from its Evidence (the same Candidate, else the same Strategy on the Arena), else its closed
-        Shadow Trades. None while neither exists. Read by the Cost Check to show swap beside the cost."""
+        Shadow Trades (``every_night``: the symbol is charged 7 nights a week). None while neither exists.
+        Read by the Cost Check to show swap beside the cost."""
         from .costs import rollover_nights
 
         cand = Candidate.of(strategy, params)
@@ -1010,7 +1042,7 @@ class LearningService:
         shadows = self.repo.shadow_closed(symbol, timeframe, cand.key, limit=500)
         shadows = [t for t in shadows if t.close_ts]
         if shadows:
-            nights = [rollover_nights(t.open_ts, t.close_ts) for t in shadows]
+            nights = [rollover_nights(t.open_ts, t.close_ts, every_night=every_night) for t in shadows]
             return {"nights": round(sum(nights) / len(nights), 3), "long_share": round(sum(t.side == "long" for t in shadows) / len(shadows), 3),
                     "trades": len(shadows), "source": "Shadow Trades"}
         return None

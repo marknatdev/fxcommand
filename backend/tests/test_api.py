@@ -163,7 +163,7 @@ def test_sim_controls_refused_outside_sim():
 
 
 def test_symbols_filter_and_names(client):
-    assert client.get("/api/symbols/names").json() == ["EURUSD", "GBPUSD", "USDJPY", "GOLD"]
+    assert client.get("/api/symbols/names").json() == ["EURUSD", "GBPUSD", "USDJPY", "GOLD", "BTCUSD"]
     rows = client.get("/api/symbols?q=usd&limit=2").json()
     assert len(rows) == 2 and all("USD" in r["name"] for r in rows)
     make_session(client, "Uses GOLD", ("GOLD",))

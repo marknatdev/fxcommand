@@ -353,7 +353,7 @@ class PendingChangeRow(SQLModel, table=True):
 
 
 class EvidenceRow(SQLModel, table=True):
-    """One Evidence Run: a read-only Backtest of a Candidate on an Arena's full history at 2× the
+    """One Evidence Run: a read-only Backtest of a Candidate on an Arena's Trusted History at 2× the
     typical spread (spec D11, D23). Local DB only: never committed, never exposed beyond read-only MCP."""
 
     __tablename__ = "evidence_runs"
@@ -371,6 +371,7 @@ class EvidenceRow(SQLModel, table=True):
     window_hash: str = ""
     weekend_close: str = ""  # "" = off, else Friday close time "HH:MM"
     cost_version: int = 0
+    history_from: int = 0  # the symbol's Trusted History start (spec-btc-strategies D15)
     costs: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))  # the CostModel used
     status: str = Field(default="queued", index=True)  # queued | running | done | incomplete | failed
     trigger: str = "manual"

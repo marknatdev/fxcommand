@@ -1,6 +1,6 @@
 # Spec: BTC Trend on BTCUSD H4
 
-Status: approved design, 2026-09-27. It follows `spec-better-strategies.md` (the GOLD spec, D1–D56). Decision IDs here are D1–D18 of this spec. "GOLD D24" means decision D24 of the GOLD spec.
+Status: approved design, 2026-09-27; built on branch `feature/btc-trend`. It follows `spec-better-strategies.md` (the GOLD spec, D1–D56). Decision IDs here are D1–D18 of this spec. "GOLD D24" means decision D24 of the GOLD spec.
 
 Captured at commit `f5e2fab` (main, after PR #3).
 
@@ -148,8 +148,8 @@ def profile(symbol: str) -> SymbolCostProfile
 - **`research.trusted_from(symbol)`** returns `max(RESEARCH_START, profile.history_from)`. It is the only definition.
 - **Evidence Runs.** Trades signalled before it don't count; bars before it only warm up indicators.
   - `evidence_job` gets `first_ts = trusted_from`, so BTC `periods()` falls back to thirds of 2018 → now.
-  - `EvidenceSpec.key` gains `h<trusted_from>` and the swap-night mode (`n7` for every night, `n5t<day>` for Monday–Friday with a triple day), so a changed start or swap rule cannot show stale Evidence.
-- **Optimizer Runs** read the last `learning_bars` (5000) bars. For BTC H4 that is about 2.3 years, all trusted; `trusted_from` also cuts them, for when that setting grows.
+  - `EvidenceSpec.key` gains `h<trusted_from>`, so a changed start cannot show stale Evidence. The swap-night mode (`CostModel.swap_nights_key`: `n7` every night, `n5t<day>` Monday–Friday with a triple day) is recorded in each Evidence row's costs. It is not part of the key, because the key is built before the terminal's symbol specification is read.
+- **Optimizer Runs** read the last `learning_bars` (5000) bars. For BTC H4 that is about 2.3 years and for H1 about 7 months, all after 2018, so no cut is applied. If `learning_bars` ever grows past the Trusted History, add the cut there.
 - **Research.**
   - `evaluate_hypothesis` and `record_trial` use `trusted_from` instead of `RESEARCH_START`.
   - Snapshot exports keep the older bars, marked as warm-up.
@@ -200,7 +200,7 @@ def profile(symbol: str) -> SymbolCostProfile
 - **Engine.** Nothing in the engine assumes weekends are shut:
   - `_first_tradable` and "still shut" go by quote freshness;
   - Pending Entries go by the observed Next Tradable Time.
-  - A test pins this.
+  - Tests pin the window and the gate at Saturday timestamps, and the Cost Check's swap nights; the engine itself was checked by reading it (no weekday rule in `_first_tradable` or the pass loop).
 
 ### Weekly Strategy Review (D13)
 
@@ -215,7 +215,7 @@ def profile(symbol: str) -> SymbolCostProfile
 
 ## Error Handling and Edge Cases
 
-- **The terminal reports a different `swap_rollover3days` later** (for example 3). `from_symbol` goes back to a triple day. `EvidenceSpec.key` carries the swap-night mode (`n7`, or `n5t<day>`), so Evidence priced under the old mode shows as "other settings", never as current.
+- **The terminal reports a different `swap_rollover3days` later** (for example 3). `from_symbol` goes back to a triple day at once for Shadow Trades, the Cost Check and new Evidence. Existing Evidence keeps its key; its row's costs show the old mode, and re-running Evidence prices the new one. Treat such a change like any cost-rule change: bump `COST_MODEL_VERSION` to invalidate old Evidence.
 - **Swap turns out to be free, or weekday-only.** The operator reads it from a real statement. The fix is a one-line profile change plus a version bump. Until then the worst case stands.
 - **A bar with a recorded spread of 0** falls back to scaling. The history before `trusted_from` never counts anyway.
 - **Weekend maintenance gaps** (XM pauses crypto briefly on some weekends). Quotes go stale, so the engine waits, as it does for GOLD's daily break. A Pending Entry expires by `fill_limit` as usual.
@@ -239,7 +239,7 @@ def profile(symbol: str) -> SymbolCostProfile
   - GOLD's profile has no floor.
 - **Backtest:** with a floor, a bar whose recorded spread exceeds the scaled spread fills at the recorded one; with `bar_floor = 0`, results equal today's.
 - **Evidence:**
-  - the key contains `h<trusted_from>`, the swap-night mode and cost version 2;
+  - the key contains `h<trusted_from>` and cost version 2;
   - a BTC Evidence Run ignores trades before 2018, and its periods are thirds;
   - GOLD Evidence is unchanged except for the version.
 - **Research:**
@@ -248,8 +248,8 @@ def profile(symbol: str) -> SymbolCostProfile
   - `evaluate_holdout` on the seeded key refuses;
   - the trial count for BTCUSD H4 is 9 after seeding (8 trials plus the holdout row), and 16 for BTCUSD H1.
 - **Engine:**
-  - a BTC Paper Session with the window disabled evaluates and fills at a Saturday timestamp, using the sim with an explicit clock and a fresh quote;
-  - the Cost Check shows BTC swap from 7-night counting.
+  - a disabled Trading Window and its `EntryGate` admit Saturday and Sunday entries, and the default window does not (the sim clock cannot reach a weekend, D16);
+  - the Cost Check shows BTC swap from 7-night counting and flags `swap_every_night`.
 - **Strategy:** the golden fixtures pass unchanged, and the title reads "Trend Breakout".
 - **Parity on real data** (read-only script, `docs/research/btc-2026-09/scripts/crosscheck_app.py`): the app's `evidence_job` path, with profile, floor and every-night swap on `btc.pkl`, reproduces ledger #6 (94 trades, +1.07R) within rounding.
 - **E2E:** BTCUSD appears in the editor, and a BTC Assignment with the window disabled saves. The 24/7 hint appears with the default window.
@@ -276,7 +276,7 @@ def profile(symbol: str) -> SymbolCostProfile
 | D15 | Trusted History | Per-symbol start (`research.trusted_from`), BTCUSD 2018-01-01, in the Evidence key | Evidence on the full feed would include fake 2013–15 intraday bars | Interview | 2026-09-27 |
 | D16 | Sim weekends | The sim clock stays Monday–Friday; BTCUSD joins `DEFAULT_SYMBOLS`; weekend paths are unit-tested at explicit timestamps | Generating weekends would move the legacy golden inputs and E2E figures | Interview | 2026-09-27 |
 | D17 | Seeded ledger | The 24 BTC trials and the spent H4 holdout are seeded into `research_trials` at startup (idempotent) | Without it, a later review could re-score the same holdout and would under-count trials | Interview | 2026-09-27 |
-| D18 | Cost version | `COST_MODEL_VERSION` 1 → 2, and the swap-night mode goes into `EvidenceSpec.key` | Swap counting and floor rules changed; every Evidence key must change with them, and a later change of the terminal's triple day must not reuse old Evidence | Interview | 2026-09-27 |
+| D18 | Cost version | `COST_MODEL_VERSION` 1 → 2; the swap-night mode is recorded in each Evidence row's costs, not in the key | Swap counting and floor rules changed, so every Evidence key must change with them. The key is built before the symbol specification is read; a later change of the terminal's triple day is handled as a cost-rule change (a version bump) | Interview | 2026-09-27 |
 | D19 | Learning on the BTC Arena | Auto-promotion stays off for BTCUSD H4 (the per-Arena default); Optimizer Runs and Challengers may still run and Shadow Trade | The validated set (entry 100) sits at the edge of the search space (entry 40–100), where shorter channels failed 2018–20; a promotion would swap in a set never scored on the holdout and restart the scorecard record (D10) | Interview | 2026-09-27 |
 
 ## Open Questions

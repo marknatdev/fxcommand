@@ -1,8 +1,9 @@
-"""The GOLD pair (spec-better-strategies.md): GOLD Trend on H4 and GOLD Reopen Drift on H1.
+"""The GOLD pair (spec-better-strategies.md): Trend Breakout on GOLD H4 and GOLD Reopen Drift on H1.
 
 Both passed the research bar on the operator's XM history: positive in every period after
 price-scaled spread, slippage and swap, and on a sealed holdout year. See
-docs/research/strategies-2026-09/.
+docs/research/strategies-2026-09/. Trend Breakout also runs as BTC Trend on BTCUSD H4 (entry 100,
+exit 50; spec-btc-strategies.md, docs/research/btc-2026-09/).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ def _fmt(v: float) -> str:
     return f"{v:.5g}"
 
 
-# ------------------------------------------------------------------ GOLD Trend
+# ------------------------------------------------------------------ Trend Breakout
 def _trend_breakout(bars: pd.DataFrame, p: dict) -> pd.DataFrame:
     upper, lower = ind.donchian(bars, p["entry"])
     x_upper, x_lower = ind.donchian(bars, p["exit"])
@@ -45,8 +46,8 @@ def _trend_explain(row: pd.Series, p: dict, action: str) -> str:
 
 TREND_BREAKOUT = Strategy(
     key="trend_breakout",
-    title="GOLD Trend",
-    description="Turtle-style breakout for trending markets (tested on GOLD H4). Goes long when the close breaks "
+    title="Trend Breakout",
+    description="Turtle-style breakout for trending markets (tested on GOLD H4 at 55/20 and BTCUSD H4 at 100/50). Goes long when the close breaks "
     "the highest high of the previous N bars and exits when it breaks the lowest low of a shorter channel. "
     "Long-only unless shorts are allowed.",
     params=(

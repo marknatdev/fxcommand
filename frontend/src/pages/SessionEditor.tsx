@@ -142,6 +142,8 @@ export default function SessionEditor() {
     weekend_close_time: form.weekend_close_time,
   });
   const weekendWarning = form.weekend_close && form.assignments.some((a) => LONG_HOLD.includes(a.timeframe));
+  // a symbol charged swap every night trades every day (BTCUSD): a Monday–Friday window skips its weekends
+  const everyDay = [...new Set((costs.data?.assignments ?? []).filter((c) => c.swap_every_night).map((c) => c.symbol))];
   const known = new Set(symbols.data ?? []);
   const setA = (i: number, patch: Partial<AssignmentInput>) =>
     setForm({ ...form, assignments: form.assignments.map((a, j) => (j === i ? { ...a, ...patch } : a)) });
@@ -399,6 +401,15 @@ export default function SessionEditor() {
       </datalist>
 
       <Card title="Trading window">
+        {everyDay.length > 0 && form.window.enabled && (
+          <div className="mb-3 flex items-start gap-2 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-sm text-warn" data-testid="window-every-day-hint">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+            <span>
+              {everyDay.join(", ")} {everyDay.length > 1 ? "trade" : "trades"} every day and {everyDay.length > 1 ? "are" : "is"} charged swap every night; this window skips
+              weekends. Turn it off to trade 7 days a week.
+            </span>
+          </div>
+        )}
         <WindowEditor value={form.window} onChange={(w) => setForm({ ...form, window: w })} />
       </Card>
 

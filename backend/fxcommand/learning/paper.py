@@ -43,7 +43,7 @@ class Costs:
     spread: float  # price units (ask - bid)
     slippage: float = 0.0  # price units per market/stop fill
 
-    def spread_at(self, price: float) -> float:
+    def spread_at(self, price: float, recorded: float = 0.0) -> float:
         return self.spread
 
     def slippage_at(self, price: float) -> float:
@@ -166,6 +166,7 @@ class PaperTrader:
     last_r: float = 0.0
     _close: str | None = None
     _entry: _Pending | None = None
+    _bar_spread: float = 0.0  # the current bar's recorded spread (price units): a floor when the costs use one
 
     # ------------------------------------------------------------ helpers
     def _r(self, p: OpenPaper, exit_price: float) -> float:
@@ -184,7 +185,7 @@ class PaperTrader:
     def _market_exit(self, o: float) -> float:
         p = self.position
         slip = self.costs.slippage_at(o)
-        return o - slip if p.side == "long" else o + self.costs.spread_at(o) + slip
+        return o - slip if p.side == "long" else o + self.costs.spread_at(o, self._bar_spread) + slip
 
     # ------------------------------------------------------------ one bar
     def on_bar(
@@ -197,11 +198,14 @@ class PaperTrader:
         atr: float,
         sig: dict,
         make_features: FeatureFn | None = None,
+        bar_spread: float = 0.0,
     ) -> tuple[OpenPaper | None, list[PaperTrade]]:
-        """Process bar t (just closed). Returns (position opened at this bar's open, trades closed)."""
+        """Process bar t (just closed). Returns (position opened at this bar's open, trades closed).
+        ``bar_spread`` is the spread the bar recorded, in price units (0 = unknown)."""
         closed: list[PaperTrade] = []
         opened: OpenPaper | None = None
-        spread, slip = self.costs.spread_at(o), self.costs.slippage_at(o)
+        self._bar_spread = bar_spread
+        spread, slip = self.costs.spread_at(o, bar_spread), self.costs.slippage_at(o)
 
         # 1. orders scheduled at the previous close fill at this open
         if self._close and self.position:
@@ -298,6 +302,13 @@ class PaperTrader:
         self.last_r = float(d.get("last_r", 0.0))
 
 
+def bar_spreads(bars: pd.DataFrame, costs: CostLike) -> np.ndarray | None:
+    """Each bar's recorded spread in price units, when the costs price a floor from it; else None."""
+    if not getattr(costs, "bar_floor", 0) or "spread" not in bars.columns:
+        return None
+    return bars["spread"].to_numpy(dtype=float) * float(costs.point)
+
+
 def backtest(
     bars: pd.DataFrame,
     candidate: Candidate,
@@ -319,6 +330,7 @@ def backtest(
     o, h, l, c = (bars[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
     atr = frame["info_atr"].to_numpy(dtype=float)
     cols = {k: frame[k].to_numpy() for k in ("long", "short", "exit_long", "exit_short", "sl_dist", "tp_dist")}
+    recorded = bar_spreads(bars, costs)
     if isinstance(allow_entry, EntryGate):
         allow_entry = allow_entry.for_strategy(candidate.strategy)
     trader = PaperTrader(costs, rules or ExitRules(), allow_entry, weekend)
@@ -332,7 +344,10 @@ def backtest(
                 vec = vector(features.iloc[i], side, costs.spread_at(float(c[i])), trader.last_r)
                 return vec, (scorer(vec) if scorer else None)
 
-        _, closed = trader.on_bar(int(t[i]), float(o[i]), float(h[i]), float(l[i]), float(c[i]), float(atr[i]) if atr[i] == atr[i] else 0.0, sig, mf)
+        _, closed = trader.on_bar(
+            int(t[i]), float(o[i]), float(h[i]), float(l[i]), float(c[i]), float(atr[i]) if atr[i] == atr[i] else 0.0, sig, mf,
+            float(recorded[i]) if recorded is not None else 0.0,
+        )
         trades.extend(closed)
     trades.extend(trader.finish(int(t[-1]), float(c[-1])))
     return trades

@@ -38,7 +38,7 @@ export default function Symbols() {
         }
         actions={<input className="field w-56" placeholder="Filter symbols…" value={filter} onChange={(e) => setFilter(e.target.value)} data-testid="symbol-filter" />}
       />
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1.2fr)]">
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1.2fr)]">
         <Card bodyClass="p-0" testId="symbols-table">
           <div className="max-h-[640px] overflow-auto">
             <table className="w-full">

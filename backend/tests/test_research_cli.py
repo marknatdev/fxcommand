@@ -85,7 +85,7 @@ def test_a_session_arena_is_judged_against_its_champion_with_its_settings(client
                                        "assignments": [{"symbol": "GOLD", "timeframe": "H4", "strategy": "trend_breakout"}]})
     code, r, err = run(capsys, "backtest", "GOLD", "H4", "--strategy", "trend_breakout", "--param", "entry=40", "--hypothesis", "vs champion")
     assert code == 0, err
-    assert r["champion"] is not None and r["champion_label"].startswith("GOLD Trend")
+    assert r["champion"] is not None and r["champion_label"].startswith("Trend Breakout")
     code, snap, _ = run(capsys, "snapshot", "GOLD", "H4")
     assert snap["arena"]["weekend_close"] == "22:30" and snap["arena_trials"] == 1
 
@@ -111,12 +111,12 @@ def test_new_code_with_multi_timeframe_context(client, capsys, tmp_path):
             f["long"] = f["long"] & (bars["d1_up"] > 0)
             return f
 
-        STRATEGY = dataclasses.replace(TREND_BREAKOUT, key="trend_d1_filter", title="GOLD Trend + D1 filter", compute=_compute)
+        STRATEGY = dataclasses.replace(TREND_BREAKOUT, key="trend_d1_filter", title="Trend Breakout + D1 filter", compute=_compute)
     '''))
     try:
         code, r, err = run(capsys, "backtest", "GOLD", "H4", "--script", str(script), "--hypothesis", "D1 trend filter")
         assert code == 0, err
-        assert r["new_code"] and r["candidate_label"].startswith("GOLD Trend + D1 filter")
+        assert r["new_code"] and r["candidate_label"].startswith("Trend Breakout + D1 filter")
         [t] = client.get("/api/research/trials").json()["trials"]
         assert t["strategy"] == "" and "d1_filter.py" in t["hypothesis"]  # new code is recorded by its hypothesis
     finally:

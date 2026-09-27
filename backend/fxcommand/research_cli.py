@@ -162,11 +162,13 @@ def run_backtest(args) -> dict:
     if not snap.get("costs"):
         raise ResearchError("no typical spread is known yet (market shut since the app started): try when it is open")
     base = CostModel(**snap["costs"])
-    costs = CostModel(**{**base.to_dict(), "spread": base.spread * args.spread_x})
+    # the recorded-spread floor scales with the spread multiple, as the Evidence Run's does
+    costs = CostModel(**{**base.to_dict(), "spread": base.spread * args.spread_x, "bar_floor": base.bar_floor * args.spread_x})
     trials = int(snap["arena_trials"]) + 1  # this run counts
     result = evaluate_hypothesis(
         bars, candidate, champion, costs, rules, EntryGate(window, tf.seconds),
         WeekendClose(weekend_close, tf.seconds) if weekend_close else None, trials,
+        history_from=int(snap.get("trusted_from") or 0),
     )
     result.update(
         hypothesis=args.hypothesis, candidate_label=candidate.label(), champion_label=champion.label() if champion else None,
