@@ -76,6 +76,54 @@ def test_history_reads_in_pages(mt5_broker):
     print(f"\n{sample} H4: {len(whole)} bars read in 3 pages, oldest {time.strftime('%Y-%m-%d', time.gmtime(stitched[0]))}")
 
 
+def test_gold_reopen_timing_and_spread(mt5_broker):
+    """READ-ONLY probe of what GOLD Reopen Drift and the Pending Entries rely on (spec: MT5 smoke), from
+    the recent history so it runs any day: the first M1 bar and tick after the daily break, that no H1
+    bar exists for 00:00 (the first is 01:00) and the D1 bar is stamped 00:00, and the spread per minute
+    from 01:00 to 01:15 (the reopen spread the Gold Reopen profile's 100-point cap allows for)."""
+    import datetime as dt
+
+    import MetaTrader5 as mt5
+
+    names = mt5_broker.symbols()
+    sym = next((n for n in names if n.upper().startswith("GOLD")), None)
+    if sym is None:
+        pytest.skip("no GOLD symbol in Market Watch")
+    info = mt5_broker.symbol_info(sym)
+    utc = dt.timezone.utc
+    last = int(mt5_broker.closed_bars(sym, Timeframe.D1, 1)["time"].iloc[-1])
+    days = [d for d in (last - k * 86400 for k in range(0, 10)) if (d // 86400 + 3) % 7 < 5 and (d // 86400 + 3) % 7 != 0][:4]  # Tue-Fri reopens
+    assert days, "no recent weekday"
+    print(f"\n{sym} daily reopen (server time), last {len(days)} trading days:")
+    for day in days:
+        at = lambda secs: dt.datetime.fromtimestamp(day + secs, utc)  # noqa: E731
+        m1 = mt5.copy_rates_range(sym, mt5.TIMEFRAME_M1, at(-10 * 60), at(3600 + 20 * 60))
+        h1 = mt5.copy_rates_range(sym, mt5.TIMEFRAME_H1, at(-3600), at(3 * 3600))
+        d1 = mt5.copy_rates_range(sym, mt5.TIMEFRAME_D1, at(0), at(3600))
+        ticks = mt5.copy_ticks_range(sym, at(55 * 60), at(3600 + 16 * 60), mt5.COPY_TICKS_ALL)
+        if m1 is None or len(m1) == 0:
+            continue
+        after = [r for r in m1 if int(r["time"]) >= day]
+        first_bar = int(after[0]["time"]) - day if after else None
+        h1_times = sorted({int(t) - day for t in h1["time"]}) if h1 is not None else []
+        first_tick = next((int(t["time"]) - day for t in ticks if int(t["time"]) >= day), None) if ticks is not None else None
+        spreads = [int(r["spread"]) for r in after if 3600 <= int(r["time"]) - day < 3600 + 15 * 60]  # the bar column: a per-bar summary
+        per_min: dict[int, list[float]] = {}  # the real spread: ask - bid of every tick, per minute after 01:00
+        for t in ticks if ticks is not None else ():
+            m = (int(t["time"]) - day - 3600) // 60
+            if 0 <= m < 15 and t["ask"] > 0 and t["bid"] > 0:
+                per_min.setdefault(m, []).append((float(t["ask"]) - float(t["bid"])) / info.point)
+        tick_spread = [(round(max(v)), round(sorted(v)[len(v) // 2])) for _, v in sorted(per_min.items())]
+        label = dt.datetime.fromtimestamp(day, utc).strftime("%a %Y-%m-%d")
+        print(f"  {label}: first M1 bar {first_bar // 60 if first_bar is not None else '-'} min after 00:00, first tick {first_tick}s, "
+              f"H1 bars at {[t // 3600 for t in h1_times if t >= 0]}h, D1 {'00:00' if d1 is not None and len(d1) and int(d1[0]['time']) == day else '?'}, "
+              f"\n      spread 01:00-01:15 per minute from ticks (max, median points) {tick_spread}\n      bar spread column {spreads}")
+        assert first_bar is not None and first_bar >= 55 * 60, "a GOLD bar inside the daily break"
+        assert 0 not in h1_times, "an H1 bar stamped 00:00: the break is not where the engine expects it"
+        assert d1 is None or len(d1) == 0 or int(d1[0]["time"]) == day
+    print(f"  (the Gold Reopen profile allows 100 points; the terminal quotes {mt5.symbol_info(sym).spread} points now, point {info.point})")
+
+
 def test_positions_and_history_read(mt5_broker):
     pos = mt5_broker.positions()
     hist = mt5_broker.history(int(time.time()) - 7 * 86400)

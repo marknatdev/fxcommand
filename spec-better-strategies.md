@@ -482,8 +482,9 @@ New catalog entries only. The existing strategies' behaviour and golden rows are
 - [x] After "Max bars in chart" was raised (2026-09-26): M1/M5/M15 re-pulled read-only from 2020 and the scalping research re-run (`scalp2.py`, `scalp3.py`). No design passed (D53)
 
 ### 10. Verify
-- [ ] `uv run pytest` green
-- [ ] `npm run build` clean
-- [ ] `cd e2e && npm test` green, with new specs for GOLD dual Assignments, Cost Check, Paper Account, scorecard and Reviews
-- [ ] `playwright-cli` pass over every page (console errors, phone width)
-- [ ] `uv run pytest -m mt5 -o addopts=""` read-only, with the reopen timing and spread probe
+- [x] `uv run pytest` green (357 passed)
+- [x] `npm run build` clean
+- [x] `cd e2e && npm test` green (38), with `08-gold-strategies` for GOLD dual Assignments, Evidence badges, Cost Check block and override, Paper Account, stats split, scorecard and Reviews
+- [x] `playwright-cli` pass over every page at 1440 and 375 px: no console errors, no horizontal overflow
+- [x] `uv run pytest -m mt5 -o addopts=""` read-only (6 passed; the Paper Session on the real feed skips while the market is closed), with the reopen probe from recent history (`test_gold_reopen_timing_and_spread`): the first M1 bar and tick at 01:00, no 00:00 H1 bar, D1 stamped 00:00, the 01:00–01:15 spread per minute from ticks (the bar spread column is a per-bar summary and understates the reopen). `fxcommand-research snapshot` checked read-only on the real feed (engine off, empty database)
+- [ ] Owed while the market is open (Monday): the Paper Session on the real feed, and a `fxcommand-research backtest` priced from a real typical spread
