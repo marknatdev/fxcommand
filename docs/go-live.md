@@ -27,6 +27,14 @@ What has **not** been exercised by anyone yet: a real order through your broker.
 5. Paper sizes positions from the real account's equity. On a small account (e.g. $52 at 1% risk) most signals are rejected for size (`volume_min`) — enable **Allow the minimum lot** on the Risk Profile the Paper Session uses (Risk page) with a cap you would accept later, or Paper will show almost no trades.
 6. The Overview, Strategies and History statistics include Paper trades (they carry a PAPER badge); the Risk page and the daily-loss limits count only the account's own trades.
 
+### BTC Trend (Paper only, spec-btc-strategies)
+
+1. Create a separate Paper Session named "BTC Trend" with one Assignment: BTCUSD H4, **Trend Breakout**, entry 100, exit 50, ATR period 20, stop 2.0, no take-profit, shorts off.
+2. Turn the Trading window **off**. BTCUSD trades every day, and the editor warns while a Monday–Friday window is on. Leave Weekend Close off.
+3. Leave auto-promotion off for BTCUSD H4 (D19).
+4. Expect about 12 trades a year. The scorecard reads "too few trades" for roughly a year. Its holdout passed only because of one open position, so do not take it to Broker execution before its Paper record sits in the band.
+5. Swap is modelled as charged every night, weekends included (the worst case). Once a BTC position has been held over a weekend, check one real statement and report what was charged.
+
 ## Stage 2 — Broker execution on the demo account
 
 1. Stop the Paper Session, switch it to **Execution: Broker** (or create a new one).

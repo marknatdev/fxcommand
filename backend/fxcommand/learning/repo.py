@@ -218,6 +218,10 @@ class LearningRepo:
     def update_trial(self, trial_id: int, **fields: Any) -> ResearchTrialRow | None:
         return self._update(ResearchTrialRow, trial_id, **fields)
 
+    def has_trial_source(self, source: str) -> bool:
+        with self._db() as db:
+            return db.exec(select(ResearchTrialRow.id).where(ResearchTrialRow.source == source).limit(1)).first() is not None
+
     def trials(self, symbol: str | None = None, timeframe: str | None = None, limit: int = 100) -> list[ResearchTrialRow]:
         """Newest first."""
         with self._db() as db:

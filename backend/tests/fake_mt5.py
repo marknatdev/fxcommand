@@ -85,8 +85,9 @@ class FakeMt5:
         self.__dict__.setdefault("rate_calls", []).append((sym, tf, start, count))
         n = count
         t = self.now - 60 * (np.arange(n)[::-1] + start)  # index 0 = the forming bar
-        a = np.zeros(n, dtype=[("time", "i8"), ("open", "f8"), ("high", "f8"), ("low", "f8"), ("close", "f8"), ("tick_volume", "i8")])
+        a = np.zeros(n, dtype=[("time", "i8"), ("open", "f8"), ("high", "f8"), ("low", "f8"), ("close", "f8"), ("tick_volume", "i8"), ("spread", "i4")])
         a["time"], a["open"], a["high"], a["low"], a["close"], a["tick_volume"] = t, self.bid, self.bid + 1e-4, self.bid - 1e-4, self.bid, 10
+        a["spread"] = 12
         return a
 
     # -- positions / history

@@ -32,7 +32,7 @@ from ..journal import EventBus, Journal
 from ..tasks import cancel_and_wait
 from ..risk import Exposure, GateInput, LiveCaps, Rejected, RiskLimits, TradingWindow, check, check_margin, manage
 from ..learning.candidate import Candidate
-from ..learning.costs import CostModel
+from ..learning.costs import CostModel, swap_every_night
 from ..risk.costcheck import CostEstimate, estimate_cost
 from ..risk.gate import MAX_QUOTE_AGE
 from ..risk.spreads import SpreadBook
@@ -501,7 +501,8 @@ class SessionManager:
             spread = self.spreads.spread_for(a.symbol, tick, self.now)
             stop = float(strat.signals(bars, p)["sl_dist"].iloc[-1]) if len(bars) else 0.0
             # swap is shown beside the cost, never blocks (D38): nights per trade from Evidence or Shadow Trades
-            hold = self._learn(lambda L, a=a, key=key, p=p: L.expected_hold(a.symbol, a.timeframe, key, p))
+            every = swap_every_night(getattr(info, "swap_rollover3days", 3))
+            hold = self._learn(lambda L, a=a, key=key, p=p, every=every: L.expected_hold(a.symbol, a.timeframe, key, p, every))
             swap = 0.0
             if hold:
                 cm = CostModel.from_symbol(info, spread=spread or 0.0)
@@ -516,7 +517,7 @@ class SessionManager:
             out.append({
                 "symbol": a.symbol, "timeframe": a.timeframe, "strategy": key, **est.to_dict(), "spread": spread, "stop": stop,
                 "override": override is not None, "allowed": not est.blocked or override is not None,
-                "swap_nights": hold["nights"] if hold else None, "swap_source": hold["source"] if hold else None,
+                "swap_nights": hold["nights"] if hold else None, "swap_source": hold["source"] if hold else None, "swap_every_night": every,
             })
         return out
 

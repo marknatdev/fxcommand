@@ -549,6 +549,7 @@ export interface CostCheckRow {
   swap_r?: number;
   swap_nights?: number | null; // swap nights per trade, from Evidence or Shadow Trades (null: not known yet)
   swap_source?: string | null;
+  swap_every_night?: boolean; // charged every night, weekends included (a symbol that trades every day)
   threshold?: number;
   blocked?: boolean;
   reason?: string;

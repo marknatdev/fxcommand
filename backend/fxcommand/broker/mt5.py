@@ -185,6 +185,7 @@ class Mt5Broker:
                 "low": df["low"],
                 "close": df["close"],
                 "volume": df["tick_volume"].astype(float),
+                "spread": df["spread"].astype(float),  # points, as the bar recorded it (the recorded-spread floor)
             }
         )
 

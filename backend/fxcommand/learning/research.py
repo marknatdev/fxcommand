@@ -17,7 +17,7 @@ import pandas as pd
 
 from ..risk.window import WeekendClose
 from .candidate import Candidate
-from .costs import CostModel
+from .costs import RESEARCH_START, CostModel, trusted_from  # noqa: F401 (re-exported: research's names)
 from .evidence import settings_hash
 from .objective import r_stats
 from .paper import EntryGate, ExitRules, backtest
@@ -25,7 +25,7 @@ from .paper import EntryGate, ExitRules, backtest
 HOLDOUT_MONTHS = 12
 SCALP_HOLDOUT_MONTHS = 3
 SCALP_TIMEFRAMES = ("M1", "M5")
-HOLDOUT_MIN_TRADES = 5  # GOLD Trend takes about 9 trades a year: a higher bar would fail every H4 finalist
+HOLDOUT_MIN_TRADES = 5  # Trend Breakout takes about 9 trades a year on GOLD H4: a higher bar would fail every H4 finalist
 HOLDOUT_RULE = (
     f"at least {HOLDOUT_MIN_TRADES} trades opened in the holdout, a positive mean R after costs and swap "
     "(2× the typical spread), and a mean R at least the Champion's on the same bars"
@@ -83,9 +83,9 @@ def holdout_job(
 
 # ------------------------------------------------------------ research evaluation (the CLI)
 MIN_RESEARCH_TRADES = 30
-# Research is judged from 2010 (the spec's research periods 2010–17, 2018–21, 2022–26): older history
-# (GOLD H4 reaches 2001) only warms indicators up, so a hypothesis cannot pass on years no period checks
-RESEARCH_START = calendar.timegm((2010, 1, 1, 0, 0, 0))
+# Research is judged from RESEARCH_START (2010, costs.py), or later where a symbol's Trusted History
+# starts later (BTCUSD 2018): older history only warms indicators up, so a hypothesis cannot pass on
+# years no period checks
 RESEARCH_NEIGHBOURS = 4
 NEIGHBOUR_SCALE = 0.12  # the Optimizer's own neighbourhood (optimizer._judge_robustness)
 
@@ -115,6 +115,7 @@ def evaluate_hypothesis(
     weekend: WeekendClose | None,
     trials: int,
     seed: int = 0,
+    history_from: int = RESEARCH_START,
 ) -> dict:
     """The Strategy Review's bar for a finalist (spec: Claude Strategy Review, step 5), on research bars:
 
@@ -123,12 +124,12 @@ def evaluate_hypothesis(
     - an SQN above max(Champion's, 0) plus the selection penalty for ``trials`` ledger trials;
     - every neighbouring parameter set (the Optimizer's neighbourhood) still positive.
 
-    Only trades signalled from ``RESEARCH_START`` (2010) count; earlier bars warm indicators up.
-    Win rate is reported, never optimised (D48)."""
+    Only trades signalled from ``history_from`` (the symbol's Trusted History, 2010 at the earliest)
+    count; earlier bars warm indicators up. Win rate is reported, never optimised (D48)."""
     from .objective import deflation
     from .candidate import perturb
 
-    first, last = max(int(bars["time"].iloc[0]), RESEARCH_START), int(bars["time"].iloc[-1])
+    first, last = max(int(bars["time"].iloc[0]), RESEARCH_START, int(history_from)), int(bars["time"].iloc[-1])
     run = lambda c: _summary(backtest(bars, c, costs, rules, gate, weekend=weekend), first, last)  # noqa: E731
     cand = run(candidate)
     champ = run(champion) if champion is not None else None

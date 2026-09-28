@@ -1,6 +1,6 @@
 ---
 name: gold-review
-description: The weekly Claude Strategy Review for FXCommand's GOLD strategies — read the week's trades, classify mistakes, test hypotheses on the research snapshot (every test counted in the trial ledger), score finalists once on the sealed holdout, submit Challengers or open code PRs, and file a report. Use for "/gold-review", "run the strategy review", or the Saturday scheduled run.
+description: The weekly Claude Strategy Review for FXCommand's GOLD and BTC strategies — read the week's trades, classify mistakes, test hypotheses on the research snapshot (every test counted in the trial ledger), score finalists once on the sealed holdout, submit Challengers or open code PRs, and file a report. Use for "/gold-review", "run the strategy review", or the Saturday scheduled run.
 ---
 
 # GOLD Strategy Review
@@ -14,6 +14,8 @@ You MAY: read everything through the read-only MCP tools; export and read the re
 You MAY NOT — and the scheduled run is configured so you cannot: start, pause, resume or stop Sessions; use the Kill Switch; promote or roll back a Champion; enable live trading; change risk, Live Caps or the Equity Floor; override the Cost Check; reset the Paper Account; start Evidence Runs; merge anything; call any order method; talk to the HTTP API except through the tools below. If a step seems to need one of these, write it in the report as a recommendation for the operator.
 
 Never put account numbers, balances, P&L or equity in a PR, a commit or any file in the repository (the repo is public). Figures belong only in `submit_review` (local database).
+
+Never change how costs are priced or judged in a review PR: `learning/costs.py` (`SYMBOL_PROFILES`, `COST_MODEL_VERSION`, the cost rules), `learning/seeds.py`, or the research and holdout rules in `learning/research.py`. Tests pin them; if one looks wrong, recommend the change to the operator in the report.
 
 ## Tools
 
@@ -29,9 +31,15 @@ Never put account numbers, balances, P&L or equity in a PR, a commit or any file
 
 ## Arenas under review
 
-- **GOLD H4** — GOLD Trend (`trend_breakout`, Turtle 55/20, long-only).
+- **GOLD H4** — Trend Breakout (`trend_breakout`, Turtle 55/20, long-only).
 - **GOLD H1** — GOLD Reopen Drift (`session_drift`, buy the 01:00 reopen, exit 04:00).
 - **GOLD M5** — the scalping research track (M15 context, M1 trigger inputs; 3-month holdout). Nothing trades here until a design passes the whole bar; a design that passes ships as its own Strategy with its own Assignment, and goes through the Cost Check like any other. Research so far (D51–D53): 10 designs lost after XM costs; the NY opening-range breakout is the one watched hypothesis.
+- **BTCUSD H4** — BTC Trend (`trend_breakout`, entry 100, exit 50, stop 2×ATR(20), long-only), Paper-only (spec-btc-strategies.md).
+  - BTCUSD trades every day and is charged swap every night. Its research is judged from 2018 (Trusted History), with each bar priced at no less than its recorded spread.
+  - The ledger already holds 24 BTC trials (8 on H4, 16 on H1) and the **spent** holdout of the Champion's key: never try to score it again.
+  - Its holdout passed only because of one position still open at the end; the closed trades lost. So watch its Paper record in the scorecard, which needs about a year of trades before it says anything.
+  - Auto-promotion stays off for this Arena (D19): recommend, never enable.
+  - No intraday BTC research unless the hypothesis names the cost it beats. All 16 H1 designs lost to the spread.
 
 ## The loop
 
@@ -54,10 +62,10 @@ Never put account numbers, balances, P&L or equity in a PR, a commit or any file
 
 ## Report (`submit_review`)
 
-- `title`: "GOLD review YYYY-MM-DD".
+- `title`: "Strategy review YYYY-MM-DD".
 - `summary` (sent to Telegram, 1–3 lines): what was found and what was done, e.g. "3 hypotheses on GOLD H4, 1 finalist failed its holdout; no Challenger submitted."
 - `report` (markdown): the week's mistakes by class with examples; hypotheses tested with their ledger trial ids and verdicts; finalists and holdout results; actions (Challenger run ids, PR links); recommendations for the operator (e.g. Session settings, Cost Check concerns) — recommendations only.
-- `arenas`: e.g. ["GOLD H4", "GOLD H1"]; `finalists`: [{"label", "hypothesis", "holdout": "passed|failed"}]; `actions`: [{"kind": "challenger"|"pr", "label", "url"?}].
+- `arenas`: e.g. ["GOLD H4", "GOLD H1", "BTCUSD H4"]; `finalists`: [{"label", "hypothesis", "holdout": "passed|failed"}]; `actions`: [{"kind": "challenger"|"pr", "label", "url"?}].
 
 ## Pull request format
 

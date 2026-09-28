@@ -84,6 +84,7 @@ class SimSymbolSpec:
     swap_short: float = 0.0
     swap_mode: int = 1
     swap_rollover3days: int = 3  # MT5 day of week (0 = Sunday): Wednesday charges three nights
+    stream: int = 0  # 0 = the shared generator; >0 = its own, so adding the Symbol moves no other Symbol's path
 
     @property
     def point(self) -> float:
@@ -108,6 +109,12 @@ DEFAULT_SYMBOLS: tuple[SimSymbolSpec, ...] = (
     SimSymbolSpec(
         "GOLD", "Gold vs US Dollar", "XAU", "USD", 2350.00, 2, 100, 1.4e-4, 30, stops_level=50,
         open_minutes=GOLD_OPEN_MINUTES, reopen_spread_points=70, swap_long=-86.84, swap_short=19.79,
+    ),
+    # XM BTCUSD (spec-btc-strategies D16): 1 BTC per lot, a fixed $40 spread, no daily break, swap
+    # charged every night (it reports no valid triple day). The sim clock still skips weekends.
+    SimSymbolSpec(
+        "BTCUSD", "Bitcoin vs US Dollar", "BTC", "USD", 84_000.00, 2, 1, 6e-4, 4000, stops_level=0, volume_max=80.0,
+        swap_long=-3500.13, swap_short=-2333.42, swap_rollover3days=7, stream=1,
     ),
 )
 
@@ -208,6 +215,7 @@ class SimBroker:
         self._last_r: dict[str, float] = {}
         self._rng = np.random.default_rng(seed)
         self._specs = {s.name: s for s in symbols}
+        self._own_rng = {s.name: np.random.default_rng([seed, 100 + s.stream]) for s in symbols if s.stream}
         self._balance = balance
         self._leverage = leverage
         self._connected = False
@@ -239,8 +247,9 @@ class SimBroker:
         times = times[((times // DAY + 3) % 7) < 5]
         n = len(times)
         for spec in self._specs.values():
-            noise = self._rng.standard_normal(n)
-            drift_noise = self._rng.standard_normal(n)
+            rng = self._own_rng.get(spec.name, self._rng)
+            noise = rng.standard_normal(n)
+            drift_noise = rng.standard_normal(n)
             drift = pd.Series(drift_noise).ewm(alpha=1 / 400, adjust=False).mean().to_numpy()
             drift *= 0.9 * spec.sigma  # slow-moving trend component -> strategies see regimes
             rets = drift + spec.sigma * noise
@@ -253,10 +262,10 @@ class SimBroker:
             opens = np.empty(n)
             opens[0] = closes[0]
             opens[1:] = closes[:-1]
-            wick = np.abs(self._rng.standard_normal((2, n))) * spec.sigma * 0.6
+            wick = np.abs(rng.standard_normal((2, n))) * spec.sigma * 0.6
             highs = np.maximum(opens, closes) * (1 + wick[0])
             lows = np.minimum(opens, closes) * (1 - wick[1])
-            vols = self._rng.integers(20, 400, n).astype(float)
+            vols = rng.integers(20, 400, n).astype(float)
             # the random draws above are the same whether or not the Symbol has trading hours, so
             # other Symbols' paths do not depend on it; closed minutes are dropped afterwards
             keep = is_open(spec, times)
@@ -275,11 +284,12 @@ class SimBroker:
     def _generate_deep(self, seed: int, m1_start: int, days: int) -> None:
         """H1 bars for ``days`` before ``m1_start``, from their own generator so the M1 history (and
         every test pinned on it) is unchanged. The path ends at the first M1 open."""
-        rng = np.random.default_rng([seed, 1])
+        shared = np.random.default_rng([seed, 1])
         end = m1_start // 3600 * 3600
         times = np.arange((end - days * DAY) // DAY * DAY, end, 3600, dtype=np.int64)
         times = times[((times // DAY + 3) % 7) < 5]
         for spec in self._specs.values():
+            rng = np.random.default_rng([seed, 1, spec.stream]) if spec.stream else shared
             s = self._series[spec.name]
             ts = times
             if spec.open_minutes is not None:  # an hour trades if any of its minutes does
@@ -316,9 +326,10 @@ class SimBroker:
             for name, spec in self._specs.items():
                 s = self._series[name]
                 o = self._price[name]
+                rng = self._own_rng.get(name, self._rng)
                 a = 1 / 400
-                self._drift[name] = (1 - a) * self._drift[name] + a * 0.9 * spec.sigma * self._rng.standard_normal()
-                r = self._drift[name] + spec.sigma * self._rng.standard_normal() + self._momentum * self._last_r.get(name, 0.0)
+                self._drift[name] = (1 - a) * self._drift[name] + a * 0.9 * spec.sigma * rng.standard_normal()
+                r = self._drift[name] + spec.sigma * rng.standard_normal() + self._momentum * self._last_r.get(name, 0.0)
                 self._last_r[name] = r
                 if i == 0 and shocks and name in shocks:
                     # a shock is a price gap (news, weekend): the bar OPENS at the new level, so
@@ -326,11 +337,11 @@ class SimBroker:
                     o = o * (1 + shocks[name])
                     r = 0.0
                 c = o * math.exp(r)
-                w1, w2 = np.abs(self._rng.standard_normal(2)) * spec.sigma * 0.6
+                w1, w2 = np.abs(rng.standard_normal(2)) * spec.sigma * 0.6
                 h = max(o, c) * (1 + w1)
                 l = min(o, c) * (1 - w2)
                 d = spec.digits
-                vol = float(self._rng.integers(20, 400))
+                vol = float(rng.integers(20, 400))
                 self._price[name] = round(c, d)
                 if is_open(spec, bar_time):  # a shut Symbol draws the same numbers but prints no bar
                     s.append(bar_time, round(o, d), round(h, d), round(l, d), round(c, d), vol)

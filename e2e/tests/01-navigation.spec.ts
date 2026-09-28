@@ -59,7 +59,7 @@ test("strategy catalog lists the three v1 strategies with parameters", async ({ 
 test("symbols page shows live quotes and a candle chart", async ({ page }) => {
   const errors = watchErrors(page);
   await page.goto("/symbols");
-  await expect(page.getByTestId("symbol-row")).toHaveCount(4);
+  await expect(page.getByTestId("symbol-row")).toHaveCount(5);
   await page.getByTestId("symbol-row").filter({ hasText: "GOLD" }).click();
   await expect(page.getByTestId("symbol-chart")).toContainText("GOLD");
   await expect(page.getByTestId("candle-chart").locator("canvas").first()).toBeVisible();

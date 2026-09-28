@@ -22,7 +22,7 @@ import pandas as pd
 
 from ..risk.window import TradingWindow, WeekendClose
 from .candidate import Candidate
-from .costs import COST_MODEL_VERSION, CostModel, rollover_nights
+from .costs import COST_MODEL_VERSION, CostModel, trusted_from
 from .objective import r_stats
 from .paper import EntryGate, ExitRules, backtest
 
@@ -66,6 +66,7 @@ class EvidenceSpec:
     window: dict = field(default_factory=dict)  # canonical TradingWindow dict
     weekend_close: str = ""  # "" = off, else the Friday close time
     cost_version: int = COST_MODEL_VERSION
+    history_from: int = 0  # the symbol's Trusted History start: trades signalled before it do not count
 
     @classmethod
     def of(
@@ -86,10 +87,11 @@ class EvidenceSpec:
             rules=rules or ExitRules(),
             window=TradingWindow.from_dict(window).to_dict(),
             weekend_close=weekend_close or "",
+            history_from=trusted_from(symbol),
         )
 
     def with_weekend_close(self, close_time: str | None) -> "EvidenceSpec":
-        return EvidenceSpec(self.symbol, self.timeframe, self.candidate, self.rules, self.window, close_time or "", self.cost_version)
+        return EvidenceSpec(self.symbol, self.timeframe, self.candidate, self.rules, self.window, close_time or "", self.cost_version, self.history_from)
 
     @property
     def rules_hash(self) -> str:
@@ -102,7 +104,8 @@ class EvidenceSpec:
     @property
     def key(self) -> str:
         return "|".join(
-            (self.symbol, self.timeframe, self.candidate.key, self.rules_hash, self.weekend_close or "off", self.window_hash, f"c{self.cost_version}")
+            (self.symbol, self.timeframe, self.candidate.key, self.rules_hash, self.weekend_close or "off", self.window_hash, f"c{self.cost_version}",
+             f"h{self.history_from}")
         )
 
     def row_fields(self) -> dict:
@@ -119,13 +122,14 @@ class EvidenceSpec:
             "window_hash": self.window_hash,
             "weekend_close": self.weekend_close,
             "cost_version": self.cost_version,
+            "history_from": self.history_from,
         }
 
     @classmethod
     def from_row(cls, row) -> "EvidenceSpec":
         return cls(
             row.symbol, row.timeframe, Candidate.of(row.strategy, row.params), ExitRules(**row.exit_rules),
-            row.window, row.weekend_close, row.cost_version,
+            row.window, row.weekend_close, row.cost_version, int(getattr(row, "history_from", 0) or 0),
         )
 
 
@@ -153,15 +157,17 @@ def evidence_job(
     rules: ExitRules,
     gate: EntryGate,
     weekend: WeekendClose | None,
+    history_from: int = 0,
 ) -> dict:
     """The Backtest and its statistics. Top level and made of plain data, so it runs in the learning
-    process pool (keep it picklable: no lambdas)."""
-    trades = backtest(bars, candidate, costs, rules, gate, weekend=weekend)
+    process pool (keep it picklable: no lambdas). Only trades signalled from ``history_from`` (the
+    symbol's Trusted History) count; older bars warm indicators up."""
+    trades = [t for t in backtest(bars, candidate, costs, rules, gate, weekend=weekend) if t.signal_time >= history_from]
     rs = np.array([t.r for t in trades], dtype=float)
     close_ts = np.array([t.close_time for t in trades], dtype=np.int64)
     st = r_stats(rs)
-    first, last = (int(bars["time"].iloc[0]), int(bars["time"].iloc[-1])) if len(bars) else (0, 0)
-    nights = [rollover_nights(t.open_time, t.close_time, costs.triple_weekday) for t in trades]
+    first, last = (max(int(bars["time"].iloc[0]), int(history_from)), int(bars["time"].iloc[-1])) if len(bars) else (0, 0)
+    nights = [costs.nights(t.open_time, t.close_time) for t in trades]
     return {
         "avg_nights": round(float(np.mean(nights)), 3) if trades else None,  # swap nights per trade (the Cost Check shows swap)
         "long_share": round(sum(t.side == "long" for t in trades) / len(trades), 3) if trades else None,
