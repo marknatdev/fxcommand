@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.nbi
+*.nbc
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+data/
+node_modules/
+web/dist/

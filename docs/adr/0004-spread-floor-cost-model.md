@@ -1,0 +1,5 @@
+# Cost Model charges max(bar spread, Spread Floor), not the recorded bar spread
+
+XM's historical bars record the minimum spread inside each bar. That understates real cost: GOLD bars show a median of 30-40 points, but 14 days of real ticks (probed 2026-10-21) show a median of 55 points. EURUSD shows 16 and 20. The Cost Model therefore charges max(bar spread, Spread Floor). The Spread Floor is the per-symbol tick median, re-measured weekly. The model also charges 1 point of slippage per side and swap for each night held, including the triple swap. The Gauntlet's stress check re-runs the test at 2× spread. A model that is too cheap was the main reason earlier scalping results looked better than reality.
+
+The Spread Floor is applied in points to all history. GOLD traded at roughly a third of today's price in 2014, so early folds are charged more than their real cost. This is deliberate. It errs on the conservative side and keeps the model simple. Each Trial stores the floor and swap values it used, so the Ledger stays reproducible even after the weekly re-measurement.
