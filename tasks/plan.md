@@ -1,73 +1,152 @@
-# Implementation Plan: Layer A, Milestone M1 (pure core)
+# Implementation Plan: Layer A, Milestone M2 (Gauntlet and Ledger)
 
 ## Overview
 
-M1 builds the pure core of the Verdict Engine: the `blocks` and `engine` modules from [the spec](../docs/spec/layer-a-verdict-engine.md) §3.2, §5 and §6.1. It runs entirely on `SyntheticBarSource`, with no MT5, no LLM and no network. M1 is done when a Strategy Spec composed from the Block Library v1 can be validated, expanded into its grid, compiled into signals and simulated into trades in R, with costs. Golden trades worked out by hand must match, the look-ahead property tests must pass, and one combination over 12 years of M15 must take ≤ 0.5 s.
+M2 turns the M1 engine into a Verdict. The `gauntlet` module runs one Trial of a Hypothesis through every Pass Bar check (spec §6.2–6.4). The `ledger` module records every Hypothesis and Trial, append-only, with Trial counting, budgets and Holdout Requests. The `market` facade becomes the only door to bars, and it locks the Holdout (spec §4).
 
-## Architecture decisions for M1
+M2 runs on `SyntheticBarSource` only. It uses no MT5 (that is M3) and no LLM (M4).
 
-- **Layout:**
-  - one uv project at the repo root, Python 3.12;
-  - package `src/vibedesk/`, tests in `tests/`;
-  - the frontend comes later in `web/` (M5).
-- **Bars:** an immutable container of numpy arrays: UTC epoch seconds, bid open/high/low/close, spread in points, and symbol metadata (point size, digits). Everything after it works on arrays; pandas is used only at the edges.
-- **Blocks:**
-  - Each Block is a pure function from (bars, params) to boolean or float arrays, and is registered with a pydantic parameter schema.
-  - `compile()` combines one entry with its filters (AND) into long and short signal arrays, plus the exit parameters.
-- **Engine:**
-  - `simulate()` is one numba-jitted loop over bars, because fills are path-dependent.
-  - Inputs: signal arrays, bars, optional M1 bars, and a `CostSnapshot`.
-  - Output: an array of trades (entry and exit index, time and price, side, R, costs in R, exit reason).
-- **Sessions:**
-  - Exchange-local session windows are converted with `zoneinfo` from UTC bar times.
-  - This is pure and covered by DST-edge tests.
-  - The converter from server time to UTC is M3 work, since synthetic bars are already in UTC.
-- **Guard tests from day one:**
-  - §9.1, no order calls anywhere in `src/`;
-  - §9.5, the look-ahead property test, which grows as Blocks are added.
+**Done when (spec §10):**
+- the known-answer tests (§9.6) pass;
+- a Trial on 12 years of synthetic M15 takes ≤ 60 s;
+- the Holdout and Ledger guard tests pass.
+
+Detailed tasks: [todo.md](todo.md). The finished M1 plan: [done/m1-plan.md](done/m1-plan.md).
+
+## Definitions the tests depend on
+
+These are fixed before code, so no test is tuned after the fact.
+
+### Walk-forward (spec §6.2)
+- **Folds:** blind years 2017 … 2024. Each fold trains on the 3 calendar years before its blind year.
+- **One simulation per combination.** Every grid combination is compiled and simulated once over the whole Research Window (2014-01-01 → 2024-12-31). Folds are cut from that one record, never compiled per fold, so indicator warm-up is paid once.
+- **Training metrics:** a trade counts for a training window only if it enters inside the window and exits before the window ends. A trade entered on 30 December and exiting in the blind year never feeds parameter selection.
+- **Parameter selection:** the combination with the best training profit factor among those with ≥ 30 training trades. Ties go to the earlier combination in grid order. If no combination qualifies, the fold trades nothing and counts as a losing fold.
+- **Blind trades:** each fold takes its trades from its chosen combination's own simulation: the trades entered inside the blind year. Each trade keeps that combination's exits until it closes, even after the year ends.
+- **Boundaries:** at each fold boundary, drop next-fold trades that enter before the previous fold's last trade has exited. The stitched record therefore never holds two positions.
+- **Spread stress:** the same fold selections are re-simulated at 2× spread. Parameter selection is not re-run under stress.
+- **Holdout selection:** the choice uses 2022–2024 with the same rule (trades exiting by 2024-12-31). The trades are those entered on or after 2025-01-01, from a simulation over all data, which needs an approved Holdout grant.
+
+### Coin-Flip Baseline (spec §6.3)
+- **1,000 runs**, seeded from the Trial id.
+- **Each run, each blind year:**
+  - the same number of trades as the strategy took in that year;
+  - entry bars drawn with the same server-hour distribution as the strategy's entries;
+  - the same long/short mix;
+  - the fold's chosen combination's exits (stop, target, trailing, time, opposite);
+  - the same Cost Model.
+- **Exact trade counts.** A random entry that lands while a trade is open is deferred to the next bar where the position is flat. If deferrals push entries past the end of the year, that run is redrawn (up to 20 times) and recorded.
+- **Why exact counts matter:** fewer baseline trades would narrow the net-R distribution and make the 95th percentile easier to beat, which is a bias toward false CANDIDATEs. A test asserts that the realised counts equal the strategy's.
+
+### Statistics
+- **Deflated Sharpe (Bailey & López de Prado):**
+  - Computed on the daily R of the stitched blind years: every trading day, including zero days. A trade's R is booked on its exit day.
+  - It uses the non-annualised Sharpe and non-excess kurtosis.
+  - N = all grid combinations evaluated across the Idea Family's Trials. V[SR] = the variance of those combinations' blind-year Sharpe.
+  - N = 1 reduces it to the plain probabilistic Sharpe against 0.
+- **PBO:**
+  - CSCV over 16 equal time blocks of the blind years, using the grid combinations' daily-R Sharpe per block.
+  - It covers all C(16, 8) = 12,870 splits.
+  - A block with zero trades has a Sharpe of 0.
+  - A grid of 1 combination is "n/a", which neither passes nor fails.
+
+### Known answers (spec §9.6)
+- **Planted edge:** a planted edge in *entry timing*, not a trend that any trailing exit would harvest. On each server day, a random hidden direction shows itself in the London opening hour and then drifts on for the next hours.
+- **Known-answer Spec:** `range_breakout(london_open)` with a fixed `atr_stop` and an `r_target`. A random entry at the same hours has a 50/50 direction, so it gets no edge.
+- **Thresholds, fixed now:**
+  - Random walk: at most 1 CANDIDATE in 20 seeds.
+  - Planted edge, at the strength calibrated in T2: CANDIDATE in at least 4 of 5 seeds.
+  - Both use the real Pass Bar.
+
+### Trial benchmark
+- **Named configuration:**
+  - 12 years of synthetic GOLD M15 with M1 settling;
+  - `donchian_breakout(period ∈ {20, 40, 60, 80})` × `atr_stop(mult ∈ {1.5, 2, 2.5})` × `r_target(r ∈ {1.5, 2, 3, 4})` = 48 combinations, plus a `session_window` filter;
+  - a full Gauntlet with 1,000 baseline runs.
+- **Pass:** ≤ 60 s on this laptop.
+- **Worst case:** a 48-combination grid at the maximum indicator bounds is measured and recorded, not asserted.
+
+### Test policy
+- Known-answer and benchmark tests are marked `slow`. They are excluded from the default `uv run pytest` and run at every checkpoint with `uv run pytest -m slow`.
+
+## Architecture decisions
+
+- **New modules:**
+  - `src/vibedesk/gauntlet/`: `stats.py`, `walkforward.py`, `baseline.py`, `prosecutor.py`, `verdict.py`, `trial.py`.
+  - `src/vibedesk/ledger/`: `store.py`.
+  - `src/vibedesk/market/data.py`: the facade and the Holdout guard.
+- **Prepared market:** `engine.prepare(bars, cost, m1) → PreparedMarket` hoists the per-call setup: spread prices for bars and minutes, and M1 index bounds. Repeated simulations (the grid, stress, 1,000 baseline runs) pay it once. `simulate(bars, signals, cost, m1)` stays as a thin wrapper, so M1's tests and the reference twin are untouched.
+- **Block-output cache:** within a Trial, every (block, params) pair is computed once, however many combinations share it.
+- **Holdout grant:** the contract (`HoldoutGrant`, the `GrantVerifier` Protocol and `HOLDOUT_START`) is fixed in `src/vibedesk/market/grant.py`, which is committed before Phase 1 and owned by no task. `MarketData` is given a `GrantVerifier` (implemented by the Ledger) and asks it whether a grant is approved, unspent and for this Idea Family. The grant's object type alone proves nothing. Spending is enforced by a UNIQUE constraint per Idea Family. In M2 the Ledger function is the gate; the API enforces owner-only approval in M5.
+- **Ledger:** stdlib `sqlite3` with one writer (ADR 0006). Hypotheses, Trials and Holdout spends are append-only, enforced by triggers that abort UPDATE and DELETE, plus a test that scans the code.
+- **The Trial record is complete at write time** (spec §1: no figure may differ from stored data). It holds:
+  - the fold selections;
+  - every combination's per-fold results;
+  - every combination's blind-year Sharpe, which later Trials need for V[SR];
+  - the baseline seed, distribution percentiles and realised counts;
+  - the CostSnapshot;
+  - every check's value, threshold and result, and the Closest Miss;
+  - a fingerprint of the Research-Window bars (count, first and last time, checksum).
+
+## Trial-cost budget (from Checkpoint C)
+
+| Piece | Naive | Planned |
+|---|---|---|
+| Simulate the full window, with M1 | 91 ms | ~25 ms (setup hoisted) |
+| 48 combinations: compile and simulate | ~11 s | ~3–5 s (Block cache) |
+| Spread stress (8 folds re-simulated) | — | < 1 s |
+| Coin-Flip Baseline, 1,000 × 8 blind years | ~60 s | ~15–20 s |
+| PBO, 12,870 splits × 48 combinations | — | < 2 s, vectorised |
+| **Trial** | **> 70 s** | **~25 s** |
+
+If T10 measures more than 60 s, the levers are, in order:
+1. run the baseline across cores;
+2. size `_run`'s output by the number of signals instead of the number of bars;
+3. make SMA and std O(n);
+4. fewer baseline runs (needs the owner's OK, since it changes the spec);
+5. a looser budget (also needs the owner's OK).
 
 ## Task list
 
-The detailed tasks are in [todo.md](todo.md).
+### Phase 1: Foundations. T1–T5 own separate files and can run in parallel.
+- [ ] T1: Prepared market + Block-output cache (engine speed)
+- [ ] T2: Synthetic planted edge + calibration (**high risk; first**)
+- [ ] T3: Statistics: Sharpe, Deflated Sharpe, PBO
+- [ ] T4: Market facade + Holdout guard
+- [ ] T5: Ledger: families, Hypotheses, Trials, budgets, Holdout Requests
 
-### Phase 1: Tracer bullet
-- [x] T1: Scaffold, the guard test, Bars and SyntheticBarSource
-- [x] T2: Strategy Spec schema, validation and grid expansion
-- [x] T3: First slice: `donchian_breakout` + `atr_stop` + `r_target` + `fixed_risk`, simulated into trades in R
+### Checkpoint A
+- [ ] Default suite green, ruff clean; T2's calibration numbers recorded; the owner reviews
 
-### Checkpoint A (after T1–T3)
-- [x] `uv run pytest` passes, `uv run ruff check` is clean
-- [x] A golden hand-calculated trade list matches the engine exactly
-- [x] The owner reviews the trade-list shape before more Blocks are built
+### Phase 2: Gauntlet core (needs T1 and T3)
+- [ ] T6: Walk-forward: folds, selection, stitched blind record, stress, Holdout selection
+- [ ] T7: Coin-Flip Baseline with exact counts
+- [ ] T8: Prosecutor, Pass Bar, Verdict, Closest Miss
 
-### Phase 2: Complete the Cost Model and the Block Library
-- [x] T4: Full Cost Model: short ask side, swap with Wednesday triple, settling same-bar conflicts with M1, CostSnapshot
-- [x] T5: The remaining entry Blocks + the look-ahead property test over every Block
-- [x] T6: Filter Blocks, including exchange-local sessions with DST tests
+### Checkpoint B
+- [ ] Gauntlet pieces are green on hand-built inputs; the owner reviews
 
-### Checkpoint B (after T4–T6)
-- [x] Every entry and filter Block passes the look-ahead property test
-- [x] Golden cost tests pass (spread floor, slippage, swap nights, triple Wednesday, M1 conflict)
+### Phase 3: Integration (needs everything)
+- [ ] T9: Trial runner + Holdout run + Holdout Request gate
+- [ ] T10: Known-answer tests + Trial benchmark (`slow`)
 
-### Phase 3: Exits, metrics, speed
-- [x] T7: The remaining exits: `atr_target`, `atr_trailing`, `time_exit`, `opposite_signal`
-- [x] T8: R metrics, the daily R series, the money-equity view, and the performance benchmark
-
-### Checkpoint C: M1 done
-- [x] All the M1 "done when" items in the spec §10 are met
-- [x] One combination over 12 years of synthetic M15 data takes ≤ 0.5 s (benchmark test)
-- [ ] Review with the owner before starting M2 (gauntlet + ledger)
+### Checkpoint C: M2 done
+- [ ] The spec §10 M2 items are met; `uv run pytest` and `uv run pytest -m slow` are both green
 
 ## Risks and mitigations
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Fill semantics bugs (gaps, same-bar stop and target, short ask side) quietly inflate results | High | Golden trades worked out by hand in T3, T4 and T7; hypothesis property tests (no trade has R above its target, a stop loss is never better than −1R minus costs) |
-| Look-ahead leaking through indicators (rolling windows, session ranges) | High | The look-ahead property test runs on every Block (T5, T6) |
-| numba compile time or type issues slow down tests | Medium | Cache the jit (`cache=True`); keep a pure-Python reference implementation and test that both give identical results on small inputs |
-| Synthetic data too simple to show bugs that real data would | Medium | The synthetic generator includes gaps, weekend breaks, spread spikes and missing bars; a real-data check comes in M3 |
-| Block param ranges let a 50-combination grid hide a large search | Low | Grid size enforced at validation (T2); the deflation in M2 counts every combination |
+| The planted edge can't pass the real Pass Bar, or random walk passes too often | High: M2 can't finish | T2 calibrates first, against a gross-PF target on the known-answer Spec; thresholds fixed above before tuning |
+| Trial > 60 s | High | Hoisting + caching in T1; the levers above; T10 measures |
+| Deflated Sharpe / PBO formula errors pass silently | High | Limit-case tests and a test-side formula written separately (T3); no recalled example numbers |
+| Baseline too lenient (count drift, hour mismatch) | High | Exact counts by deferral, plus count and hour-distribution tests (T7) |
+| Walk-forward leaks blind prices into selection | High | The exit-before-boundary rule, with a test whose leaking trade would flip the selection (T6) |
+| Holdout opened by a path that bypasses `market` | High | A guard test: only `market` calls `BarSource.fetch`; grants checked against the Ledger (T4/T5) |
+| Ledger rows edited after the fact | Medium | Triggers abort UPDATE/DELETE; a code scan for UPDATE/DELETE outside migrations |
 
-## Open questions
+## Open questions (none block M2)
 
-- None block M1. `git init` happens in T1; nothing is committed until the owner asks.
+- **Time filters:** should `session_window`/`day_of_week` judge the signal bar (as now) or the entry bar? It matters on H4/D1.
+- **Opposite signal:** with `opposite_signal` on a `both` Spec, should the opposite signal stop and reverse instead of only closing?
+- **Execution:** run Phase 1 as parallel worktree agents (T1–T5 own separate files), or one by one here?

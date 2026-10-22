@@ -1,277 +1,267 @@
-# M1 tasks: the pure core (blocks and engine)
+# M2 tasks: Gauntlet and Ledger
 
-- **Spec:** [docs/spec/layer-a-verdict-engine.md](../docs/spec/layer-a-verdict-engine.md)
-- **Plan:** [plan.md](plan.md)
-- **Commands:** `uv run pytest`, `uv run ruff check`, `uv run ruff format --check`
+- **Spec:** [docs/spec/layer-a-verdict-engine.md](../docs/spec/layer-a-verdict-engine.md), §4, §6, §9 and §10.
+- **Plan and definitions:** [plan.md](plan.md). Tasks follow its "Definitions the tests depend on" exactly.
+- **Commands:** `uv run pytest` (default suite), `uv run pytest -m slow` (known answers and benchmark), `uv run ruff check`, `uv run ruff format --check`.
+
+**File ownership.** Each Phase 1 task owns its files and touches no one else's, so T1–T5 can run in parallel worktrees. Shared files (`pyproject.toml`, `__init__.py` re-exports) change only in the task named for them.
 
 ---
 
-## T1: Scaffold, guard test, Bars, SyntheticBarSource
+## T1: Prepared market + Block-output cache
 
-**Description:** Create the uv project (Python 3.12) with the `src/vibedesk/` layout, ruff and pytest, and run `git init`. Add the §9.1 guard test, which scans `src/` and fails on any order-related MT5 call. Add the `Bars` container and a seeded `SyntheticBarSource` that can generate the following:
-- a random walk with weekend gaps, missing bars and spread spikes;
-- a planted-edge series, for later known-answer tests.
+**Description:** Hoist the per-call setup out of `simulate`. The new `prepare(bars, cost, m1=None) -> PreparedMarket` holds the bar arrays, the spread prices for bars and minutes, and the M1 index bounds. Add `simulate_prepared(market, signals)`. `simulate(bars, signals, cost, m1)` stays as a wrapper. `prepare(...)` with a stressed `CostSnapshot` gives the 2× spread market. Size `_run`'s output table by the number of entry signals plus one, not by the number of bars. Add a `BlockCache` to `compile_signals`, so a (block, params) pair is computed once per cache.
 
 **Acceptance criteria:**
-- [x] `uv run pytest` passes on a fresh clone. The guard test fails when a file containing `order_send` is temporarily added (shown by a test fixture).
-- [x] `Bars` is immutable, validates that its arrays have equal length and that times are monotonic UTC, and exposes `point` and `digits`.
-- [x] `SyntheticBarSource(seed)` returns identical bars for identical seeds and supports M1, M15, H1, H4 and D1, with the M1 bars aggregating exactly to the higher timeframes.
+- [ ] On the 200 reference-twin seeds, `simulate_prepared` gives exactly the same records as `simulate`. The existing engine tests pass unchanged.
+- [ ] On 12 years of synthetic GOLD M15 with M1, a prepared simulation of the `tests/test_perf.py` Spec takes ≤ 30 ms (best of 5).
+- [ ] Compiling all 48 combinations of a grid that shares one `atr_regime(lookback=2000)` filter calls that filter exactly once (a counting test).
 
-**Verification:** `uv run pytest tests/test_guard.py tests/test_bars.py tests/test_synthetic.py`
+**Verification:** `uv run pytest tests/test_prepared.py tests/test_engine_props.py tests/test_engine_golden.py`
 
 **Dependencies:** None
 
-**Files:** `pyproject.toml`, `.gitignore`, `src/vibedesk/market/bars.py`, `src/vibedesk/market/synthetic.py`, `tests/test_guard.py`, `tests/test_bars.py`, `tests/test_synthetic.py`
+**Files (owned):** `src/vibedesk/engine/simulate.py`, `src/vibedesk/engine/prepared.py`, `src/vibedesk/blocks/compile.py`, `tests/test_prepared.py`
 
 **Scope:** M
 
 ---
 
-## T2: Strategy Spec schema, validation, grid expansion
+## T2: Synthetic planted edge + calibration (high risk; first)
 
-**Description:** Write the pydantic models for the Strategy Spec in spec §5.1 and a Block registry where each Block declares its kind, its parameter schema and its implementation. Validation enforces these rules:
-- every Block named in the Spec is known;
-- parameter types and ranges are valid;
-- an exit stop is present;
-- `direction` is one of `long`, `short` or `both`;
-- the grid has at most 50 combinations.
-
-`expand_grid()` yields every concrete parameter set in a stable order.
+**Description:** Replace the uncalibrated `trend` knob with a planted edge in entry timing (plan.md, "Known answers"). On each server day, draw a hidden direction. During the London opening hour, price drifts that way by `reveal` × hourly volatility. For the following `follow_hours` hours, it keeps drifting by `follow` × hourly volatility. Everything else stays a random walk. Calibrate `reveal` and `follow` empirically and write the numbers into this file.
 
 **Acceptance criteria:**
-- [x] The example Spec from §5.1 validates and expands into exactly 2 × 3 × 3 × 2 = 36 combinations. A variant with a third `r` value (54 combinations) is rejected with a clear error about the grid limit.
-- [x] Specs that fail validation return structured errors (a path and a reason) that the Research Desk can read.
-- [x] Grid order is deterministic: the same Spec always yields the same list of combinations.
+- [ ] With the edge off, the known-answer Spec (`range_breakout(london_open, 4)`, `atr_stop(mult=1.5)`, `r_target(r=2)`, GOLD M15, Spread Floor 55) has a profit factor after costs below 1.05 on each of 5 seeds over 2014–2024.
+- [ ] With the calibrated edge, the same Spec has a profit factor of at least 1.3 on each of 5 seeds over 2014–2024 and over 2025–2026. Random 50/50 entries at the same London hours with the same exits have a profit factor below 1.05.
+- [ ] The edge never changes bar structure: the existing synthetic tests (aggregation, weekends, the point grid) still pass. With the edge off, the bars are the same as before.
 
-**Verification:** `uv run pytest tests/test_spec.py`
+**Verification:** `uv run pytest tests/test_synthetic.py`, plus a calibration script whose output is pasted here.
+
+**Dependencies:** None
+
+**Files (owned):** `src/vibedesk/market/synthetic.py`, `tests/test_synthetic.py`, `tests/test_planted_edge.py`
+
+**Scope:** M
+
+---
+
+## T3: Statistics: Sharpe, Deflated Sharpe, PBO
+
+**Description:** Pure functions in `gauntlet/stats.py`:
+- `sharpe(daily_r)`: not annualised.
+- `probabilistic_sharpe(sr, benchmark, t, skew, kurtosis)`.
+- `deflated_sharpe(daily_r, n_trials, var_trial_sharpe)`, following Bailey & López de Prado, with non-excess kurtosis and the Euler–Mascheroni constant.
+- `pbo(matrix)`: CSCV over 16 blocks, all 12,870 splits, vectorised.
+
+Use `statistics.NormalDist`, with no SciPy dependency.
+
+**Acceptance criteria:**
+- [ ] The Deflated Sharpe limit cases hold:
+  - N = 1 gives the probabilistic Sharpe against 0;
+  - V[SR] = 0 gives a benchmark of 0;
+  - it falls as N or V[SR] rises;
+  - negative skew and fat tails lower it;
+  - it matches a formula written separately in the test, on 50 random inputs.
+- [ ] The PBO cases hold:
+  - a combination that is best in every block gives 0;
+  - IID noise (seed 0) gives 0.5 ± 0.1;
+  - a best-in-sample that is worst out-of-sample gives ≥ 0.9;
+  - all-zero blocks are handled;
+  - a grid of 1 is reported as "n/a".
+- [ ] PBO on a 48-combination × 16-block matrix takes ≤ 2 s.
+
+**Verification:** `uv run pytest tests/test_stats.py`
+
+**Dependencies:** None
+
+**Files (owned):** `src/vibedesk/gauntlet/__init__.py`, `src/vibedesk/gauntlet/stats.py`, `tests/test_stats.py`
+
+**Scope:** S
+
+---
+
+## T4: Market facade + Holdout guard
+
+**Description:** `MarketData(source: BarSource, verifier: GrantVerifier)`, with `bars(symbol, tf, start, end, grant=None)`. It refuses any range reaching 2025-01-01 (the `HOLDOUT_START` constant) unless `verifier.verify(grant, symbol)` approves. `HoldoutGrant` is a frozen dataclass: request id, Idea Family id, token. `GrantVerifier` is a Protocol; the Ledger implements it in T5. A fake verifier serves the tests.
+
+**Acceptance criteria:**
+- [ ] Without a grant, any range ending after 2025-01-01 is refused with a clear error. Ranges ending on or before it work.
+- [ ] A grant the verifier rejects (forged, wrong family, already spent) is refused. An approved grant opens the Holdout.
+- [ ] A guard test fails if any module outside `vibedesk.market` calls `.fetch(` on a source.
+
+**Verification:** `uv run pytest tests/test_holdout_guard.py`
+
+**Dependencies:** None
+
+**Files (owned):** `src/vibedesk/market/data.py`, `tests/test_holdout_guard.py`
+
+**Scope:** S
+
+---
+
+## T5: Ledger
+
+**Description:** `Ledger(path)` on stdlib `sqlite3`: the schema, migrations and append-only triggers.
+- `create_family(idea)`
+- `register_hypothesis(family_id, spec)`: freezes the Spec JSON, applies the anti-reset rule (a Spec with the same entry Block and symbol as another family's must use that family), and accepts one symbol and one timeframe per Hypothesis.
+- `record_trial(...)`: stores the complete Trial record (plan.md list).
+- `trial_count(family)`, `budget(family)` (25 + owner grants), `extend_budget(family, 25)`.
+- `deflation_inputs(family) -> (n_combinations, var_sharpe)`.
+- `request_holdout(hypothesis)`, `approve_holdout(request) -> HoldoutGrant`.
+- `verify(grant, symbol)` and `record_holdout(grant, result)`: the spend is UNIQUE per family.
+
+**Acceptance criteria:**
+- [ ] UPDATE and DELETE on hypotheses, trials and holdout spends abort, enforced by triggers. A code-scan test finds no UPDATE or DELETE statements outside the migrations.
+- [ ] The Trial Budget is enforced. A 26th Trial is refused until the owner grants +25, and the grant is itself a ledger row. `deflation_inputs` sums combinations across all of the family's Trials.
+- [ ] A Holdout grant verifies once for its own family and symbol, is refused after its spend is recorded, and is refused for any other family. A second spend in the same family violates the UNIQUE constraint. The anti-reset rule refuses a new family with the same entry Block and symbol.
+
+**Verification:** `uv run pytest tests/test_ledger.py`
+
+**Dependencies:** None (it implements T4's `GrantVerifier` Protocol by duck typing; the shapes are given here)
+
+**Files (owned):** `src/vibedesk/ledger/__init__.py`, `src/vibedesk/ledger/store.py`, `tests/test_ledger.py`
+
+**Scope:** M
+
+---
+
+## Checkpoint A (after T1–T5)
+- [ ] `uv run pytest` and ruff are green
+- [ ] T2's calibration numbers are recorded above
+- [ ] The owner reviews before the Gauntlet core
+
+---
+
+## T6: Walk-forward
+
+**Description:** Implement the plan.md walk-forward definition, in four steps:
+1. Every combination of a Spec is compiled and simulated once over the Research Window, using T1's prepared market and Block cache.
+2. Folds 2017–2024 each choose parameters on their 3 training years, using only trades that exit inside the window.
+3. The stitched blind record follows the boundary rule.
+4. The stress re-simulation and the Holdout parameter selection (2022–2024) reuse those choices.
+
+The output is a `WalkForward` result holding:
+- the per-fold choices;
+- the per-combination per-fold metrics;
+- the stitched blind trades;
+- the per-combination blind daily R;
+- the stress record.
+
+**Acceptance criteria:**
+- [ ] On a hand-built grid of 3 combinations whose best combination changes by year, the choices per fold match the hand-worked answer. A trade that straddles the training boundary would flip one choice if it leaked, and the test shows it doesn't.
+- [ ] The stitched record never holds two positions at once, and every trade keeps its own combination's exit rules (checked by recomputing each trade from that combination's own simulation).
+- [ ] Stress uses the same fold choices, and each blind year's net R under stress is no better than without it.
+
+**Verification:** `uv run pytest tests/test_walkforward.py`
 
 **Dependencies:** T1
 
-**Files:** `src/vibedesk/blocks/spec.py`, `src/vibedesk/blocks/registry.py`, `tests/test_spec.py`
-
-**Scope:** S
-
----
-
-## T3: Tracer bullet: Donchian breakout to trades in R
-
-**Description:** Implement `donchian_breakout`, `atr_stop`, `r_target` and `fixed_risk`, along with `compile()` and a first `simulate()`:
-- the signal fires on the bar's close and the trade enters at the next bar's open plus spread;
-- spread is max(bar spread, floor), with 1 point of slippage per side;
-- stops and targets are checked inside each bar, and the stop wins when both are touched in the same bar;
-- at most one open position at a time.
-
-Each trade records its R and its costs in R. Write a pure-Python reference version and a numba version.
-
-**Acceptance criteria:**
-- [x] On a 40-bar hand-built series, the engine's trade list matches a golden list worked out by hand: entry and exit times and prices, R, and exit reasons, including one gap through the stop and one bar that touches both stop and target.
-- [x] The numba and reference versions give identical results on 200 random synthetic seeds.
-- [x] Property tests: no losing trade is better than −1R minus its cost, no winning trade exceeds its target R, and there is never more than one open position.
-
-**Verification:** `uv run pytest tests/test_engine_golden.py tests/test_engine_props.py`
-
-**Dependencies:** T2
-
-**Files:** `src/vibedesk/blocks/entries.py`, `src/vibedesk/blocks/exits.py`, `src/vibedesk/blocks/compile.py`, `src/vibedesk/engine/simulate.py`, `src/vibedesk/engine/costs.py`, `tests/test_engine_golden.py`, `tests/test_engine_props.py`
+**Files (owned):** `src/vibedesk/gauntlet/walkforward.py`, `tests/test_walkforward.py`
 
 **Scope:** M
 
 ---
 
-## Checkpoint A (after T1–T3)
+## T7: Coin-Flip Baseline
 
-**Deviations from the plan (2026-10-22):**
-- **Short side in T3:** the short side (bid entries, ask-side stops and targets) landed in T3, because the fill loop is symmetric. T4 is left with swap, settling same-bar conflicts with M1, CostSnapshot JSON and `as_of`, and stress mode.
-- **Reference engine location:** the independent reference engine lives in `tests/reference_engine.py`, not `src/`. It shares no code with the engine.
-- **Extra files:**
-  - `market/source.py`: the BarSource seam.
-  - `market/server_time.py`: server clock = New York + 7 h.
-  - `blocks/sizing.py`: `fixed_risk`, capped at 1%.
-- **Property wording made precise:**
-  - a plain stop is exactly −1R minus exit slippage;
-  - only a gap loses more than that;
-  - a target exit is exactly target R minus slippage;
-  - no trade exceeds its target.
-- **Bug found and fixed before the checkpoint:** a stop closer than spread + slippage was already breached at the entry open, but it was filled at the stop price. In the 200 random cases, 463 of 5,945 trades (7.8%) were booked as −1R stops, understating the loss by up to 1.38R. The entry bar now exits at the market as `STOP_GAP`. Covered by `tests/test_engine_inside_spread.py` and a new invariant.
-
-- [x] All tests pass and ruff is clean (259 tests)
-- [x] The golden trade list matches
-- [x] The owner reviewed the trade-record shape (approved 2026-10-22; `swap_r` added and approved at Checkpoint B)
-
----
-
-## T4: Full Cost Model
-
-**Description:** Complete the Cost Model in spec §6.1:
-- shorts enter at bid and exit at ask, and their stops and targets are checked against ask-side highs and lows;
-- swap is charged in points per lot for each night held at the server rollover, ×3 on the Wednesday rollover, then converted to R;
-- when M1 bars are supplied, a bar that touches both stop and target is settled by them, and the stop wins when M1 is missing or still ambiguous;
-- an immutable `CostSnapshot` (floor, swap long and short, slippage, point size, `as_of`) is attached to every result.
+**Description:** `coin_flip_baseline(walk_forward, market, runs=1000, seed)` returns the net-R distribution and its 95th percentile. Random entries follow the plan.md definition: per-year counts, the server-hour distribution, the long/short mix, each fold's exits, and deferral to a flat bar, with up to 20 redraws if entries spill past the year.
 
 **Acceptance criteria:**
-- [x] Golden tests cover a short trade on the ask side, a 3-night hold that crosses Wednesday (charged 5 swap nights), and a same-bar stop-and-target conflict settled both ways by M1.
-- [x] Doubling the floor and bar spreads (stress mode) never improves any trade's R.
-- [x] A `CostSnapshot` round-trips through JSON unchanged.
+- [ ] The realised trade count per blind year equals the strategy's in every run of a 200-run test. Redraws are counted and reported.
+- [ ] The entry-hour histogram over 1,000 runs matches the strategy's within ± 2 percentage points per hour. The long share matches within ± 2 points.
+- [ ] Same seed, same distribution. On random-walk data, a random strategy's percentile against its own baseline is roughly uniform over 30 seeds (no bias).
 
-**Verification:** `uv run pytest tests/test_costs.py`
+**Verification:** `uv run pytest tests/test_baseline.py`
 
-**Dependencies:** T3
+**Dependencies:** T1, T6
 
-**Files:** `src/vibedesk/engine/costs.py`, `src/vibedesk/engine/simulate.py`, `tests/test_costs.py`
+**Files (owned):** `src/vibedesk/gauntlet/baseline.py`, `tests/test_baseline.py`
 
 **Scope:** M
 
 ---
 
-## T5: Remaining entry Blocks + look-ahead property test
+## T8: Prosecutor, Pass Bar, Verdict, Closest Miss
 
-**Description:** Implement `ma_cross`, `rsi_threshold`, `bollinger_touch`, `pullback_to_ma` and `range_breakout`, which builds its range in exchange-local time. Add a generic look-ahead property test that runs over every registered Block. It randomly changes the bars after index *t* and asserts that the Block's output at index ≤ *t* is unchanged.
+**Description:** The `prosecutor.py` checks from spec §6.3:
+- the top-5 share;
+- the neighbour-combination median PF, using the combination chosen for the Holdout and its ±1-step neighbours on the blind years;
+- the side split (both sides, ≥ 30 trades each);
+- ATR(14) terciles at entry (≥ 30 trades each).
+
+`verdict.py` evaluates the ADR 0007 Pass Bar into a list of check results (name, value, threshold, passed, or n/a), the Verdict (CANDIDATE or REJECT) and the Closest Miss.
 
 **Acceptance criteria:**
-- [x] Every entry Block passes the look-ahead property test on 100 random seeds and cut points.
-- [x] Each Block has at least one small hand-checked test of its signal positions.
-- [x] `range_breakout`'s London-open range keeps the right UTC bar times across both the UK and US daylight-saving switches (the weeks in March and October/November when only one of them has switched).
+- [ ] Each Prosecutor red flag fires on a hand-built input made to trip it, and stays quiet on one that doesn't. Checks with too few trades are reported as n/a, not as passed.
+- [ ] Any single failed check gives REJECT. A CANDIDATE needs every check passed or n/a, but PF, trade count, folds, stress, baseline and Deflated Sharpe can never be n/a.
+- [ ] The Closest Miss is the failed check whose value-to-threshold ratio is nearest 1, with a direction-aware ratio for "at most" checks such as PBO and the top-5 share.
 
-**Verification:** `uv run pytest tests/test_entries.py tests/test_lookahead.py`
+**Verification:** `uv run pytest tests/test_verdict.py`
 
-**Dependencies:** T3
+**Dependencies:** T3, T6
 
-**Files:** `src/vibedesk/blocks/entries.py`, `src/vibedesk/blocks/indicators.py`, `src/vibedesk/blocks/sessions.py`, `tests/test_entries.py`, `tests/test_lookahead.py`
+**Files (owned):** `src/vibedesk/gauntlet/prosecutor.py`, `src/vibedesk/gauntlet/verdict.py`, `tests/test_verdict.py`
 
 **Scope:** M
 
 ---
 
-## T6: Filter Blocks
+## Checkpoint B (after T6–T8)
+- [ ] The default suite is green
+- [ ] A hand-run Trial on synthetic data prints a readable result
+- [ ] The owner reviews
 
-**Description:** Implement `ma_slope`, `adx`, `atr_regime` (with a trailing percentile only), `session_window` and `day_of_week`, and have `compile()` combine them with the entry using AND. All of them are added to the look-ahead property test.
+---
+
+## T9: Trial runner + Holdout
+
+**Description:** Three entry points:
+- `run_trial(ledger, market, hypothesis_id, cost, m1=True)`:
+  1. checks the Trial Budget;
+  2. fetches the Research Window through `MarketData`;
+  3. runs walk-forward, stress, baseline, Deflated Sharpe (with `ledger.deflation_inputs` including this Trial), PBO and the Prosecutor, then the Verdict;
+  4. records the complete Trial.
+- `request_holdout(ledger, hypothesis_id)` applies the gate: CANDIDATE only, and expected Holdout trades ≥ 30, else `INSUFFICIENT_TRADES` with nothing spent.
+- `run_holdout(ledger, market, grant)` fetches all data with the grant, uses the 2022–2024 selection and trades entered from 2025-01-01, and returns PASS (PF ≥ 1.1 with ≥ 30 trades) or HOLDOUT FAIL.
 
 **Acceptance criteria:**
-- [x] Every filter passes the look-ahead property test.
-- [x] `atr_regime`'s percentile uses only past bars; a hand-checked test covers the boundary.
-- [x] An entry combined with a filter fires only where both are true, checked on a small hand-built series.
+- [ ] Each `run_trial` adds exactly one Trial row, and every figure a Verdict Card needs can be read back from the stored record (rebuilt from the store in the test).
+- [ ] A 26th Trial is refused. A Holdout Request on a REJECT, or one with too few expected trades, is refused without spending. A second Holdout in the same family is refused.
+- [ ] The Research-Window fetch never reaches 2025, whatever the Spec asks for (asserted with a recording source).
 
-**Verification:** `uv run pytest tests/test_filters.py tests/test_lookahead.py`
+**Verification:** `uv run pytest tests/test_trial.py`
 
-**Dependencies:** T5
+**Dependencies:** T4, T5, T6, T7, T8
 
-**Files:** `src/vibedesk/blocks/filters.py`, `src/vibedesk/blocks/compile.py`, `tests/test_filters.py`
+**Files (owned):** `src/vibedesk/gauntlet/trial.py`, `tests/test_trial.py`
 
 **Scope:** M
 
 ---
 
-## Checkpoint B (after T4–T6)
+## T10: Known answers + Trial benchmark
 
-**Deviations from the plan (2026-10-22):**
-- **New trade-record field `swap_r`** (added after the shape was approved). Swap is reported on its own, `r` includes it, and `cost_r` stays spread + slippage. Swap can be a credit (GOLD short +20.64 points), so folding it into `cost_r` would make "cost" negative.
-- **The T4 stress property, restated.** "Stress never improves any trade" is not true trade by trade. Under a doubled spread, a stop that is hit earlier at −1R can beat a later gap loss on the normal-spread run. The tests now check two things:
-  - a trade with the same entry, exit bar and exit reason never improves under stress;
-  - total R across 60 random cases is lower under stress.
-- **T5 Block semantics, chosen and written into the docstrings:**
-  - Entries fire on events (crosses, first close outside a band), not on states.
-  - RSI `cross_up`/`cross_down` mirror at 100 − level for shorts.
-  - The pullback rule: the previous bar's low reaches the pullback SMA, and the bar closes back above it, in the trend.
-  - The opening range is defined by time, `range_bars` bar-lengths after the local open, on local weekdays only.
-  - A session day ends at the next open or 24 hours later, whichever is first. Pre-open bars are never part of a range.
-- **T6 parameter shapes:**
-  - `session_window` takes a zone plus HH:MM start and end, with no named presets.
-  - `day_of_week` takes five booleans, because a list value would be read as a grid dimension.
-  - `ma_slope` measures the SMA's change over 10 bars in ATR(14) units.
-  - `atr_regime` uses a mid-rank percentile, so a constant ATR sits at 50.
-- **Timing on 300k M15 bars (12 synthetic years):**
-  - With typical parameters every Block runs in 3–63 ms.
-  - At the maximum parameter bounds, the window-scanning indicators are slow: `ma_cross` (SMA) 554 ms, `bollinger_touch` 490 ms, `pullback_to_ma` 453 ms, `ma_slope` 324 ms and `atr_regime` 897 ms. EMA, RSI, ADX and ATR stay under 11 ms.
-  - The cause: `_sma`, `_rolling_std` and `_trailing_percentile` are O(n × period).
-- **Risks carried to M2/T8:**
-  - **Repeated Block work:** `compile_signals` recomputes every Block for every grid combination, so a fixed slow filter is paid up to 50 times per Trial. Cache Block outputs per (block, params) within a Trial, and/or make SMA and std O(n) with running sums.
-  - **Warm-up:** compile signals once over the full Research Window and slice the folds afterwards. Never compile per fold: EMA, Wilder ATR, RSI and ADX depend on where the series starts.
-  - **Slicing cost:** `Bars.between` copies and re-validates on every slice.
-  - **Calibration:** the synthetic planted edge (`trend`) is uncalibrated. Calibrate it before the known-answer tests.
-- **Short-side M1 settling:** golden tests now cover it, including a stop that triggers only because of that minute's own wider spread.
-- **Open question for the owner:** time filters (`session_window`, `day_of_week`) check the *signal* bar's open, but the trade enters at the *next* bar's open. London 08:00–12:00 on H1 can therefore enter at 12:00, and on H4/D1 (server bars open at 21:00/22:00 UTC) a session filter means little.
-
-- [x] The look-ahead property test is green for every entry and filter Block, and for stops and targets. It fails if any registered Block is missing from it. A deliberately leaky Block is caught.
-- [x] The golden cost tests are green
-
----
-
-## T7: Remaining exits
-
-**Description:** Add four exits to the engine:
-- `atr_target`
-- `atr_trailing`: ratchets only in the trade's favour and is updated only on bar closes
-- `time_exit`: exits at the open after N bars
-- `opposite_signal`: exits at the next open after an opposite entry signal
-
-When several exits apply, the order is stop → target → trailing → time → opposite. This is documented and tested.
+**Description:** Mark the slow tests and exclude them from the default suite. In `pyproject.toml`: `addopts = "-m 'not slow'"` and a `slow` marker. Then two test files:
+- **Known answers** (thresholds fixed in plan.md): the random walk gives at most 1 CANDIDATE in 20 seeds; the planted edge gives CANDIDATE in at least 4 of 5 seeds; and each planted-edge CANDIDATE that is put through the Holdout reaches PASS.
+- **Benchmark:** the named 48-combination Trial takes ≤ 60 s. The worst case is measured and recorded.
 
 **Acceptance criteria:**
-- [x] Golden tests cover each exit, plus one trade where a trailing stop and a time exit compete.
-- [x] The trailing stop never moves against the trade (property test).
-- [x] The numba and reference versions stay identical on 200 seeds with every exit enabled.
+- [ ] `uv run pytest -m slow` passes all three known-answer checks.
+- [ ] The benchmark passes, and its timing breakdown (each Gauntlet stage) is written into this file.
+- [ ] The default `uv run pytest` stays under 30 s.
 
-**Verification:** `uv run pytest tests/test_exits.py tests/test_engine_props.py`
+**Verification:** `uv run pytest -m slow`, `uv run pytest`
 
-**Dependencies:** T4
+**Dependencies:** T2, T9
 
-**Files:** `src/vibedesk/blocks/exits.py`, `src/vibedesk/engine/simulate.py`, `tests/test_exits.py`
+**Files (owned):** `pyproject.toml` (pytest options only), `tests/test_known_answers.py`, `tests/test_trial_perf.py`
 
 **Scope:** M
 
 ---
 
-## T8: Metrics in R, daily series, money view, benchmark
-
-**Description:** Build `metrics(trades, bars)`. It returns these figures:
-- trade count, profit factor, win rate (shown only, never judged), expectancy in R and net R;
-- the largest share of net R made by the top 5 trades;
-- the **daily R series**, one value for every trading day including zero days;
-- maximum drawdown and the equity curve at 1% risk on $1,000.
-
-Add a benchmark test: one combination over 12 years of synthetic M15 data, with the numba version already compiled, takes ≤ 0.5 s.
-
-**Acceptance criteria:**
-- [x] Metrics match hand-calculated values on the golden trade list from T3 and T4.
-- [x] The daily R series sums to net R and has one row for every trading day in the range.
-- [x] The benchmark test passes. It is marked `@pytest.mark.perf` and runs in the default suite.
-
-**Verification:** `uv run pytest tests/test_metrics.py tests/test_perf.py`
-
-**Dependencies:** T7
-
-**Files:** `src/vibedesk/engine/metrics.py`, `tests/test_metrics.py`, `tests/test_perf.py`
-
-**Scope:** S
-
----
-
-## Checkpoint C: M1 done
-
-**Notes (2026-10-22):**
-- **Exit details:**
-  - `opposite_signal` listens to the entry Block alone, ignoring filters and the Spec's direction. A long-only Spec is still closed by the entry's short signal, and the position is never reversed.
-  - `atr_trailing` trails the bid close for longs and the ask close for shorts.
-  - The trade record keeps the initial stop in `stop_price`; the final trail level is not stored.
-  - New exit reasons: `TRAIL`, `TIME`, `OPPOSITE`.
-- **Cross-check:** the random cases now enable every exit. Over the 200 cases there are 5,716 trades: 624 `TRAIL`, 1,102 `TIME`, 70 `OPPOSITE`, plus the earlier reasons. The engine and the reference twin agree on all of them.
-- **Metrics coverage:** metrics are hand-checked on the T3 golden list and on hand-built lists covering zero days, only winners, no trades, and the top-5 share. The T4 single swap trade is not run through `metrics` separately.
-- **Benchmark:** 12 years of synthetic GOLD M15 (300k bars, with M1 settling over 4.5M minutes), one combination with a filter, stop, target, trailing stop and time exit:
-  - compile 75 ms + simulate 111 ms + metrics 40 ms = **226 ms**, against a budget of 500 ms;
-  - on random-walk data with real costs it lost −604R over 7,029 trades (PF 0.86), as it should.
-- **Projected Trial cost (M2 risk):**
-  - `simulate` over the full window takes **22 ms without M1** and 91 ms with it. The M1 extra is per-call setup over 4.5M minutes: `spread_prices` on every minute plus two `searchsorted` calls.
-  - Done naively, the 1,000-run Coin-Flip Baseline over the 8 blind years costs about 1,000 × 91 ms × 8/12 ≈ 60 s on its own. The 50-combination grid adds about 11 s, before counting the max-bound indicator costs.
-  - With the M1 setup hoisted out to once per Trial, the baseline is about 1,000 × 22 ms × 8/12 ≈ 15 s, and the grid is about 5 s with Block-output caching. That fits the 60 s target.
-  - Other levers: `_run` allocates an n × 11 table (about 26 MB at 300k bars) on every call; run the baseline across cores; use fewer baseline runs.
-  - If none of this is enough, the owner chooses between the levers or a looser budget.
-- **Daily R definition, for Deflated Sharpe in M2:** a trade's whole R is booked on its exit day. Multi-day holds therefore make the series lumpier and lower DSR. This is deliberate and conservative; don't reopen it in M2.
-- **Sizing:** `fixed_risk` now has the same `fn(bars, params)` signature as every other Block. `metrics()` still takes `risk_fraction` from its caller, so M2's Trial runner must pass the Spec's sizing value (otherwise a 0.5% Spec would be shown at 1%).
-- **Owner questions, both still open:**
-  - Should time filters (`session_window`, `day_of_week`) judge the signal bar, as now, or the entry bar? (Open since Checkpoint B.)
-  - With `opposite_signal` on a `both` Spec, the opposite signal closes the trade but doesn't open the reverse one. Should it stop and reverse instead? This changes trade counts.
-- **Other M2 risks carried over:** repeated Block work, warm-up, `Bars.between` slicing cost, and planted-edge calibration.
-
-- [x] Every M1 "done when" item in spec §10 is met: hand-calculated golden trades match, the look-ahead property tests pass, and one combination over 12 years of M15 takes ≤ 0.5 s
-- [x] The full suite passes (382 tests) and ruff is clean
-- [ ] The owner reviews before M2 (gauntlet and ledger)
+## Checkpoint C: M2 done
+- [ ] Every M2 "done when" item in spec §10 is met
+- [ ] `uv run pytest` and `uv run pytest -m slow` are green, and ruff is clean
+- [ ] The owner reviews before M3 (MT5 market data)
