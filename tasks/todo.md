@@ -413,9 +413,9 @@ The output is a `WalkForward` result holding:
 - **Benchmark:** the named 48-combination Trial takes ≤ 60 s. The worst case is measured and recorded.
 
 **Acceptance criteria:**
-- [ ] `uv run pytest -m slow` passes all three known-answer checks.
-- [ ] The benchmark passes, and its timing breakdown (each Gauntlet stage) is written into this file.
-- [ ] The default `uv run pytest` stays under 30 s.
+- [x] `uv run pytest -m slow` passes all three known-answer checks.
+- [x] The benchmark passes, and its timing breakdown (each Gauntlet stage) is written into this file.
+- [x] The default `uv run pytest` stays under 30 s (about 24 s on 4 workers).
 
 **Verification:** `uv run pytest -m slow`, `uv run pytest`
 
@@ -425,9 +425,46 @@ The output is a `WalkForward` result holding:
 
 **Scope:** M
 
+**Result: known answers (2026-10-22, `tests/test_known_answers.py`, slow, 224 s).** Each Trial runs through `run_trial`, using production-shaped settings: blind years 2017–2024, M1 settling, 1,000 baseline runs, and a 17-point floor.
+
+| | CANDIDATE | Bar | Detail |
+|---|---|---|---|
+| Random walk, seeds 101–120 (never used for calibration) | **0 of 20** | at most 1 | PF 0.43–0.89; baseline percentiles 0.02–0.90 |
+| Planted edge, seeds 1–5 | **5 of 5** | at least 4 | PF 1.69–2.01; baseline percentile 1.00; no check failed |
+| Planted-edge Holdout, 2025-01 to 2026-10 | **5 of 5 PASS** | every CANDIDATE | 552–576 trades, PF 1.72–2.31 |
+
+**Result: benchmark and suite time (2026-10-22):**
+- **Benchmark** (`tests/test_trial_perf.py`, slow): the full 48-Combination Trial through `run_trial` (Ledger included) on 11 research years of synthetic GOLD M15 with M1 took **4.3 s**, against a 60 s budget.
+- **Stage breakdown, measured separately:**
+
+  | Stage | Benchmark grid | Worst case |
+  |---|---|---|
+  | Walk-forward (compile, simulate, stress) | 1.4 s | 3.2 s |
+  | Coin-Flip Baseline, 1,000 runs | 3.1 s | 3.8 s |
+  | Deflated Sharpe | < 0.01 s | < 0.01 s |
+  | PBO, 12,870 splits | 0.06 s | 0.04 s |
+  | Prosecutor and Verdict | 0.01 s | 0.01 s |
+  | **Total** | **4.6 s** | **7.1 s** |
+
+  The worst case is 48 Combinations with every indicator near its bound: `bollinger_touch(period 350–500)`, `atr_regime(lookback 2000)`, `ma_slope(1000)`, ATR(200) stops and trailing. It was measured while the known-answer run loaded the CPU.
+- **Default suite:** runs in parallel with pytest-xdist on 4 workers, one per physical core (owner's decision). It takes about 24 s for 793 tests. Eight workers (one per logical core) ran slower, about 40 s, and pushed the timing tests over their budgets. `-n 0` runs everything in one process.
+
 ---
 
 ## Checkpoint C: M2 done
-- [ ] Every M2 "done when" item in spec §10 is met
-- [ ] `uv run pytest` and `uv run pytest -m slow` are green, and ruff is clean
-- [ ] The owner reviews before M3 (MT5 market data)
+- [x] Every M2 "done when" item in spec §10 is met: the known-answer tests pass (random walk 0 of 20, planted edge 5 of 5 with every Holdout PASS); a 48-Combination Trial takes 4.3 s against 60 s; the Holdout and Ledger guard tests pass.
+- [x] `uv run pytest` (793 passed, about 24 s on 4 workers) and `uv run pytest -m slow` (all 6 slow tests, 200 s, peak Python memory 2.8 GB across 4 workers; the known-answer fixtures keep only small summaries) are green, and ruff is clean (2026-10-22).
+- [x] The owner reviewed and approved Checkpoint C (2026-10-22)
+
+**What the known answers do and don't prove (2026-10-22):**
+- The random walk's 0 of 20 was decided by costs: every seed failed profit factor (0.43–0.89). The known-answer Spec is a grid of one, so the luck filters weren't really exercised there.
+- **Lucky-grid measurement:** a no-edge 48-Combination H4 Donchian grid at zero cost (no spread, slippage or swap), over 30 random-walk seeds 201–230:
+  - 29 of 30 already fail out of sample on PF, trades or folds, so walk-forward does most of the rejecting.
+  - The one seed that cleared the naive bar (seed 208: PF 1.31, 101 trades, 5 of 8 folds positive) was stopped by the luck filters on six counts at once: baseline percentile 0.71, Deflated Sharpe 0.37, PBO 0.41, top-5 share, long-side PF and quiet-regime PF.
+  - Result: 0 of 30 CANDIDATE.
+  - One lucky survivor is thin evidence. A larger null run (more seeds, more grids) is worth doing once real ideas start flowing.
+
+**Carried forward from M2:**
+- **After M2:** opposite-signal stop-and-reverse (decided).
+- **Still open:** whether time filters judge the signal bar or the entry bar.
+- **For M5 (the API and app):** the grant is reusable until the spend is recorded; bind each Holdout Request to its Trial id; concurrent Trials can share a seed.

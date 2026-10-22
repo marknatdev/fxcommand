@@ -128,10 +128,10 @@ If T10 measures more than 60 s, the levers are, in order:
 
 ### Phase 3: Integration (needs everything)
 - [x] T9: Trial runner + Holdout run + Holdout Request gate
-- [ ] T10: Known-answer tests + Trial benchmark (`slow`)
+- [x] T10: Known-answer tests + Trial benchmark (`slow`)
 
 ### Checkpoint C: M2 done
-- [ ] The spec §10 M2 items are met; `uv run pytest` and `uv run pytest -m slow` are both green
+- [x] The spec §10 M2 items are met; `uv run pytest` and `uv run pytest -m slow` are both green
 
 ## Risks and mitigations
 

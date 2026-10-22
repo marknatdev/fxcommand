@@ -14,6 +14,7 @@ dependencies = [
 dev = [
     "hypothesis>=6.100",
     "pytest>=8.3",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.8",
 ]
 
@@ -27,7 +28,9 @@ packages = ["src/vibedesk"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Slow tests (known answers, Trial benchmarks) run at checkpoints: uv run pytest -m slow
-addopts = "-m 'not slow'"
+# Four workers, one per physical core of the dev laptop: eight (one per logical core) ran slower
+# and pushed the timing tests over their budgets. -n 0 runs everything in one process.
+addopts = "-m 'not slow' -n 4 --dist loadfile"
 markers = [
     "perf: performance benchmark",
     "slow: excluded from the default run; run with -m slow",
