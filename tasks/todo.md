@@ -401,7 +401,7 @@ The output is a `WalkForward` result holding:
   - **A grant is a reusable key until the spend is recorded.** `verify` stays true until `record_holdout`, so anything holding the grant could fetch Holdout bars without spending it. A crash after the first Holdout fetch also leaves nothing spent, and a retry gets a second look. In M2 only `run_holdout` holds a grant. In M5, approving and running the Holdout should be one owner action inside the app, and the grant must never reach the Research Desk or the MCP server.
   - **Owner question for M5:** should a run that crashes after opening the Holdout count as spent? That would mean an "opened" row written before the first fetch.
   - **Bind each Holdout Request to the Trial id it was made from.** This needs a Ledger column.
-  - **Trade rules can change between a Trial and its Holdout.** `run_holdout` re-simulates under whatever the engine does on the day it runs, so a Trial and its Holdout could be judged under different rules. Stop-and-reverse was the first such change; the time-filter decision may be the next. The fix is a `rules_version` stored in the Trial record, with `run_holdout` refusing on a mismatch. It must land before M3 produces real Trials.
+  - **Trade rules can change between a Trial and its Holdout.** `run_holdout` re-simulates under whatever the engine does on the day it runs, so a Trial and its Holdout could be judged under different rules. Stop-and-reverse was the first such change and time filters judging the entry bar the second. The fix is a `rules_version` stored in the Trial record, with `run_holdout` refusing on a mismatch. It must land before M3 produces real Trials.
   - **Concurrent Trials can share a seed.** `trial_number` is read outside the Ledger's write lock, so two Trials started at once on one family share a number and its baseline seed. The budget stays safe, because `record_trial` checks it under the lock.
 - **Open for T10:** the default suite now takes about 40 s, against T10's 30 s bar. Options: run tests in parallel (pytest-xdist), or move the 12-year benchmarks and the heaviest statistical tests to `slow`.
 
@@ -467,7 +467,7 @@ The output is a `WalkForward` result holding:
 
 **Carried forward from M2:**
 - **After M2:** opposite-signal stop-and-reverse (decided; built, see below).
-- **Still open:** whether time filters judge the signal bar or the entry bar.
+- **Time filters:** decided 2026-10-22, they judge the entry bar (built, see below).
 - **For M5 (the API and app):** the grant is reusable until the spend is recorded; bind each Holdout Request to its Trial id; concurrent Trials can share a seed.
 
 ---
@@ -492,3 +492,24 @@ The output is a `WalkForward` result holding:
 - **Suites:** the default suite passes 837 tests in about 26 s; the slow suite passes all 6 tests in 211 s.
 
 - [x] The owner reviews (approved 2026-10-22)
+
+---
+
+## After M2: time filters judge the entry bar (2026-10-22, owner's decision)
+
+**Rule (`blocks/filters.py` docstrings, spec §5.2):**
+- `session_window` and `day_of_week` judge when the trade would open, the entry bar: the value at signal bar t reads bar t + 1's open time. "London 08:00-16:00" now means the trade opens inside that window, and a D1 Friday signal enters on Monday.
+- The last bar has no next bar yet; its entry never fills, so it uses one bar later on the clock.
+- Market filters (`ma_slope`, `adx`, `atr_regime`) still judge the signal bar's close.
+- Reversals follow the same rule: the reverse entry's time filters judge the open it reverses at.
+
+**The deliberate look-ahead:** time filters read the next bar's open time, which is the clock, never a price. The spec states the exception next to the no-look-ahead rule, the look-ahead test's docstring notes it, and `tests/test_filters.py` pins it.
+
+**Evidence:**
+- **By hand:** H1 London and New York windows (GMT, BST, the US-only DST weeks) allow the hour before each allowed entry. Tokyo 22:00-02:00 wraps. On D1, Mon to Fri with Tuesday and Friday off gives `[F, T, T, F, F]`. Thu, Fri, Mon, Tue bars show a Friday signal entering on Monday. Donchian with London 08:00-12:00 keeps the 08:00-10:00 signals, because the 11:00 signal would enter at 12:00. The filtered reversal now uses a London 01:00-01:45 window, which the old rule would have failed.
+- **End to end on H4:** London 08:00-16:00 without Mondays, over six synthetic months: all 77 trades open inside the window and none on a Monday. The signal-bar rule put 24 of its 80 trades outside the window.
+- **Suites:** the default suite passes 839 tests in about 24 s; the slow suite passes all 6 tests in 204 s. Ruff is clean.
+
+**For Layer B (the live runner):** a live runner always sits on the last bar, where the filter uses the clock's next open. Across the weekend and the daily break that can differ from the bar the order actually fills on, so the runner must re-check time filters against the real fill bar before it sends.
+
+- [x] The owner reviews (approved 2026-10-23)

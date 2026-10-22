@@ -167,12 +167,13 @@ def test_opposite_signal_reverses_a_two_way_trade_at_the_same_open():
 
 
 def test_a_filtered_reverse_signal_only_closes():
-    # Bars open at 00:00 UTC (London midnight, GMT). A London 00:00-01:30 window lets the
-    # long's signal at 00:45 through but not the short's at 01:30: the opposite signal comes
-    # from the entry Block alone and still closes the long, but the filter blocks the reversal.
+    # Bars open at 00:00 UTC (London midnight, GMT). The window judges where each trade would
+    # open: London 01:00-01:45 lets the long through (signal 00:45, entry 01:00) but not the
+    # short (signal 01:30, entry 01:45). The opposite signal comes from the entry Block alone
+    # and still closes the long, but the filter blocks the reversal.
     window = {
         "block": "session_window",
-        "params": {"zone": "london", "start": "00:00", "end": "01:30"},
+        "params": {"zone": "london", "start": "01:00", "end": "01:45"},
     }
 
     [trade] = run(REVERSAL_BARS, OPPOSITE, filters=[window])

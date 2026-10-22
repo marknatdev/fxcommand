@@ -125,8 +125,8 @@ There is one seam per external dependency, and each has a real adapter and a fak
 | Filter | `ma_slope` | period, min_slope_atr |
 | Filter | `adx` | period, min, max |
 | Filter | `atr_regime` | period, lookback, percentile_min, percentile_max |
-| Filter | `session_window` | session or from/to (exchange-local) |
-| Filter | `day_of_week` | days |
+| Filter | `session_window` | zone, start, end (exchange-local); judges the entry bar |
+| Filter | `day_of_week` | days (server clock); judges the entry bar |
 | Exit | `atr_stop` | period, mult |
 | Exit | `atr_target` | period, mult |
 | Exit | `r_target` | r |
@@ -136,6 +136,8 @@ There is one seam per external dependency, and each has a real adapter and a fak
 | Sizing | `fixed_risk` | risk_pct |
 
 Every Block has a pure, vectorised implementation that uses only bars at or before the signal bar. A property test checks that no Block looks ahead: the signal at bar *t* must be unchanged when the bars after *t* are altered.
+
+**One exception, by design (2026-10-22):** time filters (`session_window`, `day_of_week`) judge when the trade would open, the entry bar, so they read the next bar's open time. That is the clock, never a price. For example, "London 08:00–16:00" means the trade opens inside that window, and a D1 Friday signal enters on Monday. On the last bar, which has no next bar yet, they use one bar later on the clock.
 
 ## 6. Engine and Gauntlet
 

@@ -2,6 +2,9 @@
 
 Every registered Block except sizing must have parameter sets in PARAMS, so a new Block can't
 be added without this test covering it.
+
+The rewritten future keeps the bar times. Time filters read the next bar's open time on purpose
+(they judge the entry bar); that is the clock, never a price. tests/test_filters.py pins it.
 """
 
 from datetime import date

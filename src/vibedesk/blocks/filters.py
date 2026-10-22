@@ -1,4 +1,10 @@
-"""Filter Blocks: each returns (allow_long, allow_short), combined with the entry by AND."""
+"""Filter Blocks: each returns (allow_long, allow_short), combined with the entry by AND.
+
+The value at bar t decides whether an entry signalled at bar t's close may be taken. Market
+filters judge the market at that close. Time filters (`session_window`, `day_of_week`) judge
+when the trade would open: the entry bar, the next bar's open (owner's decision, 2026-10-22).
+That reads the next bar's open time, a fact of the clock and never a price.
+"""
 
 import re
 from typing import Literal
@@ -110,11 +116,21 @@ def _minutes(hhmm: str) -> int:
     return int(hours) * 60 + int(minutes)
 
 
+def entry_times(bars: Bars) -> np.ndarray:
+    """When an entry signalled at each bar would open: the next bar's open, so a Friday signal
+    on D1 opens on Monday. The last bar has no next bar yet; its entry would never fill, so it
+    gets one bar later on the clock."""
+    if not len(bars):
+        return bars.time.copy()
+    return np.append(bars.time[1:], bars.time[-1] + bars.timeframe.seconds)
+
+
 @LIBRARY.register("session_window", Kind.FILTER, SessionWindowParams)
 def session_window(bars: Bars, p: SessionWindowParams) -> tuple[np.ndarray, np.ndarray]:
-    """Trade only when the bar opens inside a local-time window of the zone: [start, end).
-    An end before the start wraps past midnight, for example tokyo 22:00 to 02:00."""
-    minute = local_minute_of_day(bars.time, p.zone)
+    """Trade only when the trade's entry bar opens inside a local-time window of the zone:
+    [start, end). An end before the start wraps past midnight, for example tokyo 22:00 to
+    02:00."""
+    minute = local_minute_of_day(entry_times(bars), p.zone)
     start, end = _minutes(p.start), _minutes(p.end)
     if start < end:
         allowed = (minute >= start) & (minute < end)
@@ -139,8 +155,10 @@ class DayOfWeekParams(_Params):
 
 @LIBRARY.register("day_of_week", Kind.FILTER, DayOfWeekParams)
 def day_of_week(bars: Bars, p: DayOfWeekParams) -> tuple[np.ndarray, np.ndarray]:
-    """Trade only on the chosen server-clock weekdays (the broker's trading days)."""
-    weekday = ((bars.time + server_offset(bars.time)) // DAY + 3) % 7  # 1970-01-01: Thursday
+    """Trade only when the trade's entry bar opens on one of the chosen server-clock weekdays
+    (the broker's trading days)."""
+    time = entry_times(bars)
+    weekday = ((time + server_offset(time)) // DAY + 3) % 7  # 1970-01-01: Thursday
     days = np.array([p.mon, p.tue, p.wed, p.thu, p.fri, False, False])
     allowed = days[weekday]
     return allowed, allowed.copy()
