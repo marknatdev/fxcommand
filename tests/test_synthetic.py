@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
@@ -6,22 +7,61 @@ import pytest
 
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.server_time import server_offset
-from vibedesk.market.synthetic import PROFILES, SyntheticBarSource
+from vibedesk.market.synthetic import PLANTED_EDGE, PROFILES, SyntheticBarSource, SyntheticConfig
 
 # Two weeks around the US daylight-saving switch on 2026-03-08.
 START, END = date(2026, 3, 2), date(2026, 3, 16)
 NEW_YORK = ZoneInfo("America/New_York")
 
+# sha256 over every M1 array for seed 7 from START to END, taken before the planted edge existed.
+PRE_EDGE_DIGESTS = {
+    "GOLD": "2a8da17a9b8bc7b77d1acc6b8ee075a13003cd9f74d284e267d34bdbb30ec70e",
+    "EURUSD": "75facd9929eb89945e8b8caedb682d66beb3390668da661e5fea855bda291fef",
+}
+
+
+# Every structure test runs on the random walk and on the planted edge: the edge moves prices,
+# never the shape of the bars.
+@pytest.fixture(scope="module", params=[SyntheticConfig(), PLANTED_EDGE], ids=["walk", "edge"])
+def config(request):
+    return request.param
+
 
 @pytest.fixture(scope="module")
-def source():
-    return SyntheticBarSource(seed=7, start=START, end=END)
+def source(config):
+    return SyntheticBarSource(seed=7, start=START, end=END, config=config)
 
 
-def test_same_seed_gives_identical_bars_and_another_seed_differs(source):
-    again = SyntheticBarSource(seed=7, start=START, end=END).fetch("GOLD", Timeframe.M15)
-    other = SyntheticBarSource(seed=8, start=START, end=END).fetch("GOLD", Timeframe.M15)
+def _digest(bars):
+    digest = hashlib.sha256()
+    for name in ("time", "open", "high", "low", "close", "spread"):
+        digest.update(getattr(bars, name).tobytes())
+    return digest.hexdigest()
+
+
+@pytest.mark.parametrize("symbol", ["GOLD", "EURUSD"])
+def test_edge_off_reproduces_the_bars_from_before_the_edge(symbol):
+    bars = SyntheticBarSource(seed=7, start=START, end=END).fetch(symbol, Timeframe.M1)
+
+    assert _digest(bars) == PRE_EDGE_DIGESTS[symbol]
+
+
+def test_edge_moves_prices_but_no_other_draw():
+    walk = SyntheticBarSource(seed=7, start=START, end=END).fetch("GOLD", Timeframe.M1)
+    edge = SyntheticBarSource(seed=7, start=START, end=END, config=PLANTED_EDGE).fetch(
+        "GOLD", Timeframe.M1
+    )
+
+    assert np.array_equal(walk.time, edge.time)  # the same missing minutes
+    assert np.array_equal(walk.spread, edge.spread)  # the same spreads and spikes
+    assert not np.array_equal(walk.close, edge.close)
+
+
+def test_same_seed_gives_identical_bars_and_another_seed_differs(source, config):
+    again = SyntheticBarSource(seed=7, start=START, end=END, config=config)
+    other = SyntheticBarSource(seed=8, start=START, end=END, config=config)
     bars = source.fetch("GOLD", Timeframe.M15)
+    again, other = again.fetch("GOLD", Timeframe.M15), other.fetch("GOLD", Timeframe.M15)
 
     assert np.array_equal(bars.close, again.close)
     assert np.array_equal(bars.spread, again.spread)

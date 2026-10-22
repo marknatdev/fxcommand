@@ -2,6 +2,11 @@
 
 M1 bars are generated first. Every higher timeframe is aggregated from them on the server clock,
 the same way MT5 builds its bars, so M1 always agrees exactly with M15 to D1.
+
+By default the bars are a random walk with no edge. `SyntheticConfig` can plant a known edge in
+entry timing (spec §9.6): each server day has a hidden direction that shows in the London opening
+hour and drifts on for a few hours after it. A strategy that reads the opening hour can earn it;
+a random entry at the same hours can't, because the direction is a coin flip it never sees.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from datetime import UTC, date, datetime
 
 import numpy as np
 
+from vibedesk.blocks.sessions import local_minute_of_day
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.server_time import DAY, server_offset
 
@@ -41,12 +47,22 @@ PROFILES = {
 
 @dataclass(frozen=True)
 class SyntheticConfig:
-    trend: float = 0.0  # planted edge: persistent drift, as a fraction of minute volatility
-    trend_persistence_hours: float = 48.0
+    # The planted edge, in hourly volatilities. Zero for both means a pure random walk.
+    reveal: float = 0.0  # drift over the London opening hour (08:00-09:00 London time)
+    follow: float = 0.0  # drift per hour for `follow_hours` hours after the opening hour
+    follow_hours: int = 0
     missing_bar_prob: float = 0.002
     spike_prob: float = 0.005
     weekend_gap_hours: float = 4.0  # weekend gap stdev, in hours of typical volatility
 
+
+EDGE_BLOCK_DAYS = 20  # server days per block with as many hidden ups as downs
+
+# The known-answer edge, calibrated in docs/research/2026-10-22-planted-edge.md on these seeds
+# and this source range. Both matter: the base path and the day blocks start at the range start.
+PLANTED_EDGE = SyntheticConfig(reveal=2.0, follow=0.6, follow_hours=3)
+PLANTED_EDGE_SEEDS = (1, 2, 3, 4, 5)
+PLANTED_EDGE_RANGE = (date(2014, 1, 1), date(2026, 10, 1))
 
 # Volatility multiplier by server hour: quiet Asia, busy London and New York.
 _INTRADAY = np.array([0.6] * 10 + [1.2] * 5 + [1.4] * 5 + [0.8] * 4)
@@ -104,11 +120,11 @@ class SyntheticBarSource:
         sigma = sigma_minute * np.exp(regime - 0.045)[day_index] * _INTRADAY[(server // 3600) % 24]
 
         returns = sigma * rng.standard_normal(n)
-        if cfg.trend:
-            hour_index = np.unique(server // 3600, return_inverse=True)[1]
-            phi = math.exp(-1.0 / cfg.trend_persistence_hours)
-            drift = _ar1(rng, int(hour_index.max()) + 1, phi=phi, sd=1.0)
-            returns += cfg.trend * sigma * drift[hour_index]
+        if cfg.reveal or cfg.follow:
+            # A stream of its own, so the edge adds drift without moving any other draw.
+            edge_rng = np.random.default_rng([self._seed, zlib.crc32(symbol.encode()), 1])
+            direction = _hidden_directions(edge_rng, int(day_index.max()) + 1)
+            returns += direction[day_index] * _edge_strength(minutes, cfg) * sigma / math.sqrt(60)
 
         gaps = np.zeros(n)
         week_opens = np.flatnonzero(np.diff(minutes) > DAY) + 1
@@ -141,6 +157,32 @@ class SyntheticBarSource:
             close=close[keep],
             spread=spread[keep],
         )
+
+
+def _hidden_directions(rng: np.random.Generator, days: int) -> np.ndarray:
+    """+1 or -1 per server day: a fair coin on each day, with ups and downs balanced per block.
+
+    Independent coins would add a second random walk to the price level, and the Spread Floor
+    is fixed in points, so a seed whose price the edge dragged down would pay several times
+    the cost in R. Balancing each block of EDGE_BLOCK_DAYS days keeps the edge from moving the
+    level, at the price of a slight anti-correlation between days of the same block.
+    """
+    blocks = -(-days // EDGE_BLOCK_DAYS)
+    order = np.argsort(rng.random((blocks, EDGE_BLOCK_DAYS)), axis=1)
+    return np.where(order < EDGE_BLOCK_DAYS // 2, 1.0, -1.0).ravel()[:days]
+
+
+def _edge_strength(minutes: np.ndarray, cfg: SyntheticConfig) -> np.ndarray:
+    """Drift per minute in minute volatilities, so each hour adds its strength in hourly ones.
+
+    London time, not the server clock, places the opening hour, as the session Blocks do; the
+    London open moves an hour against the server clock for a few weeks each spring and autumn.
+    """
+    since_open = local_minute_of_day(minutes, "london") - 8 * 60
+    strength = np.zeros(len(minutes))
+    strength[(since_open >= 0) & (since_open < 60)] = cfg.reveal
+    strength[(since_open >= 60) & (since_open < 60 * (1 + cfg.follow_hours))] = cfg.follow
+    return strength
 
 
 def _ar1(rng: np.random.Generator, n: int, phi: float, sd: float) -> np.ndarray:
