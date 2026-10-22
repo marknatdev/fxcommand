@@ -148,5 +148,5 @@ If T10 measures more than 60 s, the levers are, in order:
 ## Open questions and follow-ups
 
 - **Time filters:** should `session_window`/`day_of_week` judge the signal bar (as now) or the entry bar? It matters on H4/D1. Still open.
-- **Stop and reverse (decided 2026-10-22, after M2):** an opposite signal on a Spec that allows the other side closes the trade and opens the reverse at the same open. This is an engine and reference-twin change, done as its own task after M2.
+- **Stop and reverse (decided and built 2026-10-22, after M2):** an opposite signal closes the trade, and when the Spec's own entry for the other side is valid at that bar (filters, direction, a usable stop), the reverse opens at the same open. The rules and evidence are under "After M2" in todo.md.
 - **Known-answer floor (decided 2026-10-22):** T10 runs the known-answer test with a 17-point Spread Floor.

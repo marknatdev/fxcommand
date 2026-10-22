@@ -74,5 +74,6 @@ class OppositeSignalParams(_Params):
 @LIBRARY.register("opposite_signal", Kind.OPPOSITE, OppositeSignalParams)
 def opposite_signal(bars: Bars, p: OppositeSignalParams) -> None:
     """Leave at the next open when the entry Block signals the other direction. Filters and
-    the Spec's direction don't block this exit, and the position is not reversed."""
+    the Spec's direction don't block this exit. When the Spec's own entry (filters and direction
+    included) also signals that side at the same bar, the position reverses at that open."""
     return None

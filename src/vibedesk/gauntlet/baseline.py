@@ -18,6 +18,9 @@ random entries onto the hours just after exits.)
 Entered from flat, a trade's path depends only on its entry bar and side: the stop, target,
 trailing, time and opposite-signal exits are all functions of the bars. So every possible
 random trade of a year is simulated once by the real engine, and a run picks from that table.
+A random trade closed by an opposite signal does not reverse: the random entries are the only
+entries, and the run already draws exactly as many trades as the strategy took, reversals
+included.
 """
 
 from __future__ import annotations

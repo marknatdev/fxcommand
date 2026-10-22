@@ -14,14 +14,19 @@ Fill rules (spec §6.1):
   replaces the initial stop once it is tighter.
 - A time exit leaves at the open of the bar `time_bars` bars after the entry bar. An opposite
   entry signal (from the entry Block alone, ignoring filters and direction) leaves at the next
-  open. Neither reverses the position.
+  open.
+- Stop and reverse: when, at the bar where the opposite signal fires, the Spec's own entry for
+  the other side fires too (after its filters and direction, with a usable stop), the position
+  closes at the next open and the other side opens at that same open. The new position takes
+  its stop and target from that bar and is checked on its entry bar like any entry. Without a
+  valid entry on the other side the opposite signal only closes.
 - When several exits apply, the first in this order wins: stop, target, trailing stop, time,
   opposite signal.
 - If one bar touches both a stop and the target, its M1 bars decide which came first. Without
   M1 data, or if the minutes don't settle it, the stop wins.
 - Swap is charged for every server rollover the position is open through (see swap_nights).
 - One position at a time. A trade that exits during a bar can be followed by a signal at that
-  bar's close. Signals that fire while a position is open are ignored.
+  bar's close. Signals that fire while a position is open are ignored, except a reversal.
 - A position still open after the last bar exits at that bar's close.
 """
 
@@ -311,12 +316,40 @@ def _run(
     target = np.nan
     trail = np.nan
     opposite_due = False
+    reverse = 0  # side to reverse into at this bar's open: the opposite signal is a valid entry
     dist = 0.0
     entry_cost = 0.0
 
     # Nothing can happen before the first signal, or once flat after the last one, so a
     # simulation whose signals fill one year costs one year of bars, whatever the data's length.
     for t in range(first, n):
+        if reverse != 0:
+            # The last close turned the trade and asked for the other side: the position leaves
+            # at this open (time beats opposite if both are due; an exit at the open always
+            # fills, since the at-open checks come first) and the reverse enters below.
+            at_open = _TIME if time_bars > 0 and t - opened >= time_bars else _OPPOSITE
+            why, fill, exit_cost, _ = _check(
+                pos, open_[t], high[t], low[t], spread[t], stop, target, trail, at_open, slip
+            )
+            _record(
+                out,
+                count,
+                pos,
+                opened,
+                t,
+                entry,
+                fill,
+                stop,
+                target,
+                dist,
+                entry_cost + exit_cost,
+                why,
+            )
+            count += 1
+            pos = 0
+            pending = reverse
+            reverse = 0
+
         if pending != 0:
             pos = pending
             pending = 0
@@ -392,6 +425,12 @@ def _run(
                 if not np.isnan(level) and (np.isnan(trail) or level < trail):
                     trail = level
                 opposite_due = exit_short[t]
+            # A reversal needs the Spec's own entry on the other side at this close.
+            if opposite_due and t + 1 < n and stop_dist[t] > 0:
+                if pos == 1 and short_entry[t] and not long_entry[t]:
+                    reverse = -1
+                elif pos == -1 and long_entry[t] and not short_entry[t]:
+                    reverse = 1
 
         if pos == 0 and t + 1 < n and stop_dist[t] > 0:
             if long_entry[t] and not short_entry[t]:

@@ -132,7 +132,7 @@ There is one seam per external dependency, and each has a real adapter and a fak
 | Exit | `r_target` | r |
 | Exit | `atr_trailing` | period, mult |
 | Exit | `time_exit` | bars |
-| Exit | `opposite_signal` | — |
+| Exit | `opposite_signal` | — (closes, and reverses when the Spec's entry allows it; see §6.1) |
 | Sizing | `fixed_risk` | risk_pct |
 
 Every Block has a pure, vectorised implementation that uses only bars at or before the signal bar. A property test checks that no Block looks ahead: the signal at bar *t* must be unchanged when the bars after *t* are altered.
@@ -148,6 +148,13 @@ Every Block has a pure, vectorised implementation that uses only bars at or befo
 - **Stops and targets:** checked inside each bar against high and low, with ask-side prices for shorts.
   - If the stop and the target are both touched in one bar, the M1 bars settle the order.
   - If it is still ambiguous, or M1 data is missing, the stop wins.
+- **Exits** (the engine docstring in `engine/simulate.py` holds the full fill rules):
+  - **Priority:** when several exits apply at once, the first of stop, target, trailing stop, time exit, opposite signal wins.
+  - **A stop already breached at the open** exits at that open, including a stop inside the spread on the entry bar.
+  - **Trailing stop:** moves only at bar closes and only in the trade's favour.
+  - **Time exit:** leaves at the open `bars` bars after the entry bar.
+  - **Opposite signal:** listens to the entry Block alone (no filters, no direction) and leaves at the next open.
+  - **Stop and reverse** (2026-10-22): when the Spec's own entry for the other side (filters and direction included, with a usable stop) fires on the same bar as the opposite signal, the position closes at the next open and the reverse opens at that same open. A time exit due at that open is recorded as the closing reason, and the reversal still happens. Without a valid entry on the other side, the opposite signal only closes.
 - **Swap:** charged in points per lot for each night held at the server rollover, ×3 on Wednesday, using the swap values in the Trial's `CostSnapshot`.
 - **Reproducibility:** every Trial stores its `CostSnapshot` (floor, swap long and short, slippage, point size and its source date), so the Ledger stays reproducible.
 - **Units:** results are in R (glossary). The equity curve and drawdown are also shown at 1% risk on $1,000. Only the R metrics feed the Pass Bar.

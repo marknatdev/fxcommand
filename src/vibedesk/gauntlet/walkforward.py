@@ -11,8 +11,10 @@ Combination that opened it. The rules (tasks/plan.md, "Walk-forward"):
   least MIN_TRAIN_TRADES training trades; ties go to the earlier one in grid order. With none
   eligible the fold trades nothing, which makes it a losing fold.
 - A fold's blind trades are its chosen Combination's trades entered in the blind year. A trade
-  is dropped when it enters before the previous kept trade has exited, so the stitched record
-  never holds two positions.
+  is dropped when it enters before the previous kept trade's exit bar is over, so the stitched
+  record never holds two positions. A reversal, which enters at the open its predecessor left
+  at, survives a fold boundary only when both trades come from the same Combination's
+  simulation; from two different simulations the earlier one may have left later in that bar.
 - Spread stress re-simulates the chosen Combinations at 2x spread and stitches them with the
   same choices; parameters are never re-chosen under stress.
 - The Holdout's parameters are chosen the same way on the last TRAIN_YEARS research years.
@@ -106,21 +108,20 @@ def stitch(
     Returns the trade records and the fold index of each.
     """
     parts, folds = [], []
-    last_exit = -1
+    last_exit, last_chosen = -1, None
     for fold, (chosen, window) in enumerate(zip(choices, windows, strict=True)):
         if chosen is None:
             continue
         record = records[chosen]
-        keep = (
-            (record["entry_time"] >= window.start)
-            & (record["entry_time"] < window.end)
-            & (record["entry_idx"] > last_exit)
-        )
+        after = record["entry_idx"] > last_exit
+        if chosen == last_chosen:  # the same simulation: its own reversals never overlap
+            after |= record["entry_idx"] == last_exit
+        keep = (record["entry_time"] >= window.start) & (record["entry_time"] < window.end) & after
         part = record[keep]
         if len(part):
             parts.append(part)
             folds.append(np.full(len(part), fold, dtype=np.int64))
-            last_exit = int(part["exit_idx"][-1])
+            last_exit, last_chosen = int(part["exit_idx"][-1]), chosen
     if not parts:
         return np.empty(0, dtype=TRADE_DTYPE), np.empty(0, dtype=np.int64)
     return np.concatenate(parts), np.concatenate(folds)

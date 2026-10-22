@@ -137,6 +137,21 @@ def test_stitch_drops_a_next_fold_trade_that_would_overlap(grid):
     assert fold.tolist() == [0, 0, 0, 1]
 
 
+def test_a_reversal_survives_a_fold_boundary_only_within_one_simulation():
+    # A long held into 2018 and its reversal entering at the very bar it left at: the same
+    # Combination in both folds keeps the reversal; a different one may not trust that bar.
+    held = records([(epoch(2017, 12, 1), epoch(2018, 1, 10), 1.0)])
+    reversal = records([(epoch(2018, 1, 10), epoch(2018, 2, 1), 2.0)])
+    same = np.concatenate([held, reversal])
+    windows = [Window.years(2017, 2017), Window.years(2018, 2018)]
+
+    kept, _ = stitch([same], [0, 0], windows)
+    dropped, _ = stitch([held, reversal], [0, 1], windows)
+
+    assert kept["r"].tolist() == [1.0, 2.0]
+    assert dropped["r"].tolist() == [1.0]
+
+
 def test_stitch_skips_folds_that_chose_nothing(grid):
     windows = [Window.years(y, y) for y in (2016, 2017, 2018)]
 

@@ -25,7 +25,7 @@ PULLBACK = (105.0, 105.5, 103.5, 103.8)  # 7: falls, but stays above the trailin
 BREAKDOWN = (103.8, 104.5, 102.5, 103.0)  # 8: low reaches the trailing stop
 
 
-def run(ohlc, exit_spec, direction="both"):
+def run(ohlc, exit_spec, direction="both", filters=()):
     o, h, low, c = zip(*ohlc, strict=True)
     n = len(ohlc)
     bars = Bars("GOLD", Timeframe.M15, 0.01, 2, [1704067200 + 900 * i for i in range(n)],
@@ -37,6 +37,7 @@ def run(ohlc, exit_spec, direction="both"):
             "timeframe": "M15",
             "direction": direction,
             "entry": {"block": "donchian_breakout", "params": {"period": 3}},
+            "filters": list(filters),
             "exit": exit_spec,
             "sizing": {"block": "fixed_risk", "params": {}},
         }
@@ -136,6 +137,47 @@ def test_opposite_signal_closes_a_long_only_trade_without_reversing():
     assert trade["exit_idx"] == 7
     assert trade["exit_price"] == pytest.approx(99.49, abs=1e-9)
     assert trade["r"] == pytest.approx(-2.22 / 4, abs=1e-9)
+
+
+REVERSAL_BARS = [
+    FLAT, FLAT, FLAT, BREAKOUT,
+    (101.6, 103.0, 101.0, 102.8),  # 4: long entry
+    (102.8, 103.0, 101.0, 101.2),  # 5
+    (101.2, 101.5, 99.5, 99.6),  # 6: short signal, ATR(3) = 2.00
+    (99.5, 100.5, 98.5, 100.0),  # 7: the long leaves and the short enters at this open
+]  # fmt: skip
+OPPOSITE = {"stop": stop(2.0), "opposite": {"block": "opposite_signal"}}
+
+
+def test_opposite_signal_reverses_a_two_way_trade_at_the_same_open():
+    # The long leaves at bar 7's open, 99.5 - 0.01 = 99.49, exactly as when it only closes.
+    # The short enters at that same open: sold at the bid, 99.49, with a stop 2 x ATR(3) = 4.00
+    # away on the ask, 103.49. It is still open at the last bar and closes at its ask close,
+    # 100.0 + 0.10 + 0.01 = 100.11: R = -(100.11 - 99.49) / 4.
+    long, short = run(REVERSAL_BARS, OPPOSITE)
+
+    assert (long["exit_reason"], long["exit_idx"]) == (ExitReason.OPPOSITE, 7)
+    assert long["exit_price"] == pytest.approx(99.49, abs=1e-9)
+    assert (short["side"], short["entry_idx"]) == (-1, 7)
+    assert short["entry_price"] == pytest.approx(99.49, abs=1e-9)
+    assert short["stop_price"] == pytest.approx(103.49, abs=1e-9)
+    assert short["exit_reason"] is ExitReason.END
+    assert short["exit_price"] == pytest.approx(100.11, abs=1e-9)
+    assert short["r"] == pytest.approx(-0.62 / 4, abs=1e-9)
+
+
+def test_a_filtered_reverse_signal_only_closes():
+    # Bars open at 00:00 UTC (London midnight, GMT). A London 00:00-01:30 window lets the
+    # long's signal at 00:45 through but not the short's at 01:30: the opposite signal comes
+    # from the entry Block alone and still closes the long, but the filter blocks the reversal.
+    window = {
+        "block": "session_window",
+        "params": {"zone": "london", "start": "00:00", "end": "01:30"},
+    }
+
+    [trade] = run(REVERSAL_BARS, OPPOSITE, filters=[window])
+
+    assert (trade["side"], trade["exit_reason"], trade["exit_idx"]) == (1, ExitReason.OPPOSITE, 7)
 
 
 TRAIL_AND_TIME = TRAILING | {"time": {"block": "time_exit", "params": {"bars": 4}}}

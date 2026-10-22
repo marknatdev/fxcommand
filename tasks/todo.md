@@ -401,6 +401,7 @@ The output is a `WalkForward` result holding:
   - **A grant is a reusable key until the spend is recorded.** `verify` stays true until `record_holdout`, so anything holding the grant could fetch Holdout bars without spending it. A crash after the first Holdout fetch also leaves nothing spent, and a retry gets a second look. In M2 only `run_holdout` holds a grant. In M5, approving and running the Holdout should be one owner action inside the app, and the grant must never reach the Research Desk or the MCP server.
   - **Owner question for M5:** should a run that crashes after opening the Holdout count as spent? That would mean an "opened" row written before the first fetch.
   - **Bind each Holdout Request to the Trial id it was made from.** This needs a Ledger column.
+  - **Trade rules can change between a Trial and its Holdout.** `run_holdout` re-simulates under whatever the engine does on the day it runs, so a Trial and its Holdout could be judged under different rules. Stop-and-reverse was the first such change; the time-filter decision may be the next. The fix is a `rules_version` stored in the Trial record, with `run_holdout` refusing on a mismatch. It must land before M3 produces real Trials.
   - **Concurrent Trials can share a seed.** `trial_number` is read outside the Ledger's write lock, so two Trials started at once on one family share a number and its baseline seed. The budget stays safe, because `record_trial` checks it under the lock.
 - **Open for T10:** the default suite now takes about 40 s, against T10's 30 s bar. Options: run tests in parallel (pytest-xdist), or move the 12-year benchmarks and the heaviest statistical tests to `slow`.
 
@@ -465,6 +466,29 @@ The output is a `WalkForward` result holding:
   - One lucky survivor is thin evidence. A larger null run (more seeds, more grids) is worth doing once real ideas start flowing.
 
 **Carried forward from M2:**
-- **After M2:** opposite-signal stop-and-reverse (decided).
+- **After M2:** opposite-signal stop-and-reverse (decided; built, see below).
 - **Still open:** whether time filters judge the signal bar or the entry bar.
 - **For M5 (the API and app):** the grant is reusable until the spend is recorded; bind each Holdout Request to its Trial id; concurrent Trials can share a seed.
+
+---
+
+## After M2: opposite-signal stop and reverse (2026-10-22, owner's decision)
+
+**Rule (engine docstring, `opposite_signal` docstring):**
+- The opposite exit is unchanged: when the entry Block alone signals the other way at a bar's close, the position leaves at the next open.
+- **New:** when, at that same close, the Spec's own entry for the other side also fires (after its filters and direction, one-sided, with a usable stop), the position closes at the next open and the other side opens at that same open.
+- The new position takes its stop and target from the signal bar and is checked on its entry bar like any entry. A time exit due at the same open takes priority as the closing reason; the reversal still happens.
+- Without a valid entry on the other side (filtered out, a long-only Spec, warm-up), the opposite signal only closes.
+
+**Knock-on changes:**
+- **Walk-forward stitching:** a reversal (entry bar = the previous exit bar) survives a fold boundary only when both trades come from the same Combination's simulation. From two different simulations, the earlier trade may have left later in that bar, so the reversal is dropped.
+- **Coin-Flip Baseline:** unchanged. Random trades closed by an opposite signal don't reverse, and each run already draws the strategy's full trade count, reversals included.
+- **Invariant:** a trade may enter on the bar the previous one left only when it reverses (the other side) and the Spec has an opposite exit.
+
+**Evidence:**
+- **Golden by hand:** the long closes at 99.49 and the short enters at 99.49, with its stop at 103.49, closing at 100.11 (−0.155R). A London window that blocks the short's signal leaves only the close.
+- **Reference twin** (written separately, with its own reversal logic): it agrees on the 200 random cases and on 40 reversal-heavy cases (`ma_cross` + opposite, with optional filter, time exit and trailing stop): 1,574 trades, 952 of them reversals. `ma_cross` + opposite now takes 737 shorts; before, it was effectively long-only.
+- **End to end:** a full 4-Combination Trial on synthetic H1 gave 1,004 stitched trades (949 reversals, 501 shorts, no overlaps), a baseline percentile of 0.39 on random walk, and every trade stored.
+- **Suites:** the default suite passes 837 tests in about 26 s; the slow suite passes all 6 tests in 211 s.
+
+- [x] The owner reviews (approved 2026-10-22)

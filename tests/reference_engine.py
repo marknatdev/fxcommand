@@ -54,10 +54,24 @@ def simulate_reference(bars, signals, cost, m1=None) -> list[dict]:
     trades: list[dict] = []
     position: _Position | None = None
     waiting: int | None = None  # signal bar whose entry fills at the next open
+    turning: int | None = None  # signal bar of a reversal: leave at this open, enter the other side
 
     for t in range(len(bars)):
         bid = Quote(bars.open[t], bars.high[t], bars.low[t], bars.close[t])
         entered_now = False
+
+        if turning is not None:
+            # Stop and reverse: the open position leaves at this open, whatever exit at the
+            # open comes first, and the other side enters at the same open just below.
+            held = t - position.entry_idx
+            due = ExitReason.TIME if signals.time_bars and held >= signals.time_bars else None
+            outcome = _check_exit(
+                position, bid, spreads[t], slip, True, due=due or ExitReason.OPPOSITE
+            )
+            fill, reason, _, exit_cost = outcome
+            trades.append(_close(position, t, fill, reason, exit_cost, bars, cost))
+            position = None
+            waiting, turning = turning, None
 
         if waiting is not None:
             side = 1 if signals.long_entry[waiting] else -1
@@ -108,6 +122,17 @@ def simulate_reference(bars, signals, cost, m1=None) -> list[dict]:
                     position.trail = candidate
             opposite = exit_long[t] if position.side == 1 else exit_short[t]
             position.opposite_seen = bool(opposite)
+            # Reverse only into a valid entry of the Spec itself on the other side.
+            other = signals.short_entry if position.side == 1 else signals.long_entry
+            same = signals.long_entry if position.side == 1 else signals.short_entry
+            if (
+                opposite
+                and bool(other[t])
+                and not bool(same[t])
+                and signals.stop_dist[t] > 0
+                and t + 1 < len(bars)
+            ):
+                turning = t
 
         if position is None and t + 1 < len(bars):
             go_long = bool(signals.long_entry[t]) and not bool(signals.short_entry[t])

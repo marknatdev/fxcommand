@@ -150,8 +150,13 @@ def test_trade_invariants(case):
     slip_r = slip / t["risk"]
     eps = 1e-9
 
-    # Positions never overlap; a new entry comes at least one bar after the last exit.
-    assert np.all(t["entry_idx"][1:] > t["exit_idx"][:-1])
+    # Positions never overlap. A new entry comes at least one bar after the last exit, except a
+    # reversal: it enters the other side at the very open the last trade left at.
+    assert np.all(t["entry_idx"][1:] >= t["exit_idx"][:-1])
+    touching = t["entry_idx"][1:] == t["exit_idx"][:-1]
+    assert np.all(t["side"][1:][touching] == -t["side"][:-1][touching])
+    if not case["opposite"] or case["direction"] != "both":
+        assert not touching.any()
     assert np.all(t["exit_idx"] >= t["entry_idx"])
     assert np.all(t["risk"] > 0)
 
@@ -234,3 +239,72 @@ def test_stress_lowers_total_r_across_many_cases():
         stressed_total += run_case(**case | {"multiplier": 2.0})[-1]["r"].sum()
 
     assert stressed_total < base_total
+
+
+def reversal_case(seed):
+    """ma_cross with an opposite-signal exit: every cross both closes and reverses."""
+    rng = np.random.default_rng(seed)
+    bars = synthetic_bars(seed % 7, str(rng.choice(["GOLD", "EURUSD"])), Timeframe.M15)
+    fast = int(rng.integers(3, 12))
+    exits = {
+        "stop": {"block": "atr_stop", "params": {"mult": float(rng.choice([2.0, 6.0]))}},
+        "opposite": {"block": "opposite_signal"},
+    }
+    if rng.random() < 0.5:
+        exits["time"] = {"block": "time_exit", "params": {"bars": int(rng.integers(5, 60))}}
+    if rng.random() < 0.5:
+        exits["trailing"] = {"block": "atr_trailing", "params": {"mult": 4.0}}
+    filters = []
+    if rng.random() < 0.5:  # a filter that blocks some reversals but never the exits
+        filters = [{"block": "session_window", "params": {"zone": "london"}}]
+    spec = validate(
+        {
+            "name": "reversals",
+            "symbol": bars.symbol,
+            "timeframe": "M15",
+            "direction": str(rng.choice(["both", "both", "long"])),
+            "entry": {"block": "ma_cross", "params": {"fast": fast, "slow": fast * 3}},
+            "filters": filters,
+            "exit": exits,
+            "sizing": {"block": "fixed_risk", "params": {}},
+        }
+    )
+    [combination] = expand_grid(spec)
+    signals = compile_signals(combination, bars)
+    cost = CostSnapshot(PROFILES[bars.symbol].point, 20, 1, swap_long_points=-50.0)
+    use_m1 = rng.random() < 0.5
+    m1 = synthetic_bars(seed % 7, bars.symbol, Timeframe.M1) if use_m1 else None
+    return bars, signals, cost, m1, spec.direction
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_reversals_match_the_reference_twin(seed):
+    bars, signals, cost, m1, direction = reversal_case(seed)
+
+    trades = simulate(bars, signals, cost, m1=m1)
+    expected = simulate_reference(bars, signals, cost, m1=m1)
+
+    t = trades.records
+    if direction == "long":  # a long-only Spec closes on the opposite signal, never reverses
+        assert np.all(t["side"] == 1)
+        assert not np.any(t["entry_idx"][1:] == t["exit_idx"][:-1])
+    actual = trades.as_dicts()
+    assert len(actual) == len(expected)
+    for got, want in zip(actual, expected, strict=True):
+        for field, value in want.items():
+            if isinstance(value, float) and math.isnan(value):
+                assert math.isnan(got[field]), field
+            else:
+                assert got[field] == pytest.approx(value, rel=1e-12, abs=1e-12), field
+
+
+def test_the_reversal_cases_really_reverse():
+    reversals = shorts = 0
+    for seed in range(40):
+        bars, signals, cost, m1, direction = reversal_case(seed)
+        t = simulate(bars, signals, cost, m1=m1).records
+        reversals += int((t["entry_idx"][1:] == t["exit_idx"][:-1]).sum())
+        shorts += int((t["side"] == -1).sum()) if direction == "both" else 0
+
+    assert reversals > 200
+    assert shorts > 200  # ma_cross + opposite used to be long-only in practice
