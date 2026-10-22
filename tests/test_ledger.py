@@ -17,6 +17,7 @@ from vibedesk.ledger import (
     BarsFingerprint,
     BudgetExhausted,
     FamilyConflict,
+    HoldoutRequest,
     HoldoutSpent,
     Ledger,
     LedgerError,
@@ -544,3 +545,17 @@ def test_a_request_is_approved_once(ledger):
     with pytest.raises(NotFound):
         ledger.approve_holdout(999)
     assert len(first.token) >= 40  # token_urlsafe(32)
+
+
+def test_a_holdout_request_names_its_hypothesis(path):
+    with Ledger(path) as ledger:
+        family = ledger.create_family("an idea")
+        hypothesis = ledger.register_hypothesis(family, make_spec())
+        request = ledger.request_holdout(hypothesis)
+
+        found = ledger.holdout_request(request)
+
+        assert isinstance(found, HoldoutRequest)
+        assert (found.id, found.hypothesis_id) == (request, hypothesis)
+        with pytest.raises(NotFound):
+            ledger.holdout_request(request + 1)

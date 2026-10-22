@@ -127,7 +127,7 @@ If T10 measures more than 60 s, the levers are, in order:
 - [x] Gauntlet pieces are green on hand-built inputs; the owner reviews
 
 ### Phase 3: Integration (needs everything)
-- [ ] T9: Trial runner + Holdout run + Holdout Request gate
+- [x] T9: Trial runner + Holdout run + Holdout Request gate
 - [ ] T10: Known-answer tests + Trial benchmark (`slow`)
 
 ### Checkpoint C: M2 done

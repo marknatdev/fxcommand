@@ -358,9 +358,9 @@ The output is a `WalkForward` result holding:
 - `run_holdout(ledger, market, grant)` fetches all data with the grant, uses the 2022–2024 selection and trades entered from 2025-01-01, and returns PASS (PF ≥ 1.1 with ≥ 30 trades) or HOLDOUT FAIL.
 
 **Acceptance criteria:**
-- [ ] Each `run_trial` adds exactly one Trial row, and every figure a Verdict Card needs can be read back from the stored record (rebuilt from the store in the test).
-- [ ] A 26th Trial is refused. A Holdout Request on a REJECT, or one with too few expected trades, is refused without spending. A second Holdout in the same family is refused.
-- [ ] The Research-Window fetch never reaches 2025, whatever the Spec asks for (asserted with a recording source).
+- [x] Each `run_trial` adds exactly one Trial row, and every figure a Verdict Card needs can be read back from the stored record (rebuilt from the store in the test).
+- [x] A 26th Trial is refused. A Holdout Request on a REJECT, or one with too few expected trades, is refused without spending. A second Holdout in the same family is refused.
+- [x] The Research-Window fetch never reaches 2025, whatever the Spec asks for (asserted with a recording source).
 
 **Verification:** `uv run pytest tests/test_trial.py`
 
@@ -369,6 +369,40 @@ The output is a `WalkForward` result holding:
 **Files (owned):** `src/vibedesk/gauntlet/trial.py`, `tests/test_trial.py`
 
 **Scope:** M
+
+**Result (2026-10-22, built here):**
+- **API** (`gauntlet/trial.py`):
+  - `run_trial(ledger, market, hypothesis_id, cost, *, use_m1=True, runs=1000, years=BLIND_YEARS) -> TrialResult`
+  - `request_holdout(ledger, hypothesis_id, now=None) -> request_id`, which raises `HoldoutRefused` with reason `NOT_CANDIDATE` or `INSUFFICIENT_TRADES`
+  - `run_holdout(ledger, market, grant, *, now=None) -> HoldoutResult`
+  - `expected_holdout_trades(record, now)`
+  - New Ledger read: `holdout_request(request_id) -> HoldoutRequest`, so a grant runs its own Hypothesis.
+- **The stored record:** a strict JSON object, versioned, holding:
+  - the Verdict, every check and the Closest Miss;
+  - the CostSnapshot;
+  - the walk-forward: choices, per-Combination per-fold results, blind Sharpe and PF, stitched and stress metrics, per-fold R, the daily-R equity series and every trade as columns;
+  - the baseline: seed, runs, p95, percentile and the full net-R distribution for the histogram;
+  - the Deflated Sharpe with its N and V, the PBO, and the Holdout trade rate.
+- **JSON rules:** NaN is stored as null and infinity as `"inf"`, written with `allow_nan=False`. A test rebuilds the Verdict Card figures from the store alone.
+- **Choices made:**
+  - The baseline seed comes from (family, Hypothesis, Trial number in the family). The Trial id only exists after the insert, so the seed is stored with the Trial instead.
+  - Budget and blind-year checks run before any bars are fetched; a recording source proves no fetch happens.
+  - The Deflated Sharpe's N and V come from `deflation_inputs(..., pending_sharpes=wf.blind_sharpe)`, so a family's second Trial deflates by 2.
+  - Expected Holdout trades = the Holdout Combination's blind trades per year × the years from 2025-01-01 to the request time.
+  - `run_holdout` refuses, before fetching any bar, unless the Hypothesis's latest Trial is still a CANDIDATE (a Trial run since the request may have turned the Verdict). It then trades that Trial's chosen Combination under the Trial's stored CostSnapshot. It simulates from the first training year, so indicators are warm, and judges trades entered from 2025-01-01. A position still open from 2024 can block the first 2025 entries.
+- **Tests (12, synthetic GOLD M15, floor 17):**
+  - planted edge → CANDIDATE → Holdout PASS, spent once;
+  - random walk → REJECT, its Holdout Request refused;
+  - a too-early request is refused for `INSUFFICIENT_TRADES`;
+  - a forced random-walk Holdout fails;
+  - the 26th Trial is refused before any fetch;
+  - Research-Window fetches all end by 2025-01-01.
+- **Notes for M5 (the API and app):**
+  - **A grant is a reusable key until the spend is recorded.** `verify` stays true until `record_holdout`, so anything holding the grant could fetch Holdout bars without spending it. A crash after the first Holdout fetch also leaves nothing spent, and a retry gets a second look. In M2 only `run_holdout` holds a grant. In M5, approving and running the Holdout should be one owner action inside the app, and the grant must never reach the Research Desk or the MCP server.
+  - **Owner question for M5:** should a run that crashes after opening the Holdout count as spent? That would mean an "opened" row written before the first fetch.
+  - **Bind each Holdout Request to the Trial id it was made from.** This needs a Ledger column.
+  - **Concurrent Trials can share a seed.** `trial_number` is read outside the Ledger's write lock, so two Trials started at once on one family share a number and its baseline seed. The budget stays safe, because `record_trial` checks it under the lock.
+- **Open for T10:** the default suite now takes about 40 s, against T10's 30 s bar. Options: run tests in parallel (pytest-xdist), or move the 12-year benchmarks and the heaviest statistical tests to `slow`.
 
 ---
 

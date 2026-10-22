@@ -249,6 +249,13 @@ class TrialRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class HoldoutRequest:
+    id: int
+    hypothesis_id: int
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class HoldoutSpend:
     id: int
     family_id: int
@@ -556,6 +563,16 @@ class Ledger:
                 if "UNIQUE constraint failed: holdout_spends" in str(exc):
                     raise HoldoutSpent(row["family_id"]) from exc
                 raise
+
+    def holdout_request(self, request_id: int) -> HoldoutRequest:
+        """The Holdout Request a grant was issued for, so the Holdout runs its Hypothesis."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM holdout_requests WHERE id = ?", (request_id,)
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"no Holdout Request {request_id}")
+            return HoldoutRequest(**row)
 
     def holdout_spend(self, family_id: int) -> HoldoutSpend | None:
         with self._lock:
