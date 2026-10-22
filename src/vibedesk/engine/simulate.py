@@ -33,7 +33,8 @@ from enum import IntEnum
 import numpy as np
 from numba import njit
 
-from vibedesk.engine.costs import CostSnapshot, swap_nights
+from vibedesk.engine.costs import CostSnapshot
+from vibedesk.engine.prepared import PreparedMarket, prepare
 from vibedesk.market.bars import Bars
 
 
@@ -102,12 +103,19 @@ class Trades:
 
 def simulate(bars: Bars, signals: Signals, cost: CostSnapshot, m1: Bars | None = None) -> Trades:
     """Simulate one Combination's signals. `m1`, when given, settles bars where the stop and
-    the target are both touched; without it, or without M1 bars inside that bar, the stop wins."""
-    n = len(bars)
-    never = np.zeros(n, dtype=np.bool_)
-    trail_dist = np.full(n, np.nan) if signals.trail_dist is None else signals.trail_dist
-    exit_long = never if signals.exit_long is None else signals.exit_long
-    exit_short = never if signals.exit_short is None else signals.exit_short
+    the target are both touched; without it, or without M1 bars inside that bar, the stop wins.
+
+    To simulate the same bars many times, prepare them once and call simulate_prepared.
+    """
+    return simulate_prepared(prepare(bars, cost, m1), signals)
+
+
+def simulate_prepared(market: PreparedMarket, signals: Signals) -> Trades:
+    """Simulate one Combination's signals on a market from `prepare`."""
+    n = len(market)
+    trail_dist = market.no_trail if signals.trail_dist is None else signals.trail_dist
+    exit_long = market.never if signals.exit_long is None else signals.exit_long
+    exit_short = market.never if signals.exit_short is None else signals.exit_short
     arrays = {
         "long_entry": signals.long_entry,
         "short_entry": signals.short_entry,
@@ -120,21 +128,14 @@ def simulate(bars: Bars, signals: Signals, cost: CostSnapshot, m1: Bars | None =
     for name, array in arrays.items():
         if len(array) != n:
             raise ValueError(f"signals.{name} has a different length than the bars")
-    if m1 is None:
-        m1_open = m1_high = m1_low = m1_spread = np.zeros(0)
-        m1_lo = m1_hi = np.zeros(n, dtype=np.int64)
-    else:
-        m1_open, m1_high, m1_low = m1.open, m1.high, m1.low
-        m1_spread = cost.spread_prices(m1.spread)
-        m1_lo = np.searchsorted(m1.time, bars.time).astype(np.int64)
-        m1_hi = np.searchsorted(m1.time, bars.time + bars.timeframe.seconds).astype(np.int64)
 
+    bars, cost = market.bars, market.cost
     table = _run(
         bars.open,
         bars.high,
         bars.low,
         bars.close,
-        cost.spread_prices(bars.spread),
+        market.spread,
         np.asarray(signals.long_entry, dtype=np.bool_),
         np.asarray(signals.short_entry, dtype=np.bool_),
         np.asarray(signals.stop_dist, dtype=np.float64),
@@ -143,13 +144,13 @@ def simulate(bars: Bars, signals: Signals, cost: CostSnapshot, m1: Bars | None =
         int(signals.time_bars),
         np.asarray(exit_long, dtype=np.bool_),
         np.asarray(exit_short, dtype=np.bool_),
-        cost.slippage_price,
-        m1_open,
-        m1_high,
-        m1_low,
-        m1_spread,
-        m1_lo,
-        m1_hi,
+        market.slippage,
+        market.m1_open,
+        market.m1_high,
+        market.m1_low,
+        market.m1_spread,
+        market.m1_lo,
+        market.m1_hi,
     )
     entry_idx = table[:, _ENTRY_IDX].astype(np.int64)
     exit_idx = table[:, _EXIT_IDX].astype(np.int64)
@@ -171,7 +172,7 @@ def simulate(bars: Bars, signals: Signals, cost: CostSnapshot, m1: Bars | None =
     records["exit_reason"] = table[:, _WHY].astype(np.int8)
 
     # Swap never changes when a trade exits, so it is added after the fill loop.
-    nights = swap_nights(records["entry_time"], records["exit_time"], cost.triple_swap_day)
+    nights = market.rollovers[exit_idx] - market.rollovers[entry_idx]
     rate = np.where(side == 1, cost.swap_long_points, cost.swap_short_points)
     records["swap_r"] = rate * nights * cost.point / risk
     records["r"] = table[:, _R] + records["swap_r"]
@@ -234,7 +235,7 @@ def _check(pos, open_, high, low, spread, stop, target, trail, at_open, slip):
     return 0, 0.0, 0.0, False
 
 
-# Columns of the trade table _run returns; simulate() turns it into TRADE_DTYPE records.
+# Columns of the trade table _run returns; simulate_prepared() turns it into TRADE_DTYPE records.
 (
     _SIDE,
     _ENTRY_IDX,
@@ -289,7 +290,13 @@ def _run(
     m1_hi,
 ):
     n = len(open_)
-    out = np.zeros((n, 11))
+    # Every trade enters on a bar after one that signals one side only, so that count bounds
+    # the table; sizing it by the bars would allocate megabytes per call for a few hundred rows.
+    capacity = 1
+    for t in range(n):
+        if long_entry[t] != short_entry[t]:
+            capacity += 1
+    out = np.empty((capacity, 11))
     count = 0
 
     pos = 0  # +1 long, -1 short, 0 flat
