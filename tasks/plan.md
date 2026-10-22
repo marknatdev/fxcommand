@@ -119,7 +119,7 @@ If T10 measures more than 60 s, the levers are, in order:
 - [x] Default suite green, ruff clean; T2's calibration numbers recorded; the owner reviews
 
 ### Phase 2: Gauntlet core (needs T1 and T3)
-- [ ] T6: Walk-forward: folds, selection, stitched blind record, stress, Holdout selection
+- [x] T6: Walk-forward: folds, selection, stitched blind record, stress, Holdout selection
 - [ ] T7: Coin-Flip Baseline with exact counts
 - [ ] T8: Prosecutor, Pass Bar, Verdict, Closest Miss
 

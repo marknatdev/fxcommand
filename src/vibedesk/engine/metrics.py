@@ -36,13 +36,6 @@ def metrics(
 ) -> Metrics:
     r = np.asarray(trades["r"], dtype=np.float64)
     n = len(r)
-    wins, losses = r[r > 0].sum(), -r[r < 0].sum()
-    if n == 0:
-        profit_factor = np.nan
-    elif losses == 0:
-        profit_factor = np.inf if wins > 0 else np.nan
-    else:
-        profit_factor = wins / losses
     net = r.sum()
     top5 = np.sort(r)[::-1][:5].sum() / net if net > 0 else np.nan
 
@@ -58,7 +51,7 @@ def metrics(
     return Metrics(
         trades=n,
         net_r=float(net),
-        profit_factor=float(profit_factor),
+        profit_factor=profit_factor(r),
         win_rate=float((r > 0).mean()) if n else np.nan,
         expectancy_r=float(r.mean()) if n else np.nan,
         top5_share=float(top5),
@@ -69,6 +62,15 @@ def metrics(
         max_drawdown_money=max_drawdown_money,
         max_drawdown_pct=max_drawdown_pct,
     )
+
+
+def profit_factor(r: np.ndarray) -> float:
+    """Gross winning R over gross losing R: inf with winners and no losers, NaN with neither."""
+    r = np.asarray(r, dtype=np.float64)
+    wins, losses = r[r > 0].sum(), -r[r < 0].sum()
+    if losses == 0:
+        return np.inf if wins > 0 else np.nan
+    return float(wins / losses)
 
 
 def _daily_r(trades: Trades, bars: Bars) -> tuple[np.ndarray, np.ndarray]:

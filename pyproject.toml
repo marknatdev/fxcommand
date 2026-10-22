@@ -26,7 +26,12 @@ packages = ["src/vibedesk"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["perf: performance benchmark"]
+# Slow tests (known answers, Trial benchmarks) run at checkpoints: uv run pytest -m slow
+addopts = "-m 'not slow'"
+markers = [
+    "perf: performance benchmark",
+    "slow: excluded from the default run; run with -m slow",
+]
 
 [tool.ruff]
 line-length = 100

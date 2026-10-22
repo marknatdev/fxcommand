@@ -199,9 +199,9 @@ The output is a `WalkForward` result holding:
 - the stress record.
 
 **Acceptance criteria:**
-- [ ] On a hand-built grid of 3 combinations whose best combination changes by year, the choices per fold match the hand-worked answer. A trade that straddles the training boundary would flip one choice if it leaked, and the test shows it doesn't.
-- [ ] The stitched record never holds two positions at once, and every trade keeps its own combination's exit rules (checked by recomputing each trade from that combination's own simulation).
-- [ ] Stress uses the same fold choices, and each blind year's net R under stress is no better than without it.
+- [x] On a hand-built grid of 3 combinations whose best combination changes by year, the choices per fold match the hand-worked answer. A trade that straddles the training boundary would flip one choice if it leaked, and the test shows it doesn't.
+- [x] The stitched record never holds two positions at once, and every trade keeps its own combination's exit rules (checked by recomputing each trade from that combination's own simulation).
+- [x] Stress uses the same fold choices, and each blind year's net R under stress is no better than without it.
 
 **Verification:** `uv run pytest tests/test_walkforward.py`
 
@@ -210,6 +210,24 @@ The output is a `WalkForward` result holding:
 **Files (owned):** `src/vibedesk/gauntlet/walkforward.py`, `tests/test_walkforward.py`
 
 **Scope:** M
+
+**Result (2026-10-22, built here):**
+- **API:** `walk_forward(combinations, bars, cost, m1=None, *, years=BLIND_YEARS, train_years=3, min_trades=30) -> WalkForward`, with the pure layer `choose(records, window, bar_seconds)` and `stitch(records, choices, windows)`. `WalkForward` holds:
+  - the choices per fold and `holdout_choice`;
+  - per Combination per fold: training trades, training PF, blind trades and blind net R;
+  - per Combination: the blind daily-R matrix (days × Combinations) on one day grid, the blind Sharpe (0.0 when it never traded, so the Ledger gets a finite value) and the blind PF;
+  - the stitched record and the stress record, each with its fold index and `Metrics`, plus net R per fold;
+  - both prepared markets and the chosen Combinations' Signals, for T7.
+- **Boundary rules, pinned in the module docstring:**
+  - Years are UTC calendar years.
+  - A training trade must also close its exit bar by the window's end. This matters for H4/D1 bars that open at 22:00 UTC on 31 December.
+  - Trades closed only because the data ended (`ExitReason.END`) never count for training.
+- **Tests:** a hand-worked 3-Combination grid with a straddling +20R trade and an END-closed +80R trade. Mutation check: counting END closes flips fold 2019, and judging training trades by entry alone flips fold 2018. On synthetic H1 with M1 (2 seeds), every stitched and stress trade is byte-identical to its Combination's own simulation.
+- **Deviations:**
+  - The stress criterion is restated, as at M1's T4. A doubled spread can change a trade's path, so only a year whose trades are the same, entry to exit, must be no better under stress, and total R must be lower.
+  - `profit_factor(r)` is now a public function in `engine/metrics.py`.
+  - The `slow` marker and `addopts = "-m 'not slow'"` are registered in `pyproject.toml` now, rather than in T10.
+- **Default suite:** 736 passed in 21 s.
 
 ---
 
