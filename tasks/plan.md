@@ -109,14 +109,14 @@ If T10 measures more than 60 s, the levers are, in order:
 ## Task list
 
 ### Phase 1: Foundations. T1–T5 own separate files and can run in parallel.
-- [ ] T1: Prepared market + Block-output cache (engine speed)
-- [ ] T2: Synthetic planted edge + calibration (**high risk; first**)
-- [ ] T3: Statistics: Sharpe, Deflated Sharpe, PBO
-- [ ] T4: Market facade + Holdout guard
-- [ ] T5: Ledger: families, Hypotheses, Trials, budgets, Holdout Requests
+- [x] T1: Prepared market + Block-output cache (engine speed)
+- [x] T2: Synthetic planted edge + calibration (**high risk; first**)
+- [x] T3: Statistics: Sharpe, Deflated Sharpe, PBO
+- [x] T4: Market facade + Holdout guard
+- [x] T5: Ledger: families, Hypotheses, Trials, budgets, Holdout Requests
 
 ### Checkpoint A
-- [ ] Default suite green, ruff clean; T2's calibration numbers recorded; the owner reviews
+- [x] Default suite green, ruff clean; T2's calibration numbers recorded; the owner reviews
 
 ### Phase 2: Gauntlet core (needs T1 and T3)
 - [ ] T6: Walk-forward: folds, selection, stitched blind record, stress, Holdout selection
