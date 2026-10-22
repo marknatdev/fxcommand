@@ -293,9 +293,13 @@ def _run(
     # Every trade enters on a bar after one that signals one side only, so that count bounds
     # the table; sizing it by the bars would allocate megabytes per call for a few hundred rows.
     capacity = 1
+    first, last = n, -1  # the first and last bars that signal one side only
     for t in range(n):
         if long_entry[t] != short_entry[t]:
             capacity += 1
+            if first == n:
+                first = t
+            last = t
     out = np.empty((capacity, 11))
     count = 0
 
@@ -310,7 +314,9 @@ def _run(
     dist = 0.0
     entry_cost = 0.0
 
-    for t in range(n):
+    # Nothing can happen before the first signal, or once flat after the last one, so a
+    # simulation whose signals fill one year costs one year of bars, whatever the data's length.
+    for t in range(first, n):
         if pending != 0:
             pos = pending
             pending = 0
@@ -392,6 +398,8 @@ def _run(
                 pending = 1
             elif short_entry[t] and not long_entry[t]:
                 pending = -1
+        if pos == 0 and pending == 0 and t >= last:
+            break
 
     if pos != 0:
         # Still open after the last bar: exit at its close.

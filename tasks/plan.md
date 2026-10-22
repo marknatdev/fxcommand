@@ -35,7 +35,7 @@ These are fixed before code, so no test is tuned after the fact.
   - the same long/short mix;
   - the fold's chosen combination's exits (stop, target, trailing, time, opposite);
   - the same Cost Model.
-- **Exact trade counts.** A random entry that lands while a trade is open is deferred to the next bar where the position is flat. If deferrals push entries past the end of the year, that run is redrawn (up to 20 times) and recorded.
+- **Exact trade counts (amended 2026-10-22, owner's decision).** Each random trade is drawn on its own at a distinct bar of its server hour, from trades the engine simulated alone from flat. A run is not held to one position at a time. Deferring blocked entries piled them onto post-exit hours, and redrawing them one position at a time biased long-holding Specs toward short, losing trades (see T7 in todo.md).
 - **Why exact counts matter:** fewer baseline trades would narrow the net-R distribution and make the 95th percentile easier to beat, which is a bias toward false CANDIDATEs. A test asserts that the realised counts equal the strategy's.
 
 ### Statistics
@@ -120,11 +120,11 @@ If T10 measures more than 60 s, the levers are, in order:
 
 ### Phase 2: Gauntlet core (needs T1 and T3)
 - [x] T6: Walk-forward: folds, selection, stitched blind record, stress, Holdout selection
-- [ ] T7: Coin-Flip Baseline with exact counts
-- [ ] T8: Prosecutor, Pass Bar, Verdict, Closest Miss
+- [x] T7: Coin-Flip Baseline with exact counts
+- [x] T8: Prosecutor, Pass Bar, Verdict, Closest Miss
 
 ### Checkpoint B
-- [ ] Gauntlet pieces are green on hand-built inputs; the owner reviews
+- [x] Gauntlet pieces are green on hand-built inputs; the owner reviews
 
 ### Phase 3: Integration (needs everything)
 - [ ] T9: Trial runner + Holdout run + Holdout Request gate
@@ -145,8 +145,8 @@ If T10 measures more than 60 s, the levers are, in order:
 | Holdout opened by a path that bypasses `market` | High | A guard test: only `market` calls `BarSource.fetch`; grants checked against the Ledger (T4/T5) |
 | Ledger rows edited after the fact | Medium | Triggers abort UPDATE/DELETE; a code scan for UPDATE/DELETE outside migrations |
 
-## Open questions (none block M2)
+## Open questions and follow-ups
 
-- **Time filters:** should `session_window`/`day_of_week` judge the signal bar (as now) or the entry bar? It matters on H4/D1.
-- **Opposite signal:** with `opposite_signal` on a `both` Spec, should the opposite signal stop and reverse instead of only closing?
-- **Execution:** run Phase 1 as parallel worktree agents (T1–T5 own separate files), or one by one here?
+- **Time filters:** should `session_window`/`day_of_week` judge the signal bar (as now) or the entry bar? It matters on H4/D1. Still open.
+- **Stop and reverse (decided 2026-10-22, after M2):** an opposite signal on a Spec that allows the other side closes the trade and opens the reverse at the same open. This is an engine and reference-twin change, done as its own task after M2.
+- **Known-answer floor (decided 2026-10-22):** T10 runs the known-answer test with a 17-point Spread Floor.

@@ -122,12 +122,6 @@ def test_no_signals_give_no_trades():
     assert len(simulate_prepared(prepare(bars, CostSnapshot(0.00001, 10, 1)), signals)) == 0
 
 
-@pytest.fixture(scope="module")
-def twelve_years():
-    source = SyntheticBarSource(seed=1, start=date(2014, 6, 2), end=date(2026, 6, 1))
-    return source.fetch("GOLD", Timeframe.M15), source.fetch("GOLD", Timeframe.M1)
-
-
 @pytest.mark.perf
 def test_a_prepared_simulation_over_twelve_years_of_m15_with_m1(twelve_years):
     bars, m1 = twelve_years
@@ -246,3 +240,60 @@ def test_shared_block_outputs_are_read_only(three_months):
     assert a.stop_dist is b.stop_dist  # shared, so nobody may write to it
     with pytest.raises(ValueError, match="read-only"):
         a.stop_dist[0] = 1.0
+
+
+# Signals confined to a window cost a window of bars ---------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def two_years_h1():
+    source = SyntheticBarSource(5, date(2022, 1, 3), date(2024, 1, 1))
+    return source.fetch("GOLD", Timeframe.H1), source.fetch("GOLD", Timeframe.M1)
+
+
+@pytest.mark.parametrize("month", [1, 6, 12])
+def test_signals_in_one_month_give_the_reference_trades(two_years_h1, month):
+    # The engine skips the bars before the first signal and stops once flat after the last.
+    # A trade opened by the month's last signal must still run to its real exit, not be cut.
+    bars, m1 = two_years_h1
+    spec = validate(perf.SPEC | {"timeframe": "H1"})
+    [combination] = expand_grid(spec)
+    signals = compile_signals(combination, bars)
+    month_start = int(datetime(2022, month, 1, tzinfo=UTC).timestamp())
+    inside = (bars.time >= month_start) & (bars.time < month_start + 31 * 86400)
+    confined = replace(
+        signals,
+        long_entry=signals.long_entry & inside,
+        short_entry=signals.short_entry & inside,
+    )
+    cost = CostSnapshot(0.01, 55, 1, swap_long_points=-83.83, swap_short_points=20.64)
+
+    trades = simulate_prepared(prepare(bars, cost, m1), confined)
+
+    assert len(trades) > 0
+    assert_matches_reference(trades, simulate_reference(bars, confined, cost, m1=m1))
+
+
+@pytest.mark.perf
+def test_a_month_of_signals_on_twelve_years_costs_far_less_than_twelve_years(twelve_years):
+    bars, m1 = twelve_years
+    [combination] = expand_grid(validate(perf.SPEC))
+    signals = compile_signals(combination, bars)
+    market = prepare(bars, CostSnapshot(0.01, 55, 1), m1)
+    month = (bars.time >= bars.time[0] + 86400 * 365 * 6) & (
+        bars.time < bars.time[0] + 86400 * (365 * 6 + 31)
+    )
+    confined = replace(
+        signals, long_entry=signals.long_entry & month, short_entry=signals.short_entry & month
+    )
+
+    def best(sig):
+        simulate_prepared(market, sig)
+        timings = []
+        for _ in range(5):
+            start = time.perf_counter()
+            simulate_prepared(market, sig)
+            timings.append(time.perf_counter() - start)
+        return min(timings)
+
+    assert best(confined) < best(signals) / 4

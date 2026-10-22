@@ -1,11 +1,11 @@
 """Spec §10, M1: one combination over 12 years of M15 takes at most 0.5 s once numba is warm.
 
-Timed: compiling signals, simulating with M1 settling, and the metrics. Generating the synthetic
-data is not timed. The best of three runs is used, so a busy machine doesn't fail the test.
+Timed: compiling signals, simulating with M1 settling, and the metrics. The synthetic data
+comes from the shared `twelve_years` fixture and is not timed. The best of three runs is used,
+so a busy machine doesn't fail the test.
 """
 
 import time
-from datetime import date
 
 import pytest
 
@@ -14,8 +14,6 @@ from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.engine.costs import CostSnapshot
 from vibedesk.engine.metrics import metrics
 from vibedesk.engine.simulate import simulate
-from vibedesk.market.bars import Timeframe
-from vibedesk.market.synthetic import SyntheticBarSource
 
 BUDGET_SECONDS = 0.5
 
@@ -37,10 +35,8 @@ SPEC = {
 
 
 @pytest.mark.perf
-def test_one_combination_over_twelve_years_of_m15():
-    source = SyntheticBarSource(seed=1, start=date(2014, 6, 2), end=date(2026, 6, 1))
-    bars = source.fetch("GOLD", Timeframe.M15)
-    m1 = source.fetch("GOLD", Timeframe.M1)
+def test_one_combination_over_twelve_years_of_m15(twelve_years):
+    bars, m1 = twelve_years
     [combination] = expand_grid(validate(SPEC))
     cost = CostSnapshot(0.01, 55, 1, swap_long_points=-83.83, swap_short_points=20.64)
 

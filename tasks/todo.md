@@ -236,9 +236,9 @@ The output is a `WalkForward` result holding:
 **Description:** `coin_flip_baseline(walk_forward, market, runs=1000, seed)` returns the net-R distribution and its 95th percentile. Random entries follow the plan.md definition: per-year counts, the server-hour distribution, the long/short mix, each fold's exits, and deferral to a flat bar, with up to 20 redraws if entries spill past the year.
 
 **Acceptance criteria:**
-- [ ] The realised trade count per blind year equals the strategy's in every run of a 200-run test. Redraws are counted and reported.
-- [ ] The entry-hour histogram over 1,000 runs matches the strategy's within ± 2 percentage points per hour. The long share matches within ± 2 points.
-- [ ] Same seed, same distribution. On random-walk data, a random strategy's percentile against its own baseline is roughly uniform over 30 seeds (no bias).
+- [x] The realised trade count per blind year equals the strategy's in every run of a 200-run test. Redraws are counted and reported.
+- [x] The entry-hour histogram over 1,000 runs matches the strategy's within ± 2 percentage points per hour. The long share matches within ± 2 points.
+- [x] Same seed, same distribution. On random-walk data, a random strategy's percentile against its own baseline is roughly uniform over 30 seeds (no bias).
 
 **Verification:** `uv run pytest tests/test_baseline.py`
 
@@ -247,6 +247,26 @@ The output is a `WalkForward` result holding:
 **Files (owned):** `src/vibedesk/gauntlet/baseline.py`, `tests/test_baseline.py`
 
 **Scope:** M
+
+**Result (2026-10-22, built here):**
+- **API:** `coin_flip_baseline(wf, seed, runs=1000) -> Baseline`. The result holds the net-R distribution, p95, the strategy's percentile, the per-run and per-fold counts, the hour counts and the long count. Lower-level: `fold_plans(wf)` and `draw_year(plan, rng)`.
+- **How the rule got here:**
+  - The plan said to defer a blocked entry to the next flat bar. That piles entries onto the hours just after exits.
+  - The owner then chose to redraw blocked entries at flat bars instead. That is unbiased at moderate occupancy, but biased at high occupancy: about 94% in the market made random trades 0.09–0.15R worse, and a no-edge Spec beat 100% of its runs. It could also fail outright when the count didn't fit.
+  - **The owner's final decision (2026-10-22): independent draws.** Each run draws the strategy's exact count of random trades per year, at distinct bars of the same server hours and with the strategy's sides shuffled. The trades come from the real engine, each simulated alone from flat, and a run is not held to one position at a time.
+- **Properties of the final rule:**
+  - Hour and side mixes are exact.
+  - No length bias at any occupancy.
+  - It can't fail.
+  - The spread is wider, so the 95th percentile is harder to beat.
+- **Speed:**
+  - Every candidate trade of a year is simulated once, about 10k candidates × 2 sides.
+  - 1,000 runs on 11 years of M15 take about 4 s.
+  - The engine skips bars before the first signal and stops once flat after the last one, with results unchanged (reference twin, plus a confined-month test).
+- **Evidence:**
+  - Every candidate trade is byte-identical to the engine trading that entry alone.
+  - The mean random trade is within 0.03R of the hour- and side-matched mean, on normal and on long-holding data (the old rule misses by 0.093R there).
+  - On random walk (slow test, 30 seeds) the no-edge percentile is uniform: mean 0.48, deciles [3, 5, 0, 3, 6, 1, 6, 0, 4, 2], and 2 of 30 at or above 0.95.
 
 ---
 
@@ -261,9 +281,9 @@ The output is a `WalkForward` result holding:
 `verdict.py` evaluates the ADR 0007 Pass Bar into a list of check results (name, value, threshold, passed, or n/a), the Verdict (CANDIDATE or REJECT) and the Closest Miss.
 
 **Acceptance criteria:**
-- [ ] Each Prosecutor red flag fires on a hand-built input made to trip it, and stays quiet on one that doesn't. Checks with too few trades are reported as n/a, not as passed.
-- [ ] Any single failed check gives REJECT. A CANDIDATE needs every check passed or n/a, but PF, trade count, folds, stress, baseline and Deflated Sharpe can never be n/a.
-- [ ] The Closest Miss is the failed check whose value-to-threshold ratio is nearest 1, with a direction-aware ratio for "at most" checks such as PBO and the top-5 share.
+- [x] Each Prosecutor red flag fires on a hand-built input made to trip it, and stays quiet on one that doesn't. Checks with too few trades are reported as n/a, not as passed.
+- [x] Any single failed check gives REJECT. A CANDIDATE needs every check passed or n/a, but PF, trade count, folds, stress, baseline and Deflated Sharpe can never be n/a.
+- [x] The Closest Miss is the failed check whose value-to-threshold ratio is nearest 1, with a direction-aware ratio for "at most" checks such as PBO and the top-5 share.
 
 **Verification:** `uv run pytest tests/test_verdict.py`
 
@@ -273,12 +293,56 @@ The output is a `WalkForward` result holding:
 
 **Scope:** M
 
+**Result (2026-10-22, built here):**
+- **API:**
+  - `verdict.py`: `Check`, `judged`, `pass_bar(wf, baseline, deflated_sharpe, pbo)` (the core checks), `decide(checks) -> Verdict` and `CORE`.
+  - `prosecutor.py`: `prosecute(wf)`, built from `concentration`, `neighbours`/`neighbour_indexes`, `sides` and `regimes`.
+  - Statuses are `pass`, `fail` and `n/a`. `Check.to_dict()` is JSON-safe (NaN becomes null).
+- **Choices made:**
+  - The baseline check's value is the strategy's percentile, against 0.95. It passes only when net R is strictly above the 95th percentile.
+  - Positive folds must be at least ceil(5/8 × folds).
+  - Neighbours are the Combinations one step away on exactly one parameter axis from the Holdout's choice. The check uses their median blind PF; neighbours that never traded are ignored.
+  - Regime terciles split the record's own entries by ATR(14) as a share of the close at the signal bar.
+  - An n/a note is shown only when the check doesn't apply.
+- **Deviation, accepted by the owner (2026-10-22):** the Closest Miss is chosen among failed **core** checks first. A Prosecutor flag is the Closest Miss only when every core check passed. Taken literally ("any failed check nearest 1"), random walk named the busy-regime split (0.85 vs 0.9) as its Closest Miss, while its PF was 0.77 vs 1.2.
+
 ---
 
 ## Checkpoint B (after T6–T8)
-- [ ] The default suite is green
-- [ ] A hand-run Trial on synthetic data prints a readable result
-- [ ] The owner reviews
+
+**Hand-run Trial (2026-10-22):** synthetic GOLD M15, 2014–2024, seed 1. Known-answer Spec `range_breakout(london_open)` + `atr_stop(1.5)` + `r_target(2)`, floor 55, 1,000 baseline runs; no Ledger and no Holdout yet.
+
+| Data | Grid | Verdict | PF | Folds positive | Stress PF | Baseline percentile | DSR | PBO |
+|---|---|---|---|---|---|---|---|---|
+| Random walk | range_bars 4 | REJECT (Closest Miss: baseline) | 0.77 | 0 of 8 | 0.58 | 0.66 | 0.00 | n/a |
+| Random walk | range_bars 2/4/8 | REJECT (Closest Miss: baseline) | 0.78 | 0 of 8 | 0.61 | 0.72 | 0.00 | 0.20 |
+| Planted edge | range_bars 4 | CANDIDATE | 1.70 | 8 of 8 | 1.29 | 1.00 | 1.00 | n/a |
+| Planted edge | range_bars 2/4/8 | CANDIDATE | 2.60 | 8 of 8 | 1.89 | 1.00 | 1.00 | 0.00 |
+
+- **Speed:** a full 11-year M15 Trial (walk-forward, baseline, statistics, Prosecutor) took about 9 s for one Combination.
+- **The 3-Combination grid** chose `range_bars` 2 in every fold on the planted edge; a 30-minute range catches more of the one-hour reveal.
+
+**Findings after the hand-run, and the owner's decisions (2026-10-22):**
+- **The baseline is biased at high occupancy.** At about 95% time in the market, fitting random trades one position at a time forces short trades. A no-edge Spec beat 100% of the runs. **Decision: independent draws** (see T7).
+- **The Closest Miss is chosen among core checks first.** **Decision: accepted.** As a side effect, losing strategies often show the baseline as their Closest Miss: a percentile around 0.6 reads as nearer 0.95 than a PF of 0.77 does to 1.2.
+- **Known-answer Spec, seeds and floors** (real Pass Bar, grid of 1, 1,000 runs of the earlier baseline rule; the hand-run Verdicts are unchanged under independent draws):
+
+  | | Floor 55 | Floor 17 |
+  |---|---|---|
+  | Planted edge, seeds 1–5 | 4 of 5 CANDIDATE (seed 4 fails stress, 0.79) | 5 of 5 CANDIDATE |
+  | Random walk, seeds 1–10 | 0 of 10 CANDIDATE | 0 of 10 CANDIDATE (PF 0.70–0.91) |
+
+  **Decision: T10's known-answer test uses a 17-point Spread Floor.** That roughly matches real GOLD's cost relative to the synthetic prices. Production keeps the measured floor.
+- **ma_cross with an opposite-signal exit never goes short** on a "both" Spec. **Decision: stop and reverse, as its own task after M2.** When the Spec allows that side, an opposite signal closes the trade and opens the other side at the same open.
+- **Suite time:** the speed tests now share one twelve-year data fixture (`tests/conftest.py`). The default suite runs in 25–28 s.
+- **T9 notes:**
+  - Serialise the Trial record with `allow_nan=False`, and map an infinite PF explicitly, since browsers reject `Infinity` in JSON.
+  - Seed the baseline from the Trial id.
+  - Take the Deflated Sharpe's N and V from `ledger.deflation_inputs(family, pending_sharpes=wf.blind_sharpe)`.
+
+- [x] The default suite is green: 779 passed, ruff clean (2026-10-22). Slow tests: uniform no-edge baseline (30 seeds) and planted-edge calibration pass.
+- [x] A hand-run Trial on synthetic data prints a readable result (table above)
+- [x] The owner reviewed the findings and decided all four questions (2026-10-22)
 
 ---
 
@@ -310,8 +374,8 @@ The output is a `WalkForward` result holding:
 
 ## T10: Known answers + Trial benchmark
 
-**Description:** Mark the slow tests and exclude them from the default suite. In `pyproject.toml`: `addopts = "-m 'not slow'"` and a `slow` marker. Then two test files:
-- **Known answers** (thresholds fixed in plan.md): the random walk gives at most 1 CANDIDATE in 20 seeds; the planted edge gives CANDIDATE in at least 4 of 5 seeds; and each planted-edge CANDIDATE that is put through the Holdout reaches PASS.
+**Description:** The `slow` marker and `addopts` are already in `pyproject.toml` (done in T6). Two test files:
+- **Known answers** (thresholds fixed in plan.md), using a 17-point Spread Floor (the owner's decision, 2026-10-22): the random walk gives at most 1 CANDIDATE in 20 seeds; the planted edge gives CANDIDATE in at least 4 of 5 seeds; and each planted-edge CANDIDATE that is put through the Holdout reaches PASS.
 - **Benchmark:** the named 48-combination Trial takes ≤ 60 s. The worst case is measured and recorded.
 
 **Acceptance criteria:**
