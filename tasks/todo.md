@@ -109,9 +109,9 @@ Each trade records its R and its costs in R. Write a pure-Python reference versi
 - an immutable `CostSnapshot` (floor, swap long and short, slippage, point size, `as_of`) is attached to every result.
 
 **Acceptance criteria:**
-- [ ] Golden tests cover a short trade on the ask side, a 3-night hold that crosses Wednesday (charged 5 swap nights), and a same-bar stop-and-target conflict settled both ways by M1.
-- [ ] Doubling the floor and bar spreads (stress mode) never improves any trade's R.
-- [ ] A `CostSnapshot` round-trips through JSON unchanged.
+- [x] Golden tests cover a short trade on the ask side, a 3-night hold that crosses Wednesday (charged 5 swap nights), and a same-bar stop-and-target conflict settled both ways by M1.
+- [x] Doubling the floor and bar spreads (stress mode) never improves any trade's R.
+- [x] A `CostSnapshot` round-trips through JSON unchanged.
 
 **Verification:** `uv run pytest tests/test_costs.py`
 
@@ -128,9 +128,9 @@ Each trade records its R and its costs in R. Write a pure-Python reference versi
 **Description:** Implement `ma_cross`, `rsi_threshold`, `bollinger_touch`, `pullback_to_ma` and `range_breakout`, which builds its range in exchange-local time. Add a generic look-ahead property test that runs over every registered Block. It randomly changes the bars after index *t* and asserts that the Block's output at index ≤ *t* is unchanged.
 
 **Acceptance criteria:**
-- [ ] Every entry Block passes the look-ahead property test on 100 random seeds and cut points.
-- [ ] Each Block has at least one small hand-checked test of its signal positions.
-- [ ] `range_breakout`'s London-open range keeps the right UTC bar times across both the UK and US daylight-saving switches (the weeks in March and October/November when only one of them has switched).
+- [x] Every entry Block passes the look-ahead property test on 100 random seeds and cut points.
+- [x] Each Block has at least one small hand-checked test of its signal positions.
+- [x] `range_breakout`'s London-open range keeps the right UTC bar times across both the UK and US daylight-saving switches (the weeks in March and October/November when only one of them has switched).
 
 **Verification:** `uv run pytest tests/test_entries.py tests/test_lookahead.py`
 
@@ -147,9 +147,9 @@ Each trade records its R and its costs in R. Write a pure-Python reference versi
 **Description:** Implement `ma_slope`, `adx`, `atr_regime` (with a trailing percentile only), `session_window` and `day_of_week`, and have `compile()` combine them with the entry using AND. All of them are added to the look-ahead property test.
 
 **Acceptance criteria:**
-- [ ] Every filter passes the look-ahead property test.
-- [ ] `atr_regime`'s percentile uses only past bars; a hand-checked test covers the boundary.
-- [ ] An entry combined with a filter fires only where both are true, checked on a small hand-built series.
+- [x] Every filter passes the look-ahead property test.
+- [x] `atr_regime`'s percentile uses only past bars; a hand-checked test covers the boundary.
+- [x] An entry combined with a filter fires only where both are true, checked on a small hand-built series.
 
 **Verification:** `uv run pytest tests/test_filters.py tests/test_lookahead.py`
 
@@ -162,8 +162,37 @@ Each trade records its R and its costs in R. Write a pure-Python reference versi
 ---
 
 ## Checkpoint B (after T4–T6)
-- [ ] The look-ahead property test is green for every entry and filter Block
-- [ ] The golden cost tests are green
+
+**Deviations from the plan (2026-10-22):**
+- **New trade-record field `swap_r`** (added after the shape was approved). Swap is reported on its own, `r` includes it, and `cost_r` stays spread + slippage. Swap can be a credit (GOLD short +20.64 points), so folding it into `cost_r` would make "cost" negative.
+- **The T4 stress property, restated.** "Stress never improves any trade" is not true trade by trade. Under a doubled spread, a stop that is hit earlier at −1R can beat a later gap loss on the normal-spread run. The tests now check two things:
+  - a trade with the same entry, exit bar and exit reason never improves under stress;
+  - total R across 60 random cases is lower under stress.
+- **T5 Block semantics, chosen and written into the docstrings:**
+  - Entries fire on events (crosses, first close outside a band), not on states.
+  - RSI `cross_up`/`cross_down` mirror at 100 − level for shorts.
+  - The pullback rule: the previous bar's low reaches the pullback SMA, and the bar closes back above it, in the trend.
+  - The opening range is defined by time, `range_bars` bar-lengths after the local open, on local weekdays only.
+  - A session day ends at the next open or 24 hours later, whichever is first. Pre-open bars are never part of a range.
+- **T6 parameter shapes:**
+  - `session_window` takes a zone plus HH:MM start and end, with no named presets.
+  - `day_of_week` takes five booleans, because a list value would be read as a grid dimension.
+  - `ma_slope` measures the SMA's change over 10 bars in ATR(14) units.
+  - `atr_regime` uses a mid-rank percentile, so a constant ATR sits at 50.
+- **Timing on 300k M15 bars (12 synthetic years):**
+  - With typical parameters every Block runs in 3–63 ms.
+  - At the maximum parameter bounds, the window-scanning indicators are slow: `ma_cross` (SMA) 554 ms, `bollinger_touch` 490 ms, `pullback_to_ma` 453 ms, `ma_slope` 324 ms and `atr_regime` 897 ms. EMA, RSI, ADX and ATR stay under 11 ms.
+  - The cause: `_sma`, `_rolling_std` and `_trailing_percentile` are O(n × period).
+- **Risks carried to M2/T8:**
+  - **Repeated Block work:** `compile_signals` recomputes every Block for every grid combination, so a fixed slow filter is paid up to 50 times per Trial. Cache Block outputs per (block, params) within a Trial, and/or make SMA and std O(n) with running sums.
+  - **Warm-up:** compile signals once over the full Research Window and slice the folds afterwards. Never compile per fold: EMA, Wilder ATR, RSI and ADX depend on where the series starts.
+  - **Slicing cost:** `Bars.between` copies and re-validates on every slice.
+  - **Calibration:** the synthetic planted edge (`trend`) is uncalibrated. Calibrate it before the known-answer tests.
+- **Short-side M1 settling:** golden tests now cover it, including a stop that triggers only because of that minute's own wider spread.
+- **Open question for the owner:** time filters (`session_window`, `day_of_week`) check the *signal* bar's open, but the trade enters at the *next* bar's open. London 08:00–12:00 on H1 can therefore enter at 12:00, and on H4/D1 (server bars open at 21:00/22:00 UTC) a session filter means little.
+
+- [x] The look-ahead property test is green for every entry and filter Block, and for stops and targets. It fails if any registered Block is missing from it. A deliberately leaky Block is caught.
+- [x] The golden cost tests are green
 
 ---
 

@@ -26,8 +26,24 @@ def synthetic_bars(seed: int, symbol: str, timeframe: Timeframe):
     return SyntheticBarSource(seed, START, END).fetch(symbol, timeframe)
 
 
-def run_case(seed, symbol, timeframe, period, atr_period, mult, r, direction, floor, slip):
+def run_case(
+    seed,
+    symbol,
+    timeframe,
+    period,
+    atr_period,
+    mult,
+    r,
+    direction,
+    floor,
+    slip,
+    swap_long=0.0,
+    swap_short=0.0,
+    multiplier=1.0,
+    use_m1=False,
+):
     bars = synthetic_bars(seed, symbol, timeframe)
+    m1 = synthetic_bars(seed, symbol, Timeframe.M1) if use_m1 else None
     target = {"target": {"block": "r_target", "params": {"r": r}}} if r else {}
     spec = validate(
         {
@@ -43,8 +59,15 @@ def run_case(seed, symbol, timeframe, period, atr_period, mult, r, direction, fl
     )
     [combination] = expand_grid(spec)
     signals = compile_signals(combination, bars)
-    cost = CostSnapshot(PROFILES[symbol].point, floor, slip)
-    return bars, signals, cost, simulate(bars, signals, cost)
+    cost = CostSnapshot(
+        PROFILES[symbol].point,
+        floor,
+        slip,
+        swap_long_points=swap_long,
+        swap_short_points=swap_short,
+        spread_multiplier=multiplier,
+    )
+    return bars, signals, cost, m1, simulate(bars, signals, cost, m1=m1)
 
 
 def random_case(seed: int):
@@ -52,7 +75,7 @@ def random_case(seed: int):
     return dict(
         seed=seed,
         symbol=str(rng.choice(["GOLD", "EURUSD", "USDJPY"])),
-        timeframe=Timeframe.M15 if rng.random() < 0.8 else Timeframe.H1,
+        timeframe=Timeframe(rng.choice(["M15", "M15", "M15", "H1", "H4"])),
         period=int(rng.integers(3, 40)),
         atr_period=int(rng.integers(3, 30)),
         mult=float(rng.choice([0.5, 1.0, 1.5, 2.0, 3.0])),
@@ -60,13 +83,17 @@ def random_case(seed: int):
         direction=str(rng.choice(["long", "short", "both"])),
         floor=float(rng.integers(0, 60)),
         slip=float(rng.integers(0, 4)),
+        swap_long=float(rng.uniform(-90, 25)),
+        swap_short=float(rng.uniform(-90, 25)),
+        multiplier=float(rng.choice([1.0, 1.0, 2.0])),
+        use_m1=bool(rng.random() < 0.7),
     )
 
 
 @pytest.mark.parametrize("seed", range(200))
 def test_engine_matches_the_reference_twin(seed):
-    bars, signals, cost, trades = run_case(**random_case(seed))
-    expected = simulate_reference(bars, signals, cost)
+    bars, signals, cost, m1, trades = run_case(**random_case(seed))
+    expected = simulate_reference(bars, signals, cost, m1=m1)
 
     actual = trades.as_dicts()
     assert len(actual) == len(expected)
@@ -96,7 +123,7 @@ case_strategy = st.builds(
 @settings(max_examples=60, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(case=case_strategy)
 def test_trade_invariants(case):
-    bars, _, cost, trades = run_case(**case)
+    bars, _, cost, _, trades = run_case(**case)
     slip = cost.slippage_price
     t = trades.records
     reason = t["exit_reason"]
@@ -107,6 +134,9 @@ def test_trade_invariants(case):
     assert np.all(t["entry_idx"][1:] > t["exit_idx"][:-1])
     assert np.all(t["exit_idx"] >= t["entry_idx"])
     assert np.all(t["risk"] > 0)
+
+    # Swap is reported on its own; the price part of R obeys the fill rules below.
+    assert np.all(t["swap_r"] == 0)
 
     # A plain stop costs exactly 1R plus the exit slippage; a gap through the stop costs more.
     stop = reason == ExitReason.STOP
@@ -144,3 +174,28 @@ def test_trade_invariants(case):
         assert np.all(t["side"] == 1)
     if case["direction"] == "short":
         assert np.all(t["side"] == -1)
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_stress_never_improves_a_trade_that_exits_the_same_way(seed):
+    case = random_case(seed) | {"multiplier": 1.0}
+    *_, base = run_case(**case)
+    *_, stressed = run_case(**case | {"multiplier": 2.0})
+
+    def key(t):
+        return list(zip(t["entry_idx"], t["exit_idx"], t["exit_reason"], strict=True))
+
+    base_r = dict(zip(key(base.records), base["r"], strict=True))
+    for k, r in zip(key(stressed.records), stressed["r"], strict=True):
+        if k in base_r:
+            assert r <= base_r[k] + 1e-9
+
+
+def test_stress_lowers_total_r_across_many_cases():
+    base_total = stressed_total = 0.0
+    for seed in range(60):
+        case = random_case(seed) | {"multiplier": 1.0}
+        base_total += run_case(**case)[-1]["r"].sum()
+        stressed_total += run_case(**case | {"multiplier": 2.0})[-1]["r"].sum()
+
+    assert stressed_total < base_total

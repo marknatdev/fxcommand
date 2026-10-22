@@ -10,7 +10,9 @@ Fill rules (spec §6.1):
   itself: a stop closer than the spread is already breached when the trade fills, so it exits
   at the market, not at the stop. A bar that opens beyond the target exits at the target, not
   at the better open.
-- If one bar touches both the stop and the target, the stop wins.
+- If one bar touches both the stop and the target, its M1 bars decide which came first. Without
+  M1 data, or if the minutes don't settle it, the stop wins.
+- Swap is charged for every server rollover the position is open through (see swap_nights).
 - One position at a time. A trade that exits during a bar can be followed by a signal at that
   bar's close. Signals that fire while a position is open are ignored.
 - A position still open after the last bar exits at that bar's close.
@@ -24,7 +26,7 @@ from enum import IntEnum
 import numpy as np
 from numba import njit
 
-from vibedesk.engine.costs import CostSnapshot
+from vibedesk.engine.costs import CostSnapshot, swap_nights
 from vibedesk.market.bars import Bars
 
 
@@ -57,8 +59,9 @@ TRADE_DTYPE = np.dtype(
         ("stop_price", "f8"),
         ("target_price", "f8"),  # NaN when the trade had no target
         ("risk", "f8"),  # price distance from entry to stop: 1R
-        ("r", "f8"),  # result in R, after every cost
+        ("r", "f8"),  # result in R, after every cost and swap
         ("cost_r", "f8"),  # spread and slippage paid, in R
+        ("swap_r", "f8"),  # swap in R; negative when paid, positive when earned
         ("exit_reason", "i1"),
     ]
 )
@@ -83,12 +86,23 @@ class Trades:
         return rows
 
 
-def simulate(bars: Bars, signals: Signals, cost: CostSnapshot) -> Trades:
+def simulate(bars: Bars, signals: Signals, cost: CostSnapshot, m1: Bars | None = None) -> Trades:
+    """Simulate one Combination's signals. `m1`, when given, settles bars where the stop and
+    the target are both touched; without it, or without M1 bars inside that bar, the stop wins."""
     n = len(bars)
     for name in ("long_entry", "short_entry", "stop_dist", "target_dist"):
         if len(getattr(signals, name)) != n:
             raise ValueError(f"signals.{name} has a different length than the bars")
-    columns = _run(
+    if m1 is None:
+        m1_open = m1_high = m1_low = m1_spread = np.zeros(0)
+        m1_lo = m1_hi = np.zeros(n, dtype=np.int64)
+    else:
+        m1_open, m1_high, m1_low = m1.open, m1.high, m1.low
+        m1_spread = cost.spread_prices(m1.spread)
+        m1_lo = np.searchsorted(m1.time, bars.time).astype(np.int64)
+        m1_hi = np.searchsorted(m1.time, bars.time + bars.timeframe.seconds).astype(np.int64)
+
+    table = _run(
         bars.open,
         bars.high,
         bars.low,
@@ -99,22 +113,37 @@ def simulate(bars: Bars, signals: Signals, cost: CostSnapshot) -> Trades:
         np.asarray(signals.stop_dist, dtype=np.float64),
         np.asarray(signals.target_dist, dtype=np.float64),
         cost.slippage_price,
+        m1_open,
+        m1_high,
+        m1_low,
+        m1_spread,
+        m1_lo,
+        m1_hi,
     )
-    side, entry_idx, exit_idx, entry, exit_, stop, target, risk, r, cost_r, reason = columns
-    records = np.empty(len(side), dtype=TRADE_DTYPE)
+    entry_idx = table[:, _ENTRY_IDX].astype(np.int64)
+    exit_idx = table[:, _EXIT_IDX].astype(np.int64)
+    side = table[:, _SIDE].astype(np.int8)
+    risk = table[:, _RISK]
+
+    records = np.empty(len(table), dtype=TRADE_DTYPE)
     records["side"] = side
     records["entry_idx"] = entry_idx
     records["exit_idx"] = exit_idx
     records["entry_time"] = bars.time[entry_idx]
     records["exit_time"] = bars.time[exit_idx]
-    records["entry_price"] = entry
-    records["exit_price"] = exit_
-    records["stop_price"] = stop
-    records["target_price"] = target
+    records["entry_price"] = table[:, _ENTRY]
+    records["exit_price"] = table[:, _EXIT]
+    records["stop_price"] = table[:, _STOP_PRICE]
+    records["target_price"] = table[:, _TARGET_PRICE]
     records["risk"] = risk
-    records["r"] = r
-    records["cost_r"] = cost_r
-    records["exit_reason"] = reason
+    records["cost_r"] = table[:, _COST_R]
+    records["exit_reason"] = table[:, _WHY].astype(np.int8)
+
+    # Swap never changes when a trade exits, so it is added after the fill loop.
+    nights = swap_nights(records["entry_time"], records["exit_time"], cost.triple_swap_day)
+    rate = np.where(side == 1, cost.swap_long_points, cost.swap_short_points)
+    records["swap_r"] = rate * nights * cost.point / risk
+    records["r"] = table[:, _R] + records["swap_r"]
     return Trades(records)
 
 
@@ -122,19 +151,92 @@ _STOP, _STOP_GAP, _TARGET, _END = 1, 2, 3, 4
 
 
 @njit(cache=True)
-def _run(open_, high, low, close, spread, long_entry, short_entry, stop_dist, target_dist, slip):
+def _check(pos, open_, high, low, spread, stop, target, slip):
+    """One bar of an open position: (reason, fill, exit cost, stop-and-target conflict).
+
+    Reason 0 means the position stays open. Longs exit on the bid; shorts on the ask. A stop
+    that is already breached at the open exits at that open, which on the entry bar catches a
+    stop placed inside the spread. When the bar touches both levels the stop is returned, with
+    the conflict flag set so the caller can look at M1.
+    """
+    has_target = not np.isnan(target)
+    if pos == 1:
+        if open_ <= stop:
+            return _STOP_GAP, open_ - slip, slip, False
+        if has_target and open_ >= target:
+            return _TARGET, target - slip, slip, False
+        hit_target = has_target and high >= target
+        if low <= stop:
+            return _STOP, stop - slip, slip, hit_target
+        if hit_target:
+            return _TARGET, target - slip, slip, False
+        return 0, 0.0, 0.0, False
+    exit_cost = spread + slip
+    ask_open = open_ + spread
+    if ask_open >= stop:
+        return _STOP_GAP, ask_open + slip, exit_cost, False
+    if has_target and ask_open <= target:
+        return _TARGET, target + slip, exit_cost, False
+    hit_target = has_target and low + spread <= target
+    if high + spread >= stop:
+        return _STOP, stop + slip, exit_cost, hit_target
+    if hit_target:
+        return _TARGET, target + slip, exit_cost, False
+    return 0, 0.0, 0.0, False
+
+
+# Columns of the trade table _run returns; simulate() turns it into TRADE_DTYPE records.
+(
+    _SIDE,
+    _ENTRY_IDX,
+    _EXIT_IDX,
+    _ENTRY,
+    _EXIT,
+    _STOP_PRICE,
+    _TARGET_PRICE,
+    _RISK,
+    _R,
+    _COST_R,
+    _WHY,
+) = range(11)
+
+
+@njit(cache=True)
+def _record(out, k, pos, opened, t, entry, fill, stop, target, dist, total_cost, why):
+    out[k, _SIDE] = pos
+    out[k, _ENTRY_IDX] = opened
+    out[k, _EXIT_IDX] = t
+    out[k, _ENTRY] = entry
+    out[k, _EXIT] = fill
+    out[k, _STOP_PRICE] = stop
+    out[k, _TARGET_PRICE] = target
+    out[k, _RISK] = dist
+    out[k, _R] = pos * (fill - entry) / dist
+    out[k, _COST_R] = total_cost / dist
+    out[k, _WHY] = why
+
+
+@njit(cache=True)
+def _run(
+    open_,
+    high,
+    low,
+    close,
+    spread,
+    long_entry,
+    short_entry,
+    stop_dist,
+    target_dist,
+    slip,
+    m1_open,
+    m1_high,
+    m1_low,
+    m1_spread,
+    m1_lo,
+    m1_hi,
+):
     n = len(open_)
-    side = np.zeros(n, np.int8)
-    entry_idx = np.zeros(n, np.int64)
-    exit_idx = np.zeros(n, np.int64)
-    entry_price = np.zeros(n)
-    exit_price = np.zeros(n)
-    stop_price = np.zeros(n)
-    target_price = np.zeros(n)
-    risk = np.zeros(n)
-    r = np.zeros(n)
-    cost_r = np.zeros(n)
-    reason = np.zeros(n, np.int8)
+    out = np.zeros((n, 11))
     count = 0
 
     pos = 0  # +1 long, -1 short, 0 flat
@@ -164,45 +266,33 @@ def _run(open_, high, low, close, spread, long_entry, short_entry, stop_dist, ta
                 target = entry - target_dist[t - 1]
 
         if pos != 0:
-            has_target = not np.isnan(target)
-            why = 0
-            fill = 0.0
-            exit_cost = 0.0
-            # On the entry bar the open can't be beyond the target (it lies on the far side of
-            # the fill), but it can already be beyond a stop that sits inside the spread.
-            if pos == 1:
-                exit_cost = slip
-                if open_[t] <= stop:
-                    why, fill = _STOP_GAP, open_[t] - slip
-                elif has_target and open_[t] >= target:
-                    why, fill = _TARGET, target - slip
-                elif low[t] <= stop:
-                    why, fill = _STOP, stop - slip
-                elif has_target and high[t] >= target:
-                    why, fill = _TARGET, target - slip
-            else:
-                exit_cost = spread[t] + slip
-                ask_open = open_[t] + spread[t]
-                if ask_open >= stop:
-                    why, fill = _STOP_GAP, ask_open + slip
-                elif has_target and ask_open <= target:
-                    why, fill = _TARGET, target + slip
-                elif high[t] + spread[t] >= stop:
-                    why, fill = _STOP, stop + slip
-                elif has_target and low[t] + spread[t] <= target:
-                    why, fill = _TARGET, target + slip
+            why, fill, exit_cost, conflict = _check(
+                pos, open_[t], high[t], low[t], spread[t], stop, target, slip
+            )
+            if conflict:
+                # Walk the minutes inside this bar; the first one that decides wins.
+                for k in range(m1_lo[t], m1_hi[t]):
+                    minute = _check(
+                        pos, m1_open[k], m1_high[k], m1_low[k], m1_spread[k], stop, target, slip
+                    )
+                    if minute[0] != 0:
+                        why, fill, exit_cost = minute[0], minute[1], minute[2]
+                        break
             if why != 0:
-                side[count] = pos
-                entry_idx[count] = opened
-                exit_idx[count] = t
-                entry_price[count] = entry
-                exit_price[count] = fill
-                stop_price[count] = stop
-                target_price[count] = target
-                risk[count] = dist
-                r[count] = pos * (fill - entry) / dist
-                cost_r[count] = (entry_cost + exit_cost) / dist
-                reason[count] = why
+                _record(
+                    out,
+                    count,
+                    pos,
+                    opened,
+                    t,
+                    entry,
+                    fill,
+                    stop,
+                    target,
+                    dist,
+                    entry_cost + exit_cost,
+                    why,
+                )
                 count += 1
                 pos = 0
 
@@ -213,36 +303,26 @@ def _run(open_, high, low, close, spread, long_entry, short_entry, stop_dist, ta
                 pending = -1
 
     if pos != 0:
+        # Still open after the last bar: exit at its close.
         t = n - 1
         if pos == 1:
-            fill = close[t] - slip
-            exit_cost = slip
+            fill, exit_cost = close[t] - slip, slip
         else:
-            fill = close[t] + spread[t] + slip
-            exit_cost = spread[t] + slip
-        side[count] = pos
-        entry_idx[count] = opened
-        exit_idx[count] = t
-        entry_price[count] = entry
-        exit_price[count] = fill
-        stop_price[count] = stop
-        target_price[count] = target
-        risk[count] = dist
-        r[count] = pos * (fill - entry) / dist
-        cost_r[count] = (entry_cost + exit_cost) / dist
-        reason[count] = _END
+            fill, exit_cost = close[t] + spread[t] + slip, spread[t] + slip
+        _record(
+            out,
+            count,
+            pos,
+            opened,
+            t,
+            entry,
+            fill,
+            stop,
+            target,
+            dist,
+            entry_cost + exit_cost,
+            _END,
+        )
         count += 1
 
-    return (
-        side[:count],
-        entry_idx[:count],
-        exit_idx[:count],
-        entry_price[:count],
-        exit_price[:count],
-        stop_price[:count],
-        target_price[:count],
-        risk[:count],
-        r[:count],
-        cost_r[:count],
-        reason[:count],
-    )
+    return out[:count]
