@@ -34,6 +34,8 @@ BUDGET_STEP = 25  # the owner's usual grant (spec §6.4)
 TRIAL_VERDICTS = ("CANDIDATE", "REJECT")
 HOLDOUT_VERDICTS = ("PASS", "HOLDOUT FAIL")
 
+# Migration 1's tables. Never add to this list: a later table's own migration calls
+# _append_only for it, or a fresh database's migration 1 would reference a missing table.
 _TABLES = (
     "families",
     "hypotheses",
