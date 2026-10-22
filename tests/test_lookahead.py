@@ -37,6 +37,8 @@ PARAMS = {
     ],
     "atr_stop": [{"period": 5, "mult": 1.0}, {"period": 30, "mult": 2.5}],
     "r_target": [{"r": 1.5}],
+    "atr_target": [{"period": 5, "mult": 2.0}],
+    "atr_trailing": [{"period": 5, "mult": 1.5}, {"period": 30, "mult": 3.0}],
     "ma_slope": [{"period": 20}, {"period": 50, "min_slope_atr": 0.3}],
     "adx": [{"period": 7, "min": 20}, {"period": 14, "max": 30}],
     "atr_regime": [
@@ -50,7 +52,7 @@ PARAMS = {
     "day_of_week": [{"mon": False}, {"wed": False, "fri": False}],
 }
 
-CHECKED_KINDS = {Kind.ENTRY, Kind.FILTER, Kind.STOP, Kind.TARGET}
+CHECKED_KINDS = {Kind.ENTRY, Kind.FILTER, Kind.STOP, Kind.TARGET, Kind.TRAILING}
 CASES_PER_BLOCK = 100
 
 

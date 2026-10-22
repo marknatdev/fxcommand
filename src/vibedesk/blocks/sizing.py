@@ -3,6 +3,7 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 from vibedesk.blocks.registry import LIBRARY, Kind
+from vibedesk.market.bars import Bars
 
 
 class FixedRiskParams(BaseModel):
@@ -13,6 +14,7 @@ class FixedRiskParams(BaseModel):
 
 
 @LIBRARY.register("fixed_risk", Kind.SIZING, FixedRiskParams)
-def fixed_risk(p: FixedRiskParams) -> float:
-    """Risk a fixed percentage of the balance on every trade."""
+def fixed_risk(bars: Bars, p: FixedRiskParams) -> float:
+    """Risk a fixed percentage of the balance on every trade. Returns that fraction (0.01 for
+    1%), the `risk_fraction` the money view in engine.metrics expects."""
     return p.risk_pct / 100

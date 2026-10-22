@@ -96,7 +96,7 @@ Each trade records its R and its costs in R. Write a pure-Python reference versi
 
 - [x] All tests pass and ruff is clean (259 tests)
 - [x] The golden trade list matches
-- [ ] The owner reviews the trade-record shape
+- [x] The owner reviewed the trade-record shape (approved 2026-10-22; `swap_r` added and approved at Checkpoint B)
 
 ---
 
@@ -207,9 +207,9 @@ Each trade records its R and its costs in R. Write a pure-Python reference versi
 When several exits apply, the order is stop → target → trailing → time → opposite. This is documented and tested.
 
 **Acceptance criteria:**
-- [ ] Golden tests cover each exit, plus one trade where a trailing stop and a time exit compete.
-- [ ] The trailing stop never moves against the trade (property test).
-- [ ] The numba and reference versions stay identical on 200 seeds with every exit enabled.
+- [x] Golden tests cover each exit, plus one trade where a trailing stop and a time exit compete.
+- [x] The trailing stop never moves against the trade (property test).
+- [x] The numba and reference versions stay identical on 200 seeds with every exit enabled.
 
 **Verification:** `uv run pytest tests/test_exits.py tests/test_engine_props.py`
 
@@ -232,9 +232,9 @@ When several exits apply, the order is stop → target → trailing → time →
 Add a benchmark test: one combination over 12 years of synthetic M15 data, with the numba version already compiled, takes ≤ 0.5 s.
 
 **Acceptance criteria:**
-- [ ] Metrics match hand-calculated values on the golden trade list from T3 and T4.
-- [ ] The daily R series sums to net R and has one row for every trading day in the range.
-- [ ] The benchmark test passes. It is marked `@pytest.mark.perf` and runs in the default suite.
+- [x] Metrics match hand-calculated values on the golden trade list from T3 and T4.
+- [x] The daily R series sums to net R and has one row for every trading day in the range.
+- [x] The benchmark test passes. It is marked `@pytest.mark.perf` and runs in the default suite.
 
 **Verification:** `uv run pytest tests/test_metrics.py tests/test_perf.py`
 
@@ -247,6 +247,31 @@ Add a benchmark test: one combination over 12 years of synthetic M15 data, with 
 ---
 
 ## Checkpoint C: M1 done
-- [ ] Every M1 "done when" item in spec §10 is met
-- [ ] The full suite passes and ruff is clean
+
+**Notes (2026-10-22):**
+- **Exit details:**
+  - `opposite_signal` listens to the entry Block alone, ignoring filters and the Spec's direction. A long-only Spec is still closed by the entry's short signal, and the position is never reversed.
+  - `atr_trailing` trails the bid close for longs and the ask close for shorts.
+  - The trade record keeps the initial stop in `stop_price`; the final trail level is not stored.
+  - New exit reasons: `TRAIL`, `TIME`, `OPPOSITE`.
+- **Cross-check:** the random cases now enable every exit. Over the 200 cases there are 5,716 trades: 624 `TRAIL`, 1,102 `TIME`, 70 `OPPOSITE`, plus the earlier reasons. The engine and the reference twin agree on all of them.
+- **Metrics coverage:** metrics are hand-checked on the T3 golden list and on hand-built lists covering zero days, only winners, no trades, and the top-5 share. The T4 single swap trade is not run through `metrics` separately.
+- **Benchmark:** 12 years of synthetic GOLD M15 (300k bars, with M1 settling over 4.5M minutes), one combination with a filter, stop, target, trailing stop and time exit:
+  - compile 75 ms + simulate 111 ms + metrics 40 ms = **226 ms**, against a budget of 500 ms;
+  - on random-walk data with real costs it lost −604R over 7,029 trades (PF 0.86), as it should.
+- **Projected Trial cost (M2 risk):**
+  - `simulate` over the full window takes **22 ms without M1** and 91 ms with it. The M1 extra is per-call setup over 4.5M minutes: `spread_prices` on every minute plus two `searchsorted` calls.
+  - Done naively, the 1,000-run Coin-Flip Baseline over the 8 blind years costs about 1,000 × 91 ms × 8/12 ≈ 60 s on its own. The 50-combination grid adds about 11 s, before counting the max-bound indicator costs.
+  - With the M1 setup hoisted out to once per Trial, the baseline is about 1,000 × 22 ms × 8/12 ≈ 15 s, and the grid is about 5 s with Block-output caching. That fits the 60 s target.
+  - Other levers: `_run` allocates an n × 11 table (about 26 MB at 300k bars) on every call; run the baseline across cores; use fewer baseline runs.
+  - If none of this is enough, the owner chooses between the levers or a looser budget.
+- **Daily R definition, for Deflated Sharpe in M2:** a trade's whole R is booked on its exit day. Multi-day holds therefore make the series lumpier and lower DSR. This is deliberate and conservative; don't reopen it in M2.
+- **Sizing:** `fixed_risk` now has the same `fn(bars, params)` signature as every other Block. `metrics()` still takes `risk_fraction` from its caller, so M2's Trial runner must pass the Spec's sizing value (otherwise a 0.5% Spec would be shown at 1%).
+- **Owner questions, both still open:**
+  - Should time filters (`session_window`, `day_of_week`) judge the signal bar, as now, or the entry bar? (Open since Checkpoint B.)
+  - With `opposite_signal` on a `both` Spec, the opposite signal closes the trade but doesn't open the reverse one. Should it stop and reverse instead? This changes trade counts.
+- **Other M2 risks carried over:** repeated Block work, warm-up, `Bars.between` slicing cost, and planted-edge calibration.
+
+- [x] Every M1 "done when" item in spec §10 is met: hand-calculated golden trades match, the look-ahead property tests pass, and one combination over 12 years of M15 takes ≤ 0.5 s
+- [x] The full suite passes (382 tests) and ruff is clean
 - [ ] The owner reviews before M2 (gauntlet and ledger)

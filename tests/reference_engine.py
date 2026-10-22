@@ -25,6 +25,8 @@ class _Position:
     target: float | None
     risk: float
     entry_cost: float
+    trail: float | None = None  # trailing stop level, once one exists
+    opposite_seen: bool = False  # the entry Block pointed the other way at the last close
 
 
 @dataclass
@@ -45,6 +47,10 @@ def simulate_reference(bars, signals, cost, m1=None) -> list[dict]:
         return max(int(points), cost.spread_floor_points) * cost.spread_multiplier * cost.point
 
     spreads = [spread_of(s) for s in bars.spread]
+    n = len(bars)
+    trail_dist = signals.trail_dist if signals.trail_dist is not None else [math.nan] * n
+    exit_long = signals.exit_long if signals.exit_long is not None else [False] * n
+    exit_short = signals.exit_short if signals.exit_short is not None else [False] * n
     trades: list[dict] = []
     position: _Position | None = None
     waiting: int | None = None  # signal bar whose entry fills at the next open
@@ -74,8 +80,14 @@ def simulate_reference(bars, signals, cost, m1=None) -> list[dict]:
             entered_now = True
 
         if position is not None:
+            held = t - position.entry_idx
+            due = None
+            if signals.time_bars and held >= signals.time_bars:
+                due = ExitReason.TIME
+            elif position.opposite_seen:
+                due = ExitReason.OPPOSITE
             outcome = _check_exit(
-                position, bid, spreads[t], slip, target_gap_allowed=not entered_now
+                position, bid, spreads[t], slip, target_gap_allowed=not entered_now, due=due
             )
             if outcome is not None and outcome[2] and m1 is not None:
                 outcome = _settle_with_m1(position, bars, t, m1, spread_of, slip) or outcome
@@ -83,6 +95,19 @@ def simulate_reference(bars, signals, cost, m1=None) -> list[dict]:
                 fill, reason, _, exit_cost = outcome
                 trades.append(_close(position, t, fill, reason, exit_cost, bars, cost))
                 position = None
+
+        if position is not None:
+            # Bar close: the trail can only tighten, and an opposite signal is remembered.
+            distance = float(trail_dist[t])
+            if not math.isnan(distance):
+                if position.side == 1:
+                    candidate = bid.close - distance
+                else:
+                    candidate = bid.close + spreads[t] + distance
+                if position.trail is None or (candidate - position.trail) * position.side > 0:
+                    position.trail = candidate
+            opposite = exit_long[t] if position.side == 1 else exit_short[t]
+            position.opposite_seen = bool(opposite)
 
         if position is None and t + 1 < len(bars):
             go_long = bool(signals.long_entry[t]) and not bool(signals.short_entry[t])
@@ -100,12 +125,16 @@ def simulate_reference(bars, signals, cost, m1=None) -> list[dict]:
     return trades
 
 
-def _check_exit(position: _Position, bid: Quote, spread: float, slip: float, target_gap_allowed):
+def _check_exit(
+    position: _Position, bid: Quote, spread: float, slip: float, target_gap_allowed, due=None
+):
     """Return (fill, reason, both_touched, exit_cost) or None.
 
     Longs close by selling at the bid; shorts by buying at the ask. The stop-gap check also runs
     on the entry bar: a stop inside the spread is breached the moment the trade fills, and the
-    exit happens at the market price, not at the stop.
+    exit happens at the market price, not at the stop. At the open the order is stop, target,
+    trailing stop, then a time or opposite exit that is due. Inside the bar the tighter of the
+    stop and the trail applies.
     """
     quote = bid if position.side == 1 else bid.shifted(spread)
     exit_cost = slip if position.side == 1 else spread + slip
@@ -123,9 +152,16 @@ def _check_exit(position: _Position, bid: Quote, spread: float, slip: float, tar
         return quote.open - favourable * slip, ExitReason.STOP_GAP, False, exit_cost
     if target_gap_allowed and position.target is not None and beyond(quote.open, position.target):
         return position.target - favourable * slip, ExitReason.TARGET, False, exit_cost
+    if position.trail is not None and adverse(quote.open, position.trail):
+        return quote.open - favourable * slip, ExitReason.TRAIL, False, exit_cost
+    if due is not None:
+        return quote.open - favourable * slip, due, False, exit_cost
+    level, reason = position.stop, ExitReason.STOP
+    if position.trail is not None and (position.trail - position.stop) * favourable > 0:
+        level, reason = position.trail, ExitReason.TRAIL
     reaches_target = position.target is not None and beyond(best, position.target)
-    if adverse(worst, position.stop):
-        return position.stop - favourable * slip, ExitReason.STOP, reaches_target, exit_cost
+    if adverse(worst, level):
+        return level - favourable * slip, reason, reaches_target, exit_cost
     if reaches_target:
         return position.target - favourable * slip, ExitReason.TARGET, False, exit_cost
     return None

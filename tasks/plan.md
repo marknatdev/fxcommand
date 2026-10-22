@@ -31,31 +31,31 @@ M1 builds the pure core of the Verdict Engine: the `blocks` and `engine` modules
 The detailed tasks are in [todo.md](todo.md).
 
 ### Phase 1: Tracer bullet
-- [ ] T1: Scaffold, the guard test, Bars and SyntheticBarSource
-- [ ] T2: Strategy Spec schema, validation and grid expansion
-- [ ] T3: First slice: `donchian_breakout` + `atr_stop` + `r_target` + `fixed_risk`, simulated into trades in R
+- [x] T1: Scaffold, the guard test, Bars and SyntheticBarSource
+- [x] T2: Strategy Spec schema, validation and grid expansion
+- [x] T3: First slice: `donchian_breakout` + `atr_stop` + `r_target` + `fixed_risk`, simulated into trades in R
 
 ### Checkpoint A (after T1–T3)
-- [ ] `uv run pytest` passes, `uv run ruff check` is clean
-- [ ] A golden hand-calculated trade list matches the engine exactly
-- [ ] The owner reviews the trade-list shape before more Blocks are built
+- [x] `uv run pytest` passes, `uv run ruff check` is clean
+- [x] A golden hand-calculated trade list matches the engine exactly
+- [x] The owner reviews the trade-list shape before more Blocks are built
 
 ### Phase 2: Complete the Cost Model and the Block Library
-- [ ] T4: Full Cost Model: short ask side, swap with Wednesday triple, settling same-bar conflicts with M1, CostSnapshot
-- [ ] T5: The remaining entry Blocks + the look-ahead property test over every Block
-- [ ] T6: Filter Blocks, including exchange-local sessions with DST tests
+- [x] T4: Full Cost Model: short ask side, swap with Wednesday triple, settling same-bar conflicts with M1, CostSnapshot
+- [x] T5: The remaining entry Blocks + the look-ahead property test over every Block
+- [x] T6: Filter Blocks, including exchange-local sessions with DST tests
 
 ### Checkpoint B (after T4–T6)
-- [ ] Every entry and filter Block passes the look-ahead property test
-- [ ] Golden cost tests pass (spread floor, slippage, swap nights, triple Wednesday, M1 conflict)
+- [x] Every entry and filter Block passes the look-ahead property test
+- [x] Golden cost tests pass (spread floor, slippage, swap nights, triple Wednesday, M1 conflict)
 
 ### Phase 3: Exits, metrics, speed
-- [ ] T7: The remaining exits: `atr_target`, `atr_trailing`, `time_exit`, `opposite_signal`
-- [ ] T8: R metrics, the daily R series, the money-equity view, and the performance benchmark
+- [x] T7: The remaining exits: `atr_target`, `atr_trailing`, `time_exit`, `opposite_signal`
+- [x] T8: R metrics, the daily R series, the money-equity view, and the performance benchmark
 
 ### Checkpoint C: M1 done
-- [ ] All the M1 "done when" items in the spec §10 are met
-- [ ] One combination over 12 years of synthetic M15 data takes ≤ 0.5 s (benchmark test)
+- [x] All the M1 "done when" items in the spec §10 are met
+- [x] One combination over 12 years of synthetic M15 data takes ≤ 0.5 s (benchmark test)
 - [ ] Review with the owner before starting M2 (gauntlet + ledger)
 
 ## Risks and mitigations

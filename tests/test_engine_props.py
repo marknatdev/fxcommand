@@ -41,10 +41,24 @@ def run_case(
     swap_short=0.0,
     multiplier=1.0,
     use_m1=False,
+    atr_target=0.0,
+    trail=0.0,
+    time_bars=0,
+    opposite=False,
 ):
     bars = synthetic_bars(seed, symbol, timeframe)
     m1 = synthetic_bars(seed, symbol, Timeframe.M1) if use_m1 else None
-    target = {"target": {"block": "r_target", "params": {"r": r}}} if r else {}
+    exits = {"stop": {"block": "atr_stop", "params": {"period": atr_period, "mult": mult}}}
+    if atr_target:
+        exits["target"] = {"block": "atr_target", "params": {"period": 7, "mult": atr_target}}
+    elif r:
+        exits["target"] = {"block": "r_target", "params": {"r": r}}
+    if trail:
+        exits["trailing"] = {"block": "atr_trailing", "params": {"period": 10, "mult": trail}}
+    if time_bars:
+        exits["time"] = {"block": "time_exit", "params": {"bars": time_bars}}
+    if opposite:
+        exits["opposite"] = {"block": "opposite_signal"}
     spec = validate(
         {
             "name": "props",
@@ -52,8 +66,7 @@ def run_case(
             "timeframe": timeframe.value,
             "direction": direction,
             "entry": {"block": "donchian_breakout", "params": {"period": period}},
-            "exit": {"stop": {"block": "atr_stop", "params": {"period": atr_period, "mult": mult}}}
-            | target,
+            "exit": exits,
             "sizing": {"block": "fixed_risk", "params": {}},
         }
     )
@@ -87,6 +100,10 @@ def random_case(seed: int):
         swap_short=float(rng.uniform(-90, 25)),
         multiplier=float(rng.choice([1.0, 1.0, 2.0])),
         use_m1=bool(rng.random() < 0.7),
+        atr_target=float(rng.choice([0.0, 0.0, 1.5, 4.0])),
+        trail=float(rng.choice([0.0, 0.0, 1.0, 2.5])),
+        time_bars=int(rng.choice([0, 0, 3, 12])),
+        opposite=bool(rng.random() < 0.4),
     )
 
 
@@ -117,6 +134,9 @@ case_strategy = st.builds(
     direction=st.sampled_from(["long", "short", "both"]),
     floor=st.floats(0, 80),
     slip=st.floats(0, 5),
+    trail=st.sampled_from([0.0, 0.5, 1.0, 3.0]),
+    time_bars=st.sampled_from([0, 1, 5, 20]),
+    opposite=st.booleans(),
 )
 
 
@@ -143,6 +163,21 @@ def test_trade_invariants(case):
     assert np.allclose(t["r"][stop], -1 - slip_r[stop])
     gap = reason == ExitReason.STOP_GAP
     assert np.all(t["r"][gap] <= -1 - slip_r[gap] + eps)
+
+    # A trailing exit is never worse than the initial stop; time and opposite exits leave at
+    # an open, never past the stop. A time exit leaves exactly when its bars are up.
+    trailed = reason == ExitReason.TRAIL
+    assert np.all(t["r"][trailed] >= -1 - slip_r[trailed] - eps)
+    timed = reason == ExitReason.TIME
+    if case["time_bars"]:
+        assert np.all(t["exit_idx"][timed] - t["entry_idx"][timed] == case["time_bars"])
+        assert np.all(t["exit_idx"] - t["entry_idx"] <= case["time_bars"])
+    else:
+        assert not timed.any()
+    if not case["trail"]:
+        assert not trailed.any()
+    if not case["opposite"]:
+        assert not np.any(reason == ExitReason.OPPOSITE)
 
     # Nothing but a gap loses more than 1R plus slippage.
     assert np.all(t["r"][~gap] >= -1 - slip_r[~gap] - eps)

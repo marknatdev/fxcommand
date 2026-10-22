@@ -11,14 +11,11 @@ from vibedesk.market.bars import Bars
 def compile_signals(
     combination: Combination, bars: Bars, registry: BlockRegistry = LIBRARY
 ) -> Signals:
-    for slot in ("trailing", "time", "opposite"):
-        if getattr(combination, slot) is not None:
-            raise NotImplementedError(f"the engine does not support {slot} exits yet")
-
     def run(bound, *args):
         return registry.get(bound.block).fn(bars, bound.params, *args)
 
-    long, short = (np.array(side, dtype=np.bool_) for side in run(combination.entry))
+    raw_long, raw_short = (np.array(side, dtype=np.bool_) for side in run(combination.entry))
+    long, short = raw_long.copy(), raw_short.copy()
     for bound in combination.filters:
         allow_long, allow_short = run(bound)
         long &= allow_long
@@ -36,5 +33,24 @@ def compile_signals(
         target_dist = np.full(len(bars), np.nan)
     else:
         target_dist = np.asarray(run(combination.target, stop_dist), dtype=np.float64)
+    trail_dist = None
+    if combination.trailing is not None:
+        trail_dist = np.asarray(run(combination.trailing), dtype=np.float64)
+    time_bars = 0 if combination.time is None else int(run(combination.time))
+    # The opposite-signal exit listens to the entry Block alone: filters and direction decide
+    # when to enter, not when an existing trade has been contradicted.
+    exit_long = exit_short = None
+    if combination.opposite is not None:
+        exit_long, exit_short = raw_short & ~raw_long, raw_long & ~raw_short
+
     tradable = stop_dist > 0  # False where the stop is still NaN during warm-up
-    return Signals(long & tradable, short & tradable, stop_dist, target_dist)
+    return Signals(
+        long & tradable,
+        short & tradable,
+        stop_dist,
+        target_dist,
+        trail_dist=trail_dist,
+        time_bars=time_bars,
+        exit_long=exit_long,
+        exit_short=exit_short,
+    )

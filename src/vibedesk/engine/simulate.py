@@ -10,7 +10,14 @@ Fill rules (spec §6.1):
   itself: a stop closer than the spread is already breached when the trade fills, so it exits
   at the market, not at the stop. A bar that opens beyond the target exits at the target, not
   at the better open.
-- If one bar touches both the stop and the target, its M1 bars decide which came first. Without
+- A trailing stop is updated only on bar closes and only ever moves in the trade's favour. It
+  replaces the initial stop once it is tighter.
+- A time exit leaves at the open of the bar `time_bars` bars after the entry bar. An opposite
+  entry signal (from the entry Block alone, ignoring filters and direction) leaves at the next
+  open. Neither reverses the position.
+- When several exits apply, the first in this order wins: stop, target, trailing stop, time,
+  opposite signal.
+- If one bar touches both a stop and the target, its M1 bars decide which came first. Without
   M1 data, or if the minutes don't settle it, the stop wins.
 - Swap is charged for every server rollover the position is open through (see swap_nights).
 - One position at a time. A trade that exits during a bar can be followed by a signal at that
@@ -35,6 +42,9 @@ class ExitReason(IntEnum):
     STOP_GAP = 2
     TARGET = 3
     END = 4
+    TRAIL = 5
+    TIME = 6
+    OPPOSITE = 7
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -45,6 +55,10 @@ class Signals:
     short_entry: np.ndarray  # bool
     stop_dist: np.ndarray  # price distance from the entry fill to the stop
     target_dist: np.ndarray  # price distance from the entry fill to the target; NaN for none
+    trail_dist: np.ndarray | None = None  # trailing distance from the close; None for no trail
+    time_bars: int = 0  # bars to hold before a time exit; 0 for none
+    exit_long: np.ndarray | None = None  # bool: close a long at the next open
+    exit_short: np.ndarray | None = None  # bool: close a short at the next open
 
 
 TRADE_DTYPE = np.dtype(
@@ -90,8 +104,21 @@ def simulate(bars: Bars, signals: Signals, cost: CostSnapshot, m1: Bars | None =
     """Simulate one Combination's signals. `m1`, when given, settles bars where the stop and
     the target are both touched; without it, or without M1 bars inside that bar, the stop wins."""
     n = len(bars)
-    for name in ("long_entry", "short_entry", "stop_dist", "target_dist"):
-        if len(getattr(signals, name)) != n:
+    never = np.zeros(n, dtype=np.bool_)
+    trail_dist = np.full(n, np.nan) if signals.trail_dist is None else signals.trail_dist
+    exit_long = never if signals.exit_long is None else signals.exit_long
+    exit_short = never if signals.exit_short is None else signals.exit_short
+    arrays = {
+        "long_entry": signals.long_entry,
+        "short_entry": signals.short_entry,
+        "stop_dist": signals.stop_dist,
+        "target_dist": signals.target_dist,
+        "trail_dist": trail_dist,
+        "exit_long": exit_long,
+        "exit_short": exit_short,
+    }
+    for name, array in arrays.items():
+        if len(array) != n:
             raise ValueError(f"signals.{name} has a different length than the bars")
     if m1 is None:
         m1_open = m1_high = m1_low = m1_spread = np.zeros(0)
@@ -112,6 +139,10 @@ def simulate(bars: Bars, signals: Signals, cost: CostSnapshot, m1: Bars | None =
         np.asarray(signals.short_entry, dtype=np.bool_),
         np.asarray(signals.stop_dist, dtype=np.float64),
         np.asarray(signals.target_dist, dtype=np.float64),
+        np.asarray(trail_dist, dtype=np.float64),
+        int(signals.time_bars),
+        np.asarray(exit_long, dtype=np.bool_),
+        np.asarray(exit_short, dtype=np.bool_),
         cost.slippage_price,
         m1_open,
         m1_high,
@@ -147,27 +178,38 @@ def simulate(bars: Bars, signals: Signals, cost: CostSnapshot, m1: Bars | None =
     return Trades(records)
 
 
-_STOP, _STOP_GAP, _TARGET, _END = 1, 2, 3, 4
+_STOP, _STOP_GAP, _TARGET, _END, _TRAIL, _TIME, _OPPOSITE = 1, 2, 3, 4, 5, 6, 7
 
 
 @njit(cache=True)
-def _check(pos, open_, high, low, spread, stop, target, slip):
+def _check(pos, open_, high, low, spread, stop, target, trail, at_open, slip):
     """One bar of an open position: (reason, fill, exit cost, stop-and-target conflict).
 
-    Reason 0 means the position stays open. Longs exit on the bid; shorts on the ask. A stop
-    that is already breached at the open exits at that open, which on the entry bar catches a
-    stop placed inside the spread. When the bar touches both levels the stop is returned, with
+    Reason 0 means the position stays open. Longs exit on the bid; shorts on the ask. `trail` is
+    the trailing stop (NaN for none) and `at_open` a time or opposite exit due at this bar's
+    open (0 for none). The open is checked first, in priority order: stop, target, trailing
+    stop, then the exit due at the open. A stop already breached at the open exits there,
+    which on the entry bar catches a stop placed inside the spread. Inside the bar, whichever
+    stop is tighter applies. When the bar also touches the target, the stop is returned with
     the conflict flag set so the caller can look at M1.
     """
     has_target = not np.isnan(target)
+    has_trail = not np.isnan(trail)
     if pos == 1:
         if open_ <= stop:
             return _STOP_GAP, open_ - slip, slip, False
         if has_target and open_ >= target:
             return _TARGET, target - slip, slip, False
+        if has_trail and open_ <= trail:
+            return _TRAIL, open_ - slip, slip, False
+        if at_open != 0:
+            return at_open, open_ - slip, slip, False
+        level, why = stop, _STOP
+        if has_trail and trail > stop:
+            level, why = trail, _TRAIL
         hit_target = has_target and high >= target
-        if low <= stop:
-            return _STOP, stop - slip, slip, hit_target
+        if low <= level:
+            return why, level - slip, slip, hit_target
         if hit_target:
             return _TARGET, target - slip, slip, False
         return 0, 0.0, 0.0, False
@@ -177,9 +219,16 @@ def _check(pos, open_, high, low, spread, stop, target, slip):
         return _STOP_GAP, ask_open + slip, exit_cost, False
     if has_target and ask_open <= target:
         return _TARGET, target + slip, exit_cost, False
+    if has_trail and ask_open >= trail:
+        return _TRAIL, ask_open + slip, exit_cost, False
+    if at_open != 0:
+        return at_open, ask_open + slip, exit_cost, False
+    level, why = stop, _STOP
+    if has_trail and trail < stop:
+        level, why = trail, _TRAIL
     hit_target = has_target and low + spread <= target
-    if high + spread >= stop:
-        return _STOP, stop + slip, exit_cost, hit_target
+    if high + spread >= level:
+        return why, level + slip, exit_cost, hit_target
     if hit_target:
         return _TARGET, target + slip, exit_cost, False
     return 0, 0.0, 0.0, False
@@ -227,6 +276,10 @@ def _run(
     short_entry,
     stop_dist,
     target_dist,
+    trail_dist,
+    time_bars,
+    exit_long,
+    exit_short,
     slip,
     m1_open,
     m1_high,
@@ -245,6 +298,8 @@ def _run(
     entry = 0.0
     stop = 0.0
     target = np.nan
+    trail = np.nan
+    opposite_due = False
     dist = 0.0
     entry_cost = 0.0
 
@@ -253,6 +308,8 @@ def _run(
             pos = pending
             pending = 0
             opened = t
+            trail = np.nan
+            opposite_due = False
             dist = stop_dist[t - 1]
             if pos == 1:
                 entry = open_[t] + spread[t] + slip
@@ -266,14 +323,28 @@ def _run(
                 target = entry - target_dist[t - 1]
 
         if pos != 0:
+            at_open = 0
+            if time_bars > 0 and t - opened >= time_bars:
+                at_open = _TIME
+            elif opposite_due:
+                at_open = _OPPOSITE
             why, fill, exit_cost, conflict = _check(
-                pos, open_[t], high[t], low[t], spread[t], stop, target, slip
+                pos, open_[t], high[t], low[t], spread[t], stop, target, trail, at_open, slip
             )
             if conflict:
                 # Walk the minutes inside this bar; the first one that decides wins.
                 for k in range(m1_lo[t], m1_hi[t]):
                     minute = _check(
-                        pos, m1_open[k], m1_high[k], m1_low[k], m1_spread[k], stop, target, slip
+                        pos,
+                        m1_open[k],
+                        m1_high[k],
+                        m1_low[k],
+                        m1_spread[k],
+                        stop,
+                        target,
+                        trail,
+                        0,
+                        slip,
                     )
                     if minute[0] != 0:
                         why, fill, exit_cost = minute[0], minute[1], minute[2]
@@ -295,6 +366,19 @@ def _run(
                 )
                 count += 1
                 pos = 0
+
+        if pos != 0:
+            # At this bar's close: ratchet the trailing stop and note an opposite signal.
+            if pos == 1:
+                level = close[t] - trail_dist[t]
+                if not np.isnan(level) and (np.isnan(trail) or level > trail):
+                    trail = level
+                opposite_due = exit_long[t]
+            else:
+                level = close[t] + spread[t] + trail_dist[t]
+                if not np.isnan(level) and (np.isnan(trail) or level < trail):
+                    trail = level
+                opposite_due = exit_short[t]
 
         if pos == 0 and t + 1 < n and stop_dist[t] > 0:
             if long_entry[t] and not short_entry[t]:
