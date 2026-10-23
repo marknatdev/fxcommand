@@ -207,11 +207,11 @@
 - `desk data-report`: joins T2's `summarize`, T1's `check_clock` and the plan's XM clock checks (no bar on a server Saturday or Sunday, 5 D1 bars per full week, GOLD's daily break at the same server hour in US summer and winter), computed inside `market/` from bar times only.
 
 **Acceptance criteria:**
-- [ ] `desk smoke` on `FakeMt5` prints the report and exits 0; with a fake that fails `initialize`, or a tick more than 120 s off, it exits non-zero with the reason. At a fake weekend the tick check is skipped and says so.
-- [ ] `desk data-report` on a fake cache shows the first usable month, masked days per year and the clock checks per year; a fake year with a shifted clock fails.
-- [ ] A fake year built on a fixed GMT+2 server clock (no US daylight saving) fails the XM clock checks: weekend bars in US summer, and GOLD's break moving by an hour.
-- [ ] No command imports `MetaTrader5` when given a fake (checked with the module made unimportable).
-- [ ] No command prints a price or a return for a date from `HOLDOUT_START` on: `desk smoke` prints counts and times, and the data report shows only structural facts for Holdout years (a test scans the output).
+- [x] `desk smoke` on `FakeMt5` prints the report and exits 0; with a fake that fails `initialize`, or a tick more than 120 s off, it exits non-zero with the reason. At a fake weekend the tick check is skipped and says so.
+- [x] `desk data-report` on a fake cache shows the first usable month, masked days per year and the clock checks per year; a fake year with a shifted clock fails.
+- [x] A fake year built on a fixed GMT+2 server clock (no US daylight saving) fails the XM clock checks: weekend bars in US summer, and GOLD's break moving by an hour. (FX shows the weekend bars, GOLD the break; see the deviations.)
+- [x] No command imports `MetaTrader5` when given a fake (checked with the module made unimportable).
+- [x] No command prints a price or a return for a date from `HOLDOUT_START` on: `desk smoke` prints counts and times, and the data report shows only structural facts for Holdout years (a test scans the output).
 
 **Verification:** `uv run pytest tests/test_cli.py`
 
@@ -221,11 +221,36 @@
 
 **Scope:** M
 
+**Result (built here, 2026-10-23; awaiting review at Checkpoint B):**
+- **Commands:** `uv run desk smoke | import | refresh | floors | data-report`. Each takes `--symbols` (default all 8); all but `smoke` take `--data` (default the repo's `data/`); `import` takes `--start` (default `RESEARCH_START`). Exit 0 when everything passed, 1 when a check failed or a command could not finish, 2 for bad usage. `main(argv, api=, clock=)` takes the API and the clock, so tests pass `FakeMt5`; the live terminal is loaded only when a command needs one, and without the mt5 extra a command says `uv sync --extra mt5` instead of a traceback.
+  - `smoke`: `initialize`; per symbol `symbol_select`, then only named fields that aren't prices (point, digits, swap mode, triple-swap day); the live tick check; a day of M15 bars (count and last open time) and an hour of ticks (count); `shutdown`.
+  - `import` and `refresh`: T4's importer; per symbol chunks, bars, retries, cutoff and judged-through, then every flagged chunk. A failure prints `FAILED:` and the importer's reason.
+  - `floors`: `measure_cost` then `record_cost` per symbol; prints the floor, p90 and tick count, the measured swaps and the charged swaps (a credit charged as 0, ADR 0004). A `CostError` fails that symbol; the others carry on.
+  - `data-report`: reads the cache only, never the terminal. Per symbol: first usable month, judged through, last import. Per year: bars per timeframe, masked days split into thin days (some M15 bars) and empty weekdays (none), gaps, median spread, our conversion (`check_clock`) and XM's clock.
+- **XM's clock** (`market/report.py`, from bar times only): bars (M15 and D1) opening on a server Saturday or Sunday; server weeks with more than 5 D1 bars; the daily break, the server hours with M15 bars on fewer than 10% of Tuesdays to Thursdays, found separately for US summer and winter on the bars the mask serves. A season with fewer than 20 such days is "n/a", not a failure; a symbol trading round the clock has no break to move.
+- **Evidence:** `tests/test_report.py` (15 tests) and `tests/test_cli.py` (20); default suite 1225 passed (1 skipped without the mt5 extra); slow suite 7 passed (3 min 39 s, after the importer fix); ruff clean; `uv run desk --help` and a `data-report` of an empty folder run from the installed entry point. The whole suite catches all 12 mutants of T5's rules (weekend bars, more than 5 D1 bars, the break share, `passed` ignoring the break or our conversion, thin versus empty, the tick lag's sign, the weekend skip, and the importer fixes below: the refresh clamp, no partial days, partial days not masked, only one timeframe's first day), every file restored.
+  - Years built from a New York schedule (not `SyntheticBarSource`, which aggregates on New York + 7 h and would partly assume the answer): a New York + 7 h year passes for GOLD and for FX, holidays and all; on a fixed GMT+2 clock GOLD's break moves from server 00h in winter to 23h in summer, and FX gets weekend bars and 6-bar weeks. A 10-minute shift fails our conversion; GMT+2 passes it and fails only XM's clock, so the two checks catch different faults.
+  - `smoke` fails a failed `initialize`, a weekday tick 19 h old (the terminal T0 met) and a clock 5 min behind the ticks; at the server's weekend it skips the tick check and says so; a fake whose symbol info and tick carry distinctive bids and asks shows that no price is printed.
+  - `import`, `refresh` and `data-report` run end to end on `FakeMt5` and exit 0, and the cache they leave reads back through `MarketData` as the source after the mask, every timeframe and column (Checkpoint B).
+  - A cache reaching into 2025: `import`, `data-report` and a 2025 `smoke` print none of the more than 1,000 distinct 2025 prices.
+  - With MetaTrader5 made unimportable, every command runs on a fake.
+- **Deviations, for review:**
+  - **"5 D1 bars per full week" became "no server week with more than 5"** (plan amended): a holiday leaves a 4-bar week, so "exactly 5" would fail every real year; a shifted clock shows as a sixth, Sunday bar.
+  - **On a fixed GMT+2 clock, FX shows the weekend bars and GOLD shows the break.** GOLD reopens at 18:00 New York, which is server Monday 00:00 on GMT+2 even in summer; FX opens at 17:00 New York, server Sunday 23:00. The report runs both checks on every symbol.
+  - **Holidays:** a New York holiday leaves the server day a few hours of bars (Christmas: about 6), so it shows as a thin day, as does an import's first server day (below); a weekday with no M15 bars at all shows as empty.
+  - **The report's logic lives in `market/report.py`**, not `cli.py` (the plan computes the XM checks inside `market/`); `cli.py` only prints. `smoke`'s day of bars is read by `market/mt5.py`'s `recent_bars`: the Holdout guard caught the first draft reading bars in `cli.py`.
+  - **The tick check takes the symbol with the freshest tick** (FX ticks through GOLD's daily break), and a tick ahead of this computer's clock fails too.
+  - **`refresh` has no `--timeframes`:** a run that judges days must import every timeframe (T4).
+- **An importer bug found by T5's end-to-end run, fixed (touches T4's `importer.py`, `cache.py` and `quality.py`):** after an import starting 1 January 2024, the first refresh failed with "GOLD M15 2023 would change bars on 2024-01-01". Server 1 January begins at 22:00 UTC on 31 December, but each timeframe's first chunk begins at UTC midnight, so the import held only part of that day (its D1 and H4 bars, which open at 22:00 UTC, not at all) and still judged and served it. The refresh read the 2023 chunk, found the evening's bars, and the served-bars guard refused them; without the refresh, the hole would have been served for good.
+  - **The first import now masks the server day each timeframe's first chunk begins in**, whatever its count (plan amended, "Data-quality mask"). With the default start that is 1 January 2014, a holiday. Test: `test_the_server_day_an_import_begins_in_is_masked` (an import from 1 February 2024 masks server 1 January, where M15, H1, H4 and D1 begin, and server 1 February, where M1 begins; `MarketData` serves neither on any timeframe, and a refresh goes through).
+  - **A refresh starts no earlier than the first chunk the cache holds** (`cache.first_cached`), so it doesn't fetch a year of history before the import's start. Test: `test_a_refresh_never_reaches_before_the_first_imported_chunk`.
+  - **For the owner, not changed:** an import's `--start` picks M1's first month but the other timeframes' first year. So `--start 2024-02-01` serves January 2024 on M15 without M1 bars (M1 only settles same-bar conflicts), and a later import from an earlier date is refused, because it would add M1 bars to served January days. The default start, 1 January, has neither. If wanted, `desk import` could take a year instead of a date.
+
 ---
 
 ## Checkpoint B (after T4–T5)
-- [ ] A full import and refresh from `FakeMt5`, read back through `MarketData`, is green; ruff clean
-- [ ] The owner reviews
+- [x] A full import and refresh from `FakeMt5`, read back through `MarketData`, is green; ruff clean
+- [x] The owner reviews (approved 2026-10-23)
 
 ---
 

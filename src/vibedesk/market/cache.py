@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -131,6 +131,16 @@ def read_unmasked(
     return bars.between(lo, hi)
 
 
+def first_cached(root: Path, symbol: str, timeframe: Timeframe) -> int | None:
+    """The UTC open time of the earliest cached bar of a timeframe; None when none is cached.
+    Reads only the earliest year file's times."""
+    for _, path in _year_files(root, symbol, timeframe):
+        time = _read_columns(path, ("time",))["time"]
+        if len(time):
+            return int(time[0])
+    return None
+
+
 def read_meta(root: Path, symbol: str) -> Meta:
     path = _symbol_dir(root, symbol) / "meta.json"
     if not path.exists():
@@ -146,19 +156,26 @@ def read_meta(root: Path, symbol: str) -> Meta:
 
 
 def record_import(
-    root: Path, symbol: str, cutoff: datetime, *, judge_until: datetime | None = None
+    root: Path,
+    symbol: str,
+    cutoff: datetime,
+    *,
+    judge_until: datetime | None = None,
+    partial_days: Sequence[date] = (),
 ) -> Meta:
     """Judge the server days that closed by `judge_until`, `cutoff` if not given, and record
     `cutoff` as the last import.
 
-    The first call builds the mask from the cached M15 bars and freezes it; a later call only
-    judges the days after the last judged one (quality.py). The importer calls this once all of
-    an import's chunks are written, judging until its last M15 bar, whose day may still fill.
+    The first call builds the mask from the cached M15 bars and freezes it, masking
+    `partial_days` (days the import began part way through); a later call only judges the days
+    after the last judged one (quality.py). The importer calls this once all of an import's
+    chunks are written, judging until its last M15 bar, whose day may still fill.
     """
     meta = read_meta(root, symbol)
     until = cutoff if judge_until is None else min(cutoff, judge_until)
     if meta.mask is None:
-        mask = build_mask(read_unmasked(root, symbol, Timeframe.M15), until)
+        m15 = read_unmasked(root, symbol, Timeframe.M15)
+        mask = build_mask(m15, until, partial_days=partial_days)
     else:
         since = datetime.combine(meta.mask.judged_through, datetime.min.time(), UTC)
         mask = extend_mask(meta.mask, read_unmasked(root, symbol, Timeframe.M15, since), until)

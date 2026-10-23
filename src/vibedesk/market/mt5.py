@@ -8,7 +8,7 @@ It never imports the MetaTrader5 module. The caller hands in the API, the real o
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.grant import RESEARCH_START
@@ -22,6 +22,14 @@ class Mt5Error(RuntimeError):
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def recent_bars(api: Mt5Api, symbol: str, timeframe: Timeframe, now: datetime,
+                span: timedelta) -> tuple[int, int | None]:  # fmt: skip
+    """How many bars opened in the `span` before `now`, and the UTC open time of the last: what
+    `desk smoke` shows of the history. Counts and times only, so no price leaves `market/`."""
+    bars = Mt5BarSource(api, clock=lambda: now).fetch(symbol, timeframe, now - span, now)
+    return len(bars), (int(bars.time[-1]) if len(bars) else None)
 
 
 class Mt5BarSource:

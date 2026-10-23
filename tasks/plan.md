@@ -36,8 +36,8 @@ These are fixed before code, so no test is tuned after the fact.
   - **Round trip:** utc → server → utc is the identity for every minute of 2014–2026 outside server Sunday (amended at T1's merge, 2026-10-23). `server_offset` looks up one offset per UTC day, so on the first seven UTC hours of each switch Sunday it can't be inverted; those 10,920 minutes all fall on server Sunday, when no bar opens, and the tests pin them exactly.
   - **Structure (`check_clock`), on real data, per year:** every D1 bar opens at 17:00 New York; every H4 bar opens at a server hour divisible by 4; every M15 bar sits on the 15-minute UTC grid. These catch our own bugs (times shifted between MT5 and the cache). They can't catch XM's clock having been set differently: MT5 builds D1 and H4 bars on its own server clock, and the conversion maps server midnight to 17:00 New York by construction.
   - **XM's clock (added at T1's merge), on real data, per year:** a different past clock would show as:
-    - a bar opening on a server Saturday or Sunday (on a fixed GMT+2 clock, US summer weeks would open at server Sunday 23:00);
-    - a full trading week without exactly 5 D1 bars;
+    - a bar opening on a server Saturday or Sunday (on a fixed GMT+2 clock, the FX week, which opens at 17:00 New York, would open at server Sunday 23:00 in US summer);
+    - a server week with more than 5 D1 bars (that Sunday bar; amended at T5: a holiday makes a 4-bar week, so "exactly 5" would fail every real year);
     - GOLD's daily break (the server hour with no M15 bars on a normal weekday) moving between US summer and winter.
 
     A year that fails one of these blocks the checkpoint until it is explained and handled.
@@ -61,6 +61,7 @@ These are fixed before code, so no test is tuned after the fact.
 ### Data-quality mask (spec §4)
 - **First usable month:** the first calendar month in which the median count of M15 bars per server day reaches 50% of the symbol's median over the Research Window. Bars before it are excluded. GOLD is expected around mid-2014.
 - **Thin days:** a server day with fewer than 50% of that median M15 count is excluded from every timeframe of the symbol. Every server weekday from the first usable month on is judged, with or without bars: a weekday with no M15 bars counts 0, so it is masked, and its bars on other timeframes are never served unvetted (added after the independent review). The median and each month's median day count only days with bars.
+- **An import's first server day:** each timeframe's first chunk begins at a UTC midnight, two or three hours after its server day began, so the import holds only part of that day (on D1 and H4, not even its bar). The first import masks it whatever its count (added at T5).
 - **Frozen at first import:** the median comes from the Research Window only (2014–2024), and the mask is stored in `meta.json`. A refresh adds new days to the mask but never re-judges old ones, so a Trial's bars, and their fingerprint in the Ledger, stay the same.
 - **Where it applies:** `CachedBarSource` applies the mask on every read, so Trials and Holdouts see the same bars.
 

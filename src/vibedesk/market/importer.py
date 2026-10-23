@@ -29,11 +29,12 @@ the cutoff hides. Four guards keep a bad read out of what Trials see:
 A judged day is served on every timeframe at once, so a run that imports M15, and so judges, must
 import every timeframe in TIMEFRAMES: one it left out would find days judged without its bars,
 and every later import of it would be refused there. A refresh of some timeframes only leaves out
-M15, and judges nothing.
+M15, and judges nothing. For the same reason the first import masks the server day each
+timeframe's first chunk begins in: the chunk begins at a UTC midnight, hours into that day.
 
 `refresh` re-imports from the earlier of the chunk before the cutoff's and the chunk of the last
-import, through the cutoff's chunk. That covers a month or year that ended since the last import,
-and a refresh missed for a while.
+import, through the cutoff's chunk, but never before the first chunk the cache holds. That covers
+a month or year that ended since the last import, and a refresh missed for a while.
 
 One importer at a time, by a lock file under the cache. The report holds counts only, never a
 price, since the cache reaches into the Holdout (ADR 0002).
@@ -53,6 +54,7 @@ import numpy as np
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.cache import (
     CacheError,
+    first_cached,
     read_meta,
     read_unmasked,
     record_import,
@@ -183,6 +185,11 @@ def refresh(
         for timeframe in timeframes:
             current = _chunk_of(symbol, timeframe, cutoff)
             begin = min(_previous(current).start, _chunk_of(symbol, timeframe, last).start)
+            # Never before the first chunk the cache holds: the import chose where history
+            # starts, and a refresh doesn't fetch a year nobody asked for.
+            first = first_cached(root, symbol, timeframe)
+            if first is not None:
+                begin = max(begin, _chunk_of(symbol, timeframe, _utc(first)).start)
             chunks += _chunks(symbol, timeframe, begin, cutoff)
         plan[symbol] = chunks
     return _run(api, root, plan, timeframes, cutoff)
@@ -237,6 +244,7 @@ def _run(
                 )
             until = _symbol_cutoff(api, symbol, cutoff)
             mask = read_meta(root, symbol).mask if _has_meta(root, symbol) else None
+            partial = _partial_days(symbol_chunks) if mask is None else ()
             seen: set[Timeframe] = set()  # timeframes with bars in an earlier chunk
             last_m15: int | None = None  # the open time of the last closed M15 bar read
             for chunk in symbol_chunks:
@@ -254,7 +262,7 @@ def _run(
                 if len(bars) or _cached(root, chunk):
                     write_chunk(root, bars, chunk.year, chunk.month)
                 chunks.append(ChunkReport(chunk, len(bars), reads, flag))
-            symbols.append(_judge(root, symbol, until, timeframes, chunks, last_m15))
+            symbols.append(_judge(root, symbol, until, timeframes, chunks, last_m15, partial))
     return ImportReport(cutoff, tuple(chunks), tuple(symbols))
 
 
@@ -276,9 +284,10 @@ def _judge(
     timeframes: Sequence[Timeframe],
     chunks: list[ChunkReport],
     last_m15: int | None,
+    partial_days: Sequence[date],
 ) -> SymbolReport:
     """Judge the server days closed by the cutoff and before the day of the last M15 bar, if
-    this run makes that safe."""
+    this run makes that safe. A first import masks `partial_days` whatever their bars."""
     if not _has_meta(root, symbol):  # the terminal had no bars for it at all
         return SymbolReport(symbol, cutoff, None, judged=False)
     short = [c for c in chunks if c.chunk.symbol == symbol and c.flag]
@@ -293,7 +302,9 @@ def _judge(
     _refuse_lagging_history(symbol, cutoff, last_m15)
     try:
         # The last M15 bar's own day may still be filling, so it is judged by the next import.
-        meta = record_import(root, symbol, cutoff, judge_until=_utc(last_m15))
+        meta = record_import(
+            root, symbol, cutoff, judge_until=_utc(last_m15), partial_days=partial_days
+        )
     except ValueError as error:  # no M15 in the Research Window to judge days by
         raise ImportFailed(str(error)) from error
     return SymbolReport(symbol, cutoff, meta.mask.judged_through, judged=True)
@@ -454,6 +465,17 @@ def _cutoff(clock: Callable[[], datetime]) -> datetime:
 
 def _utc(epoch: int) -> datetime:
     return datetime.fromtimestamp(epoch, UTC)
+
+
+def _partial_days(chunks: Sequence[Chunk]) -> tuple[date, ...]:
+    """The server day each timeframe's first chunk begins in. A chunk begins at a UTC midnight
+    and a server day two or three hours before, so the import holds only part of that day (on
+    D1 and H4, not even its bar), and nothing it reads later may fill the rest in."""
+    firsts: dict[Timeframe, int] = {}
+    for chunk in chunks:
+        firsts.setdefault(chunk.timeframe, int(chunk.start.timestamp()))
+    days = np.unique(server_days(np.array(list(firsts.values()), dtype=np.int64)))
+    return tuple(_EPOCH + timedelta(days=int(day)) for day in days)
 
 
 @contextmanager

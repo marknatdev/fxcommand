@@ -23,7 +23,7 @@ from vibedesk.market.importer import (
     import_lock,
     refresh,
 )
-from vibedesk.market.server_time import server_offset
+from vibedesk.market.server_time import server_days, server_offset
 from vibedesk.market.synthetic import SyntheticBarSource
 
 ALL = (Timeframe.M1, Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1)
@@ -486,3 +486,43 @@ def test_bars_filled_onto_a_masked_holiday_later_change_nothing_served(source, t
     assert len(read_unmasked(tmp_path, "GOLD", Timeframe.M15, *day)) == 3  # cached ...
     assert not len(CachedBarSource(tmp_path).fetch("GOLD", Timeframe.M15, *day))  # never served
     assert holiday in read_meta(tmp_path, "GOLD").mask.masked_days
+
+
+def test_the_server_day_an_import_begins_in_is_masked(source, tmp_path):
+    # A server day begins at 22:00 UTC the evening before (in winter). So the 2024 chunks of M15,
+    # H1, H4 and D1 miss the start of server 1 January, D1's bar included, and February's M1 chunk
+    # misses the start of server 1 February. Served, those days would keep holes for good.
+    import_history(
+        FakeMt5(source, now=SATURDAY), tmp_path, symbols=("GOLD",), timeframes=ALL,
+        start=datetime(2024, 2, 1, tzinfo=UTC), clock=at(SATURDAY),
+    )  # fmt: skip
+    partial = [(day - date(1970, 1, 1)).days for day in (date(2024, 1, 1), date(2024, 2, 1))]
+    m15 = read_unmasked(tmp_path, "GOLD", Timeframe.M15)
+    assert np.isin(server_days(m15.time), partial).sum() > 50  # both days have bars cached
+
+    mask = read_meta(tmp_path, "GOLD").mask
+    assert {date(2024, 1, 1), date(2024, 2, 1)} <= set(mask.masked_days)
+    with Ledger(":memory:") as ledger:
+        market = MarketData(CachedBarSource(tmp_path), ledger)
+        for timeframe in ALL:
+            served = market.bars("GOLD", timeframe, START, SATURDAY).time
+            assert len(served) and not np.isin(server_days(served), partial).any(), timeframe
+    refresh(FakeMt5(source, now=SATURDAY), tmp_path, symbols=("GOLD",), timeframes=ALL,
+            clock=at(SATURDAY))  # fmt: skip
+    assert {date(2024, 1, 1), date(2024, 2, 1)} <= set(read_meta(tmp_path, "GOLD").mask.masked_days)
+
+
+def test_a_refresh_never_reaches_before_the_first_imported_chunk(source, tmp_path, monkeypatch):
+    # An import from 1 January 2024 holds none of 2023, and a refresh doesn't fetch a year of
+    # history nobody asked for: it starts no earlier than the first chunk the cache holds.
+    january = datetime(2024, 1, 1, tzinfo=UTC)
+    import_history(
+        FakeMt5(source, now=SATURDAY), tmp_path, symbols=("GOLD",), timeframes=ALL,
+        start=january, clock=at(SATURDAY),
+    )  # fmt: skip
+    written = spy_on_writes(monkeypatch)
+
+    refresh(FakeMt5(source, now=SATURDAY), tmp_path, symbols=("GOLD",), timeframes=ALL,
+            clock=at(SATURDAY))  # fmt: skip
+
+    assert {year for _, year, _ in written} == {2024}

@@ -22,6 +22,7 @@ the days that closed since. So a Trial's bars, and their fingerprint in the Ledg
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -74,11 +75,13 @@ class Mask:
         )
 
 
-def build_mask(m15: Bars, cutoff: datetime) -> Mask:
+def build_mask(m15: Bars, cutoff: datetime, *, partial_days: Sequence[date] = ()) -> Mask:
     """Judge every server weekday from the first usable month on, and every day of `m15` with
     bars, that closed by `cutoff`; and freeze the median.
 
     The median, and each month's median day, count only days with at least one bar.
+    `partial_days` are server days the import holds only part of, on some timeframe, because
+    it began after they did: they are masked whatever their count.
     """
     days, counts, cutoff_day = _closed_day_counts(m15, cutoff)
     research = (days >= _day_number(RESEARCH_START.date())) & (
@@ -95,11 +98,12 @@ def build_mask(m15: Bars, cutoff: datetime) -> Mask:
         raise ValueError(f"no month of {m15.symbol} reaches half its median M15 bars per day")
     first_month = usable[0].astype("datetime64[D]").item()
     judged, judged_counts = _judged_days(days, counts, _day_number(first_month), cutoff_day)
+    partial = np.isin(judged, [_day_number(day) for day in partial_days])
     return Mask(
         median=median,
         first_usable_month=first_month,
         judged_through=_date(cutoff_day - 1),
-        masked_days=tuple(_date(day) for day in judged[judged_counts < threshold]),
+        masked_days=tuple(_date(day) for day in judged[(judged_counts < threshold) | partial]),
     )
 
 
