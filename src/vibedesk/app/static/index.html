@@ -61,7 +61,11 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: r
 .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .dot.good { background: var(--good); } .dot.bad { background: var(--bad); }
 .hist .name { flex: 1; min-width: 0; font-size: 13.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.hist .meta { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+.hist { cursor: pointer; }
+.hist .del { display: inline-flex; visibility: hidden; border: 0; background: transparent; color: var(--faint); padding: 2px; border-radius: 6px; }
+.hist:hover .del, .hist.active .del, .hist:focus-within .del { visibility: visible; }
+.hist .del:hover { color: var(--bad); background: var(--line); }
+@media (hover: none) { .hist .del { visibility: visible; } }
 .side-empty { color: var(--faint); font-size: 13px; padding: 6px 12px; }
 .side-bottom { border-top: 1px solid var(--line); padding: 10px 10px 12px; display: flex; flex-direction: column; gap: 4px; }
 .status { display: flex; gap: 8px; align-items: center; font-size: 12.5px; color: var(--muted); padding: 2px 8px; }
@@ -193,7 +197,7 @@ dialog input, dialog select { width: 100%; font: inherit; padding: 9px 11px; bor
       <span class="plus"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span>
       New idea
     </button>
-    <div class="side-label">Past tests</div>
+    <div class="side-label">Recents</div>
     <nav id="history"><div class="side-empty">None yet.</div></nav>
     <div class="side-bottom">
       <div class="status" id="dataStatus"><span class="dot"></span><span>Data …</span></div>
@@ -274,8 +278,7 @@ dialog input, dialog select { width: 100%; font: inherit; padding: 9px 11px; bor
 <script>
 const $ = (id) => document.getElementById(id);
 const app = $("app");
-let history = [];  // the chat sent to the AI: {role, content}
-let lastIdea = "";
+let currentChat = null;  // the open chat's id; null until the first message of a new one
 let equityChart = null, yearChart = null;
 const results = {};  // test id -> summary, for reopening
 
@@ -294,12 +297,13 @@ const CHECK_NAMES = {
   top5_share: "Profit not from 5 lucky trades",
 };
 const ICON_STRATEGY = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 8-9"/><path d="M15 7h5v5"/></svg>';
-const ICON_CHART = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>';
+const ICON_TRASH = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>';
+const ICON_CHART ='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>';
 
 async function api(path, options = {}) {
   const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.detail || res.statusText);
+  if (!res.ok) { const error = new Error(body.detail || res.statusText); error.body = body; throw error; }
   return body;
 }
 const fmt = (v, d = 2) => v === null || v === undefined || Number.isNaN(v) ? "–" : Number(v).toFixed(d);
@@ -356,56 +360,84 @@ function specCard(spec, combos, msgDiv) {
       try { chosen = JSON.parse(editor.value); } catch (e) { addMsg("err", "That JSON doesn't parse: " + e.message); return; }
     }
     run.disabled = true; run.innerHTML = '<span class="spin"></span> Testing on real data…';
+    const chat = currentChat;
     try {
-      const r = await api("/api/trial", { method: "POST", body: JSON.stringify({ idea: lastIdea, spec: chosen }) });
+      const r = await api("/api/trial", { method: "POST", body: JSON.stringify({ chat_id: chat, spec: chosen }) });
       results[r.id] = r;
-      showResult(r);
-      loadHistory(r.id);
-      history.push({ role: "user", content: resultNote(r) });
-      const reply = addMsg("ai", `${r.label}. ${r.metrics.trades} trades on the blind years, net ${fmt(r.metrics.net_r, 1)} R, profit factor ${fmt(r.metrics.profit_factor)}. Tell me what to change, or describe a new idea.`);
-      const chip = document.createElement("button");
-      chip.className = "result-chip";
-      chip.innerHTML = `${ICON_CHART}<span>Open result #${r.id}</span>`;
-      chip.onclick = () => showResult(r);
-      reply.appendChild(document.createElement("br"));
-      reply.appendChild(chip);
-    } catch (e) { addMsg("err", e.message); }
+      if (chat === currentChat) {  // still looking at this chat
+        addResult({ trial_id: r.id, verdict: r.verdict, text: resultText(r) });
+        showResult(r);
+      }
+      loadChats();
+    } catch (e) { if (chat === currentChat) addMsg("err", e.message); }
     run.disabled = false; run.textContent = "Run test";
   };
   msgDiv.appendChild(card);
   scrollDown();
 }
 
+const resultText = (r) => `${r.label}. ${r.metrics.trades} trades on the blind years, net ${fmt(r.metrics.net_r, 1)} R, profit factor ${fmt(r.metrics.profit_factor)}. Tell me what to change, or describe a new idea.`;
+
+function addResult(m) {
+  const reply = addMsg("ai", m.text);
+  const chip = document.createElement("button");
+  chip.className = "result-chip";
+  chip.innerHTML = `${ICON_CHART}<span>Open result #${m.trial_id}</span>`;
+  chip.onclick = () => openResult(m.trial_id);
+  reply.appendChild(document.createElement("br"));
+  reply.appendChild(chip);
+}
+
+async function openResult(id) {
+  showResult(results[id] || (results[id] = await api("/api/trials/" + id)));
+}
+
 async function send() {
   const text = $("input").value.trim();
   if (!text || $("send").disabled) return;
   $("input").value = ""; grow();
-  lastIdea = history.length ? lastIdea + " / " + text : text;
-  if (!history.length) $("topTitle").textContent = text;
+  if (currentChat === null) $("topTitle").textContent = text;
   addMsg("user", text);
   const wait = thinking("Writing the strategy…");
   $("send").disabled = true;
   try {
-    const draft = await api("/api/draft", { method: "POST", body: JSON.stringify({ message: text, history }) });
-    history.push({ role: "user", content: text });
-    history.push({ role: "assistant", content: draft.explanation + "\n```json\n" + JSON.stringify(draft.spec) + "\n```" });
+    const draft = await api("/api/draft", { method: "POST", body: JSON.stringify({ message: text, chat_id: currentChat }) });
+    currentChat = draft.chat_id;
     wait.textContent = draft.explanation || "Here's the strategy.";
     specCard(draft.spec, draft.combinations, wait);
   } catch (e) {
+    if (e.body && e.body.chat_id) currentChat = e.body.chat_id;  // the chat was saved, with the error
     wait.className = "msg-ai err";
     wait.textContent = e.message;
   }
   $("send").disabled = false;
+  loadChats();
   scrollDown();
 }
 
-function resultNote(r) {
-  const m = r.metrics;
-  const failed = r.checks.filter((c) => statusOf(c) === "FAIL").map((c) => `${c.name} ${fmt(c.value)} (needs ${c.at_most ? "<=" : ">="} ${fmt(c.threshold)})`);
-  return `Test result of "${r.spec.name}": ${r.verdict}. Blind years ${r.years[0]}-${r.years[r.years.length - 1]}: ` +
-    `${m.trades} trades, net ${fmt(m.net_r, 1)} R, profit factor ${fmt(m.profit_factor)}, win rate ${fmt(m.win_rate * 100, 0)}%, ` +
-    `max drawdown ${fmt(m.max_drawdown_r, 1)} R. Net R per year: ${r.years.map((y, i) => `${y} ${fmt(r.year_net_r[i], 1)}`).join(", ")}. ` +
-    `Failed checks: ${failed.join("; ") || "none"}. If I ask for changes, build on this Spec.`;
+function renderChat(chat) {
+  $("chat").innerHTML = "";
+  $("topTitle").textContent = chat.title;
+  app.classList.toggle("empty", chat.messages.length === 0);
+  for (const m of chat.messages) {
+    if (m.role === "user") addMsg("user", m.text);
+    else if (m.role === "assistant") specCard(m.spec, m.combinations, addMsg("ai", m.text || "Here's the strategy."));
+    else if (m.role === "result") addResult(m);
+    else if (m.role === "error") addMsg("err", m.text);
+  }
+  scrollDown();
+}
+
+async function openChat(id) {
+  let chat;
+  try { chat = await api("/api/chats/" + id); } catch (e) { loadChats(); return; }
+  currentChat = chat.id;
+  renderChat(chat);
+  markActive();
+  const last = [...chat.messages].reverse().find((m) => m.role === "result");
+  if (last && !narrow()) await openResult(last.trial_id);
+  else closePanel();
+  if (narrow()) app.classList.add("side-closed");
 }
 
 const kpi = (label, v, d = 2, unit = "") => `<div class="kpi"><small>${label}</small><div>${fmt(v, d)}${unit}</div></div>`;
@@ -441,7 +473,6 @@ function showResult(r) {
   $("panel").classList.remove("hidden");
   if (window.innerWidth < 1280) app.classList.add("side-closed");  // give the chat room beside the panel
   $("result").scrollTop = 0;
-  document.querySelectorAll(".hist").forEach((el) => el.classList.toggle("active", Number(el.dataset.id) === r.id));
   drawCharts(r);
 }
 
@@ -467,20 +498,33 @@ function drawCharts(r) {
   });
 }
 
-async function loadHistory(activeId) {
-  const rows = await api("/api/trials");
-  if (!rows.length) { $("history").innerHTML = '<div class="side-empty">None yet.</div>'; return; }
-  $("history").innerHTML = rows.map((r) => `<button class="hist${r.id === activeId ? " active" : ""}" data-id="${r.id}" title="${esc(r.idea)}">
-    <span class="dot ${r.verdict === "CANDIDATE" ? "good" : "bad"}"></span>
-    <span class="name">${esc(r.name)}</span><span class="meta">${r.symbol} ${r.timeframe}</span></button>`).join("");
+async function loadChats() {
+  const rows = await api("/api/chats");
+  if (!rows.length) { $("history").innerHTML = '<div class="side-empty">No chats yet.</div>'; return; }
+  $("history").innerHTML = rows.map((c) => `<div class="hist" data-id="${c.id}" role="button" tabindex="0" title="${esc(c.title)}">
+    <span class="dot ${c.verdict ? (c.verdict === "CANDIDATE" ? "good" : "bad") : ""}"></span>
+    <span class="name">${esc(c.title)}</span>
+    <button class="del" title="Delete chat" aria-label="Delete chat">${ICON_TRASH}</button></div>`).join("");
   document.querySelectorAll(".hist").forEach((el) => {
-    el.onclick = async () => {
-      const id = Number(el.dataset.id);
-      showResult(results[id] || (results[id] = await api("/api/trials/" + id)));
-      if (narrow()) app.classList.add("side-closed");
+    const id = Number(el.dataset.id);
+    el.onclick = () => openChat(id);
+    el.onkeydown = (e) => { if (e.key === "Enter") openChat(id); };
+    el.querySelector(".del").onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm("Delete this chat? Its tests stay in the Ledger.")) return;
+      await api("/api/chats/" + id, { method: "DELETE" });
+      if (id === currentChat) newIdea();
+      loadChats();
     };
   });
+  markActive();
 }
+
+function markActive() {
+  document.querySelectorAll(".hist").forEach((el) => el.classList.toggle("active", Number(el.dataset.id) === currentChat));
+}
+
+function closePanel() { $("panel").classList.add("hidden"); }
 
 async function loadStatus() {
   const st = await api("/api/status");
@@ -512,11 +556,11 @@ async function openSettings() {
 }
 
 function newIdea() {
-  history = []; lastIdea = "";
+  currentChat = null;
   $("chat").innerHTML = ""; $("topTitle").textContent = "";
   app.classList.add("empty");
-  $("panel").classList.add("hidden");
-  document.querySelectorAll(".hist").forEach((el) => el.classList.remove("active"));
+  closePanel();
+  markActive();
   if (narrow()) app.classList.add("side-closed");
   $("input").focus();
 }
@@ -530,7 +574,7 @@ $("newIdea").onclick = newIdea;
 $("openSidebar").onclick = () => app.classList.remove("side-closed");
 $("closeSidebar").onclick = () => app.classList.add("side-closed");
 $("scrim").onclick = () => app.classList.add("side-closed");
-$("closePanel").onclick = () => { $("panel").classList.add("hidden"); document.querySelectorAll(".hist").forEach((el) => el.classList.remove("active")); };
+$("closePanel").onclick = closePanel;
 $("settingsBtn").onclick = openSettings;
 $("saveSettings").onclick = async (e) => {
   e.preventDefault();
@@ -558,7 +602,7 @@ const hour = new Date().getHours();
 $("greeting").textContent = (hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening") + ". What's the idea?";
 if (!narrow()) app.classList.remove("side-closed");
 loadStatus().then((st) => { if (!st.settings.llm_key_set) openSettings(); });
-loadHistory();
+loadChats();
 </script>
 </body>
 </html>

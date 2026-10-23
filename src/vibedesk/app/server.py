@@ -8,10 +8,11 @@ import webbrowser
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from vibedesk.app import settings as config
+from vibedesk.app.chats import ChatNotFound, Chats, ai_history, result_message
 from vibedesk.app.desk import Desk
 from vibedesk.app.llm import Llm, LlmError, OmniRoute
 from vibedesk.app.research import DraftFailed, draft_spec
@@ -24,12 +25,13 @@ PORT = 8765
 
 class DraftIn(BaseModel):
     message: str
-    history: list[dict] = []
+    chat_id: int | None = None  # None starts a new chat
 
 
 class TrialIn(BaseModel):
-    idea: str = ""
     spec: dict
+    chat_id: int | None = None
+    idea: str = ""
 
 
 class SettingsIn(BaseModel):
@@ -44,6 +46,8 @@ def create_app(root: Path = config.DATA, llm: Llm | None = None, db: Path | None
     (`db`) and settings (`settings_root`) apart from the real ones."""
     app = FastAPI(title="Vibe Desk")
     desk = Desk(root, db)
+    chats = Chats((Path(db).parent if db else Path(root)) / "chats.db")
+    restore_old_trials(desk, chats)
     settings_root = settings_root or root
     state = {"settings": config.load(settings_root)}
 
@@ -81,27 +85,61 @@ def create_app(root: Path = config.DATA, llm: Llm | None = None, db: Path | None
         config.save(s, settings_root)
         return s.public()
 
+    @app.get("/api/chats")
+    def list_chats():
+        return chats.list()
+
+    @app.get("/api/chats/{chat_id}")
+    def get_chat(chat_id: int):
+        try:
+            return chats.get(chat_id)
+        except ChatNotFound as error:
+            raise HTTPException(404, str(error)) from error
+
+    @app.delete("/api/chats/{chat_id}")
+    def delete_chat(chat_id: int):
+        chats.delete(chat_id)
+        return {"deleted": chat_id}
+
     @app.post("/api/draft")
     def draft(body: DraftIn):
         if not body.message.strip():
             raise HTTPException(400, "say what the idea is")
+        chat_id = body.chat_id or chats.create(body.message)
         try:
-            result = draft_spec(current_llm(), body.message, body.history)
+            history = ai_history(chats.get(chat_id)["messages"])
+        except ChatNotFound as error:
+            raise HTTPException(404, str(error)) from error
+        user = {"role": "user", "text": body.message}
+        try:
+            result = draft_spec(current_llm(), body.message, history)
         except DraftFailed as error:
-            raise HTTPException(502, str(error)) from error
-        return {"spec": result.spec, "explanation": result.explanation,
+            chats.append(chat_id, user, {"role": "error", "text": str(error)})
+            return JSONResponse({"detail": str(error), "chat_id": chat_id}, status_code=502)
+        answer = {"role": "assistant", "text": result.explanation, "spec": result.spec,
+                  "combinations": result.combinations}  # fmt: skip
+        chats.append(chat_id, user, answer)
+        return {"chat_id": chat_id, "spec": result.spec, "explanation": result.explanation,
                 "combinations": result.combinations, "attempts": result.attempts}  # fmt: skip
 
     @app.post("/api/trial")
     def trial(body: TrialIn):
+        idea = body.idea
+        if body.chat_id and not idea:
+            idea = chats.get(body.chat_id)["title"]
         try:
-            return desk.run(body.idea, body.spec)
-        except SpecInvalid as error:
-            raise HTTPException(400, f"the Spec is not valid: {error}") from error
-        except CostError as error:
-            raise HTTPException(409, f"{error}. Press Update data first.") from error
-        except ValueError as error:
-            raise HTTPException(409, str(error)) from error
+            summary = desk.run(idea, body.spec)
+        except (SpecInvalid, CostError, ValueError) as error:
+            status, text = {
+                SpecInvalid: (400, f"the Spec is not valid: {error}"),
+                CostError: (409, f"{error}. Press Update data first."),
+            }.get(type(error), (409, str(error)))
+            if body.chat_id:
+                chats.append(body.chat_id, {"role": "error", "text": text})
+            raise HTTPException(status, text) from error
+        if body.chat_id:
+            chats.append(body.chat_id, result_message(summary))
+        return summary
 
     @app.get("/api/trials")
     def trials():
@@ -119,6 +157,24 @@ def create_app(root: Path = config.DATA, llm: Llm | None = None, db: Path | None
         return {"started": desk.update.start(), **desk.update.state()}
 
     return app
+
+
+def restore_old_trials(desk: Desk, chats: Chats) -> None:
+    """Give every test run before chats were saved a chat of its own, so it can be opened and
+    carried on like any other."""
+    known = chats.trial_ids()
+    for row in reversed(desk.history(limit=1000)):  # oldest first
+        if row["id"] in known:
+            continue
+        summary = desk.trial(row["id"])
+        chat_id = chats.create(row["idea"] or row["name"])
+        chats.append(
+            chat_id,
+            {"role": "user", "text": row["idea"] or row["name"]},
+            {"role": "assistant", "text": "Restored from a test run before chats were saved.",
+             "spec": summary["spec"], "combinations": summary["combinations"]},
+            result_message(summary),
+        )  # fmt: skip
 
 
 def main() -> None:

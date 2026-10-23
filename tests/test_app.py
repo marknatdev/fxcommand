@@ -2,13 +2,15 @@
 A scripted AI stands in for OmniRoute; nothing here reaches the network or MT5."""
 
 import json
+import shutil
+import subprocess
 from datetime import UTC, date, datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
 from vibedesk.app.research import EXAMPLE, DraftFailed, draft_spec, split_reply, system_prompt
-from vibedesk.app.server import create_app
+from vibedesk.app.server import STATIC, create_app
 from vibedesk.blocks.registry import LIBRARY
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.cache import record_import, write_chunk
@@ -66,6 +68,18 @@ def test_a_test_result_and_the_next_request_reach_the_ai_as_one_turn():
     roles = [m["role"] for m in llm.calls[0]]
     assert roles == ["system", "user", "assistant", "user"]
     assert llm.calls[0][-1]["content"] == "Test result: REJECT, 12 trades.\n\nmake it trade more"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to parse the page's script")
+def test_the_pages_script_parses(tmp_path):
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    script = html.split("<script>\n", 1)[1].split("</script>", 1)[0]
+    (tmp_path / "page.js").write_text(script, encoding="utf-8")
+
+    check = subprocess.run(["node", "--check", str(tmp_path / "page.js")], capture_output=True,
+                           text=True)  # fmt: skip
+
+    assert check.returncode == 0, check.stderr
 
 
 def test_the_prompt_lists_every_block():
@@ -132,6 +146,51 @@ def synthetic_cache(root):
                                       -50.0, 10.0, 3))  # fmt: skip
 
 
+def test_a_chat_is_saved_and_carried_on_with_its_history(client):
+    first = client.post("/api/draft", json={"message": "GOLD breakouts"}).json()
+    chats = client.get("/api/chats").json()
+
+    assert [c["title"] for c in chats] == ["GOLD breakouts"] and chats[0]["id"] == first["chat_id"]
+    chat = client.get(f"/api/chats/{first['chat_id']}").json()
+    assert [m["role"] for m in chat["messages"]] == ["user", "assistant"]
+    assert chat["messages"][1]["spec"]["symbol"] == "GOLD"
+
+
+def test_a_second_message_reaches_the_ai_with_the_chat_so_far(tmp_path):
+    llm = ScriptedLlm(reply(EXAMPLE), reply(EXAMPLE, "Now with a 3R target."))
+    client = TestClient(create_app(tmp_path / "data", llm=llm, settings_root=tmp_path / "s"))
+    chat_id = client.post("/api/draft", json={"message": "GOLD breakouts"}).json()["chat_id"]
+
+    second = client.post("/api/draft", json={"message": "use a 3R target", "chat_id": chat_id})
+
+    assert second.json()["chat_id"] == chat_id
+    sent = llm.calls[1]
+    assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
+    assert sent[1]["content"] == "GOLD breakouts" and sent[-1]["content"] == "use a 3R target"
+    assert len(client.get("/api/chats").json()) == 1
+
+
+def test_a_failed_draft_keeps_the_message_and_the_error_in_the_chat(tmp_path):
+    llm = ScriptedLlm("no json", "no json", "no json")
+    client = TestClient(create_app(tmp_path / "data", llm=llm, settings_root=tmp_path / "s"))
+
+    response = client.post("/api/draft", json={"message": "trade the moon"})
+
+    assert response.status_code == 502
+    assert "couldn't write a valid Spec" in response.json()["detail"]
+    chat = client.get(f"/api/chats/{response.json()['chat_id']}").json()
+    assert [m["role"] for m in chat["messages"]] == ["user", "error"]
+
+
+def test_a_deleted_chat_is_gone(client):
+    chat_id = client.post("/api/draft", json={"message": "GOLD breakouts"}).json()["chat_id"]
+
+    client.delete(f"/api/chats/{chat_id}")
+
+    assert client.get("/api/chats").json() == []
+    assert client.get(f"/api/chats/{chat_id}").status_code == 404
+
+
 def test_a_trial_runs_end_to_end_and_shows_in_the_history(tmp_path):
     root = tmp_path / "data"
     synthetic_cache(root)
@@ -150,3 +209,34 @@ def test_a_trial_runs_end_to_end_and_shows_in_the_history(tmp_path):
     assert client.get(f"/api/trials/{row['id']}").json()["metrics"] == result["metrics"]
     status = {d["symbol"]: d for d in client.get("/api/status").json()["data"]}
     assert status["GOLD"]["imported"] and status["GOLD"]["spread_floor"] == 30.0
+
+    # A test run outside any chat gets a chat of its own the next time the app starts.
+    again = TestClient(create_app(root, llm=ScriptedLlm(), settings_root=tmp_path / "s"))
+    [restored] = again.get("/api/chats").json()
+    chat = again.get(f"/api/chats/{restored['id']}").json()
+    assert [m["role"] for m in chat["messages"]] == ["user", "assistant", "result"]
+    assert chat["messages"][2]["trial_id"] == result["id"]
+    assert restored["verdict"] == result["verdict"]
+
+
+def test_a_test_in_a_chat_is_saved_there_and_told_to_the_ai(tmp_path):
+    root = tmp_path / "data"
+    synthetic_cache(root)
+    llm = ScriptedLlm(reply(EXAMPLE), reply(EXAMPLE, "Tighter stop."))
+    client = TestClient(create_app(root, llm=llm, settings_root=tmp_path / "s"))
+    draft = client.post("/api/draft", json={"message": "GOLD breakouts"}).json()
+    spec = {**draft["spec"], "filters": [], "exit": {"stop": {"block": "atr_stop", "params": {}}}}
+
+    result = client.post("/api/trial", json={"chat_id": draft["chat_id"], "spec": spec}).json()
+    client.post("/api/draft", json={"message": "tighter stop", "chat_id": draft["chat_id"]})
+
+    chat = client.get(f"/api/chats/{draft['chat_id']}").json()
+    assert [m["role"] for m in chat["messages"]] == ["user", "assistant", "result", "user",
+                                                       "assistant"]  # fmt: skip
+    assert chat["messages"][2]["trial_id"] == result["id"]
+    assert client.get("/api/chats").json()[0]["verdict"] == result["verdict"]
+    told = llm.calls[1][-1]["content"]
+    assert told.startswith(f'Test result of "{spec["name"]}"') and told.endswith("tighter stop")
+    # Reopening the app doesn't restore it again: it already has its chat.
+    again = TestClient(create_app(root, llm=ScriptedLlm(), settings_root=tmp_path / "s"))
+    assert len(again.get("/api/chats").json()) == 1
