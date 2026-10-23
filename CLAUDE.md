@@ -40,5 +40,9 @@ uv run desk                               # read-only market commands (M3 T5)
 
 - The owner approves each checkpoint and each commit; commit messages end with the `Co-Authored-By` line. Don't push.
 - Plans and results go in `tasks/`; the owner reviews at each checkpoint.
+- **Keep the Vibe Kanban board in step (owner's rule).** Whenever a task, checkpoint, decision or issue starts, finishes or changes, or a new one is planned, update the Fxcommand board through the `vibe_kanban` MCP in the same turn, after `tasks/` is updated:
+  - **Where:** project "Fxcommand" (`0f530a08-1bad-4dbd-ad53-b2452e8c7e07`). Find an issue by its title prefix: `Roadmap · Layer A · M4 …` for epics, `M3 · T5 …` for tasks, `Issue · …`, `Decision · …`, `Chore · …`.
+  - **What:** set its status (Backlog, To do, In progress, In review, Done, Cancelled); tick its acceptance checklist in the description and add the result commit; add new tasks as sub-issues of their milestone epic with the same title style and tags (feature, enhancement, documentation, bug); link blockers with a `blocking` relationship.
+  - `tasks/` stays the source of truth; the board follows it. If the MCP is unreachable, say so and catch the board up next turn.
 - Parallel work runs in worktrees with explicit file ownership; the shared contract is committed first.
 - Times are UTC epoch seconds; the XM server clock is New York + 7 h (`market/server_time.py`).
