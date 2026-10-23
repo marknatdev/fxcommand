@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import test_baseline as tb
 
+from vibedesk.blocks.indicators import atr
 from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.engine.simulate import TRADE_DTYPE
 from vibedesk.gauntlet.prosecutor import (
@@ -152,6 +153,33 @@ def test_regimes_with_too_few_trades_are_na():
     checks = regimes(trades([1.0, -1.0] * 30, entry_idx=entry), regime_bars())
 
     assert [c.status for c in checks] == [NA, NA, NA]
+
+
+def test_regimes_read_atr_at_the_signal_bar_not_the_entry_bar():
+    # 90 trades 100 bars apart on bars whose range grows from 0.2 to 2.0 with time, so by the
+    # signal bar the first 30 are quiet (win, PF 4.0), the next 30 normal (PF 1.0) and the last
+    # 30 busy (PF 0.4). Each of the first 30 enters on a bar 40 wide: ATR(14) there is at
+    # least 0.2 * 13/14 + 40/14 = 3.0, above the busiest signal bar's 2.0. Read at the entry bar
+    # they would be busy and the others would slide down a third: PFs 1.0, 0.4 and 4.0.
+    # 100 bars later only 40/14 * (13/14)**99 = 0.002 of a wide bar is left in the ATR.
+    entry = 100 + 100 * np.arange(90)
+    n = entry[-1] + 100
+    close = np.full(n, 100.0)
+    half = np.linspace(0.1, 1.0, n)
+    half[entry[:30]] = 20.0
+    bars = Bars(symbol="GOLD", timeframe=Timeframe.M15, point=0.01, digits=2,
+                time=900 * np.arange(n), open=close, high=close + half, low=close - half,
+                close=close, spread=np.zeros(n))  # fmt: skip
+    r = wins_and_losses(20, 10) + wins_and_losses(10, 20) + wins_and_losses(5, 25)
+    level = atr(bars.high, bars.low, bars.close, 14) / bars.close
+    assert level[entry[:30]].min() > level[entry[60:] - 1].max()  # the two readings differ
+
+    quiet, normal, busy = regimes(trades(r, entry_idx=entry), bars)
+
+    assert (quiet.status, quiet.value, quiet.note) == (PASS, 4.0, "30 trades")
+    assert (normal.status, normal.value, normal.note) == (PASS, 1.0, "30 trades")
+    assert (busy.status, busy.note) == (FAIL, "30 trades")
+    assert busy.value == pytest.approx(10 / 25)
 
 
 def test_prosecute_on_a_walk_forward():

@@ -8,12 +8,13 @@ Every bar spread is 5 points (below the floor) except bar 7, which is 30 points.
 Spec: donchian_breakout(period=3), atr_stop(period=3, mult=1.0), r_target(r=2.0), both sides.
 """
 
+import numpy as np
 import pytest
 
 from vibedesk.blocks.compile import compile_signals
 from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.engine.costs import CostSnapshot
-from vibedesk.engine.simulate import ExitReason, simulate
+from vibedesk.engine.simulate import ExitReason, Signals, simulate
 from vibedesk.market.bars import Bars, Timeframe
 
 QUIET = (103.5, 104.5, 102.5, 103.5)
@@ -125,3 +126,64 @@ def test_trade_matches_the_hand_calculation(trades, bars, number):
         assert actual[field] == pytest.approx(value, abs=1e-9), field
     assert actual["entry_time"] == bars.time[expected["entry_idx"]]
     assert actual["exit_time"] == bars.time[expected["exit_idx"]]
+
+
+# A bar that opens exactly on a level ---------------------------------------------------------
+#
+# Three bars: a signal at bar 0's close, the entry at bar 1's open, the exit on bar 2. The stop
+# is 2.00 and the target 4.00 from the fill. Prices here are exact in binary floating point, so
+# the open really equals the level: Spread Floor 50 points (0.50) and slippage 25 points (0.25)
+# per side; every bar spread is 5 points, below the floor. Long entry: 100.00 + 0.50 + 0.25 =
+# 100.75, stop 98.75, target 104.75. Short entry: 100.00 - 0.25 = 99.75, stop 101.75 and
+# target 95.75, both on the ask. Bar 1 stays inside both levels on either side.
+EXACT_COST = CostSnapshot(point=0.01, spread_floor_points=50, slippage_points=25)
+SIGNAL_BAR = (100.0, 101.0, 99.0, 100.0)
+ENTRY_BAR = (100.0, 100.5, 99.5, 100.0)
+AT_OPEN = {
+    # Long, bid opens on the stop 98.75: a gap exit at that open, 98.75 - 0.25 = 98.50.
+    # R = (98.50 - 100.75) / 2 = -1.125. Read as a touch inside the bar, the fill is the same.
+    "long opens on the stop": (1, (98.75, 99.0, 98.0, 98.5), ExitReason.STOP_GAP, 98.5, -1.125),
+    # Long, bid opens on the target 104.75 and later falls through the stop: the open is
+    # checked first, so the target fills: 104.75 - 0.25 = 104.50. R = 3.75 / 2 = 1.875.
+    "long opens on the target": (1, (104.75, 105.0, 98.5, 99.0), ExitReason.TARGET, 104.5, 1.875),
+    # Short, ask opens on the stop: bid 101.25 + 0.50 = 101.75. Exit 101.75 + 0.25 = 102.00.
+    # R = (99.75 - 102.00) / 2 = -1.125. Read as a touch inside the bar, the fill is the same.
+    "short opens on the stop": (-1, (101.25, 102.0, 101.0, 101.5), ExitReason.STOP_GAP, 102.0,
+                                -1.125),
+    # Short, ask opens on the target: bid 95.25 + 0.50 = 95.75, and the ask high 101.50 + 0.50
+    # later reaches the stop. The open is checked first: exit 95.75 + 0.25 = 96.00.
+    # R = (99.75 - 96.00) / 2 = 1.875.
+    "short opens on the target": (-1, (95.25, 101.5, 95.0, 101.0), ExitReason.TARGET, 96.0,
+                                  1.875),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("case", AT_OPEN)
+def test_a_bar_that_opens_exactly_on_a_level_exits_at_the_open(case):
+    side, exit_bar, reason, fill, r = AT_OPEN[case]
+    o, h, low, c = zip(SIGNAL_BAR, ENTRY_BAR, exit_bar, strict=True)
+    bars = Bars(
+        symbol="GOLD",
+        timeframe=Timeframe.M15,
+        point=0.01,
+        digits=2,
+        time=[1704067200 + 900 * i for i in range(3)],
+        open=o,
+        high=h,
+        low=low,
+        close=c,
+        spread=[5] * 3,
+    )
+    signals = Signals(
+        long_entry=np.array([side == 1, False, False]),
+        short_entry=np.array([side == -1, False, False]),
+        stop_dist=np.full(3, 2.0),
+        target_dist=np.full(3, 4.0),
+    )
+
+    [trade] = simulate(bars, signals, EXACT_COST).as_dicts()
+
+    # Exact equality throughout: every price above is a multiple of 0.25.
+    assert (trade["entry_idx"], trade["exit_idx"]) == (1, 2)
+    assert trade["entry_price"] == (100.75 if side == 1 else 99.75)
+    assert (trade["exit_reason"], trade["exit_price"], trade["r"]) == (reason, fill, r)

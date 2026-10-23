@@ -1,6 +1,8 @@
 """T7: the Coin-Flip Baseline matches the strategy's counts, hours and sides, without bias."""
 
+from dataclasses import replace
 from datetime import date
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -144,6 +146,20 @@ def test_percentile_and_p95(wf):
     assert baseline.strategy_net_r == wf.metrics.net_r
     assert baseline.percentile == pytest.approx(below + ties / 2)
     assert baseline.p95 == pytest.approx(np.percentile(baseline.net_r, 95))
+
+
+def test_a_run_that_ties_the_strategy_counts_half(wf):
+    # Random runs rarely tie a real net R, so the strategy is set to the 100th smallest of 200
+    # distinct runs: 99 runs below and 1 tie give (99 + 0.5) / 200 = 0.4975. Counting the tie
+    # as beaten would give 100 / 200 = 0.5. The same seed draws the same runs again.
+    runs = coin_flip_baseline(wf, seed=2, runs=200).net_r
+    assert len(np.unique(runs)) == 200
+    tied = replace(wf, metrics=SimpleNamespace(net_r=float(np.sort(runs)[99])))
+
+    baseline = coin_flip_baseline(tied, seed=2, runs=200)
+
+    assert baseline.net_r.tolist() == runs.tolist()
+    assert baseline.percentile == pytest.approx(0.4975, abs=1e-12)
 
 
 def test_years_without_strategy_trades_draw_nothing(wf):
