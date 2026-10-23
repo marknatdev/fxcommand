@@ -84,6 +84,7 @@ def run_case(
 
 
 def random_case(seed: int):
+    # Also fixed inputs of tests/test_rules_version.py: a change here needs a re-pin there.
     rng = np.random.default_rng(seed)
     return dict(
         seed=seed,
@@ -242,7 +243,10 @@ def test_stress_lowers_total_r_across_many_cases():
 
 
 def reversal_case(seed):
-    """ma_cross with an opposite-signal exit: every cross both closes and reverses."""
+    """ma_cross with an opposite-signal exit: every cross both closes and reverses.
+
+    Also fixed inputs of tests/test_rules_version.py: a change here needs a re-pin there.
+    """
     rng = np.random.default_rng(seed)
     bars = synthetic_bars(seed % 7, str(rng.choice(["GOLD", "EURUSD"])), Timeframe.M15)
     fast = int(rng.integers(3, 12))

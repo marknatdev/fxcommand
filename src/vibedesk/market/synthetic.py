@@ -70,7 +70,11 @@ _INTRADAY = _INTRADAY / _INTRADAY.mean()
 
 
 class SyntheticBarSource:
-    """A BarSource over a fixed date range; identical seeds give identical bars."""
+    """A BarSource over a fixed date range; identical seeds give identical bars.
+
+    tests/test_rules_version.py pins the bytes of bars made here (`inputs:bars`). A change that
+    alters them needs a re-pin there, in a commit of its own, but no rules bump.
+    """
 
     def __init__(
         self, seed: int, start: date, end: date, config: SyntheticConfig | None = None

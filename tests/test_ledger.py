@@ -26,6 +26,7 @@ from vibedesk.ledger import (
 from vibedesk.ledger.store import MIGRATIONS
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.grant import HoldoutGrant
+from vibedesk.rules import RULES_VERSION
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -70,6 +71,7 @@ def record(ledger, hypothesis_id, sharpes=None, verdict="REJECT"):
         closest_miss=MISS if verdict == "REJECT" else None,
         cost=COST,
         bars=make_bars(hypothesis.symbol),
+        rules_version=RULES_VERSION,
         result_json='{"folds": [], "checks": []}',
     )
 
@@ -219,6 +221,43 @@ def test_migrations_run_once(path):
     assert version == len(MIGRATIONS)
 
 
+def test_trials_from_before_rules_versions_survive_migration_2(path):
+    # A Ledger made by migration 1 alone, holding one Trial, opened by today's code: the Trial
+    # is kept as it was, with no rules version, and every new Trial must name one.
+    old = sqlite3.connect(path)
+    old.executescript(f"BEGIN;\n{MIGRATIONS[0]}\nPRAGMA user_version = 1;\nCOMMIT;")
+    bars = BarsFingerprint.of(make_bars())
+    old.execute("INSERT INTO families (idea) VALUES ('London breakout on gold')")
+    old.execute(
+        "INSERT INTO hypotheses (family_id, spec_json, entry_block, symbol, timeframe)"
+        " VALUES (1, ?, 'donchian_breakout', 'GOLD', 'M15')",
+        (validate(make_spec()).model_dump_json(),),
+    )
+    old.execute(
+        "INSERT INTO trials (hypothesis_id, verdict, cost_json, bars_count, bars_first,"
+        " bars_last, bars_sha256, result_json) VALUES (1, 'CANDIDATE', ?, ?, ?, ?, ?, '{}')",
+        (COST.to_json(), bars.count, bars.first_time, bars.last_time, bars.sha256),
+    )
+    old.commit()
+    old.close()
+
+    with Ledger(path) as ledger:
+        [legacy] = ledger.trials_for(1)
+        new = ledger.trial(record(ledger, 1))
+        raw = sqlite3.connect(path)
+        with pytest.raises(sqlite3.IntegrityError, match="names the rules version"):
+            raw.execute(
+                "INSERT INTO trials (hypothesis_id, verdict, closest_miss_json, cost_json,"
+                " bars_count, bars_first, bars_last, bars_sha256, result_json)"
+                " SELECT hypothesis_id, verdict, closest_miss_json, cost_json, bars_count,"
+                " bars_first, bars_last, bars_sha256, result_json FROM trials WHERE id = 2"
+            )
+        raw.close()
+
+    assert (legacy.verdict, legacy.rules_version) == ("CANDIDATE", None)
+    assert new.rules_version == RULES_VERSION
+
+
 def test_a_newer_ledger_is_refused(path):
     connection = sqlite3.connect(path)
     connection.execute(f"PRAGMA user_version = {len(MIGRATIONS) + 1}")
@@ -353,9 +392,14 @@ def test_an_incomplete_or_inconsistent_trial_is_refused(ledger):
         "closest_miss": MISS,
         "cost": COST,
         "bars": make_bars(),
+        "rules_version": RULES_VERSION,
         "result_json": "{}",
     }
     bad = [
+        ("rules version", {"rules_version": 0}),
+        ("rules version", {"rules_version": None}),
+        ("rules version", {"rules_version": True}),
+        ("rules version", {"rules_version": 1.0}),
         ("whole grid", {"combinations": [(c, 0.1) for c in grid[:2]]}),
         ("whole grid", {"combinations": [(grid[0], 0.1), (grid[0], 0.2), (grid[1], 0.3)]}),
         ("finite", {"combinations": [(grid[0], float("nan"))] + [(c, 0.1) for c in grid[1:]]}),

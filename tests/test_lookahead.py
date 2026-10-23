@@ -18,6 +18,7 @@ from vibedesk.blocks.registry import LIBRARY, Kind
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.synthetic import SyntheticBarSource
 
+# Also fixed inputs of tests/test_rules_version.py: a change here needs a re-pin there.
 PARAMS = {
     "donchian_breakout": [{"period": 5}, {"period": 40}],
     "ma_cross": [{"fast": 3, "slow": 8}, {"fast": 10, "slow": 50, "type": "ema"}],

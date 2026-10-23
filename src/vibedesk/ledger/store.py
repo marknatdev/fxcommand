@@ -148,6 +148,15 @@ MIGRATIONS: tuple[str, ...] = (
     );
     """
     + _append_only(*_TABLES),
+    # 2: the trade rules each Trial was judged under (vibedesk.rules). Trials recorded before
+    # this have NULL, which no Holdout accepts; every later Trial must name its version.
+    """
+    ALTER TABLE trials ADD COLUMN rules_version INTEGER CHECK (rules_version > 0);
+
+    CREATE TRIGGER trials_name_their_rules BEFORE INSERT ON trials
+    WHEN NEW.rules_version IS NULL
+    BEGIN SELECT RAISE(ABORT, 'a Trial names the rules version it ran under'); END;
+    """,
 )
 
 
@@ -244,6 +253,7 @@ class TrialRecord:
     combinations: tuple[tuple[str, float], ...]  # (Combination label, blind-year Sharpe)
     cost: CostSnapshot
     bars: BarsFingerprint
+    rules_version: int | None  # None for a Trial recorded before rules were versioned
     result_json: str
     created_at: str
 
@@ -346,6 +356,7 @@ class Ledger:
         closest_miss: Mapping[str, Any] | None,
         cost: CostSnapshot,
         bars: Bars,
+        rules_version: int,
         result_json: str,
     ) -> int:
         """Record one Trial of a Hypothesis, complete at write time; returns the Trial id.
@@ -356,6 +367,7 @@ class Ledger:
           a CANDIDATE passes None.
         - `cost`: the CostSnapshot the Trial ran with.
         - `bars`: the Research-Window bars; only their BarsFingerprint is stored.
+        - `rules_version`: the trade rules the Trial ran under (vibedesk.rules).
         - `result_json`: the full Gauntlet result, which every Verdict Card figure comes from.
 
         Raises BudgetExhausted once the family has run as many Trials as its budget allows.
@@ -364,6 +376,8 @@ class Ledger:
             raise ValueError(f"a Trial's verdict is one of {TRIAL_VERDICTS}, not {verdict!r}")
         if (verdict == "REJECT") != (closest_miss is not None):
             raise ValueError("a REJECT names its Closest Miss and a CANDIDATE has none")
+        if type(rules_version) is not int or rules_version < 1:  # bool is an int subclass
+            raise ValueError(f"the rules version is a positive integer, not {rules_version!r}")
         miss_json = None if closest_miss is None else json.dumps(dict(closest_miss), sort_keys=True)
         rows = [(combination.label(), float(sharpe)) for combination, sharpe in combinations]
         _require_finite([sharpe for _, sharpe in rows])
@@ -390,8 +404,8 @@ class Ledger:
                 raise BudgetExhausted(hypothesis.family_id, used, budget)
             trial_id = db.execute(
                 "INSERT INTO trials (hypothesis_id, verdict, closest_miss_json, cost_json,"
-                " bars_count, bars_first, bars_last, bars_sha256, result_json)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " bars_count, bars_first, bars_last, bars_sha256, rules_version, result_json)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     hypothesis_id,
                     verdict,
@@ -401,6 +415,7 @@ class Ledger:
                     fingerprint.first_time,
                     fingerprint.last_time,
                     fingerprint.sha256,
+                    rules_version,
                     result_json,
                 ),
             ).lastrowid
@@ -677,6 +692,7 @@ class Ledger:
             bars=BarsFingerprint(
                 row["bars_count"], row["bars_first"], row["bars_last"], row["bars_sha256"]
             ),
+            rules_version=row["rules_version"],
             result_json=row["result_json"],
             created_at=row["created_at"],
         )

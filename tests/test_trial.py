@@ -20,6 +20,7 @@ from vibedesk.gauntlet.trial import (
 )
 from vibedesk.gauntlet.verdict import CANDIDATE, REJECT
 from vibedesk.ledger import BudgetExhausted, HoldoutSpent, Ledger
+from vibedesk.ledger.store import MIGRATIONS
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.data import HoldoutLocked, MarketData
 from vibedesk.market.grant import HOLDOUT_START
@@ -29,6 +30,7 @@ from vibedesk.market.synthetic import (
     SyntheticBarSource,
     SyntheticConfig,
 )
+from vibedesk.rules import RULES_VERSION
 
 YEARS = (2023, 2024)
 NOW = datetime(2026, 10, 1, tzinfo=UTC)
@@ -150,6 +152,7 @@ def test_every_verdict_card_figure_can_be_rebuilt_from_the_store(candidate):
     assert [s for _, s in row.combinations] == pytest.approx(wf["blind_sharpe"])
     assert row.cost == COST
     assert record["verdict"] == row.verdict
+    assert record["rules_version"] == row.rules_version == RULES_VERSION
 
 
 def test_the_deflated_sharpe_counts_every_trial_of_the_family(candidate):
@@ -196,6 +199,7 @@ def fill_budget(ledger, hypothesis):
             closest_miss={"check": "profit_factor", "value": 0.5, "threshold": 1.2},
             cost=COST,
             bars=bars,
+            rules_version=RULES_VERSION,
             result_json="{}",
         )
 
@@ -288,6 +292,7 @@ def test_a_holdout_without_the_edge_fails(walk, tmp_path):
         closest_miss=None,
         cost=COST,
         bars=walk.fetch("GOLD", Timeframe.M15, end=HOLDOUT_START),
+        rules_version=RULES_VERSION,
         result_json=json.dumps(record),
     )
     grant = ledger.approve_holdout(ledger.request_holdout(hypothesis))
@@ -315,6 +320,7 @@ def test_a_trial_that_turns_the_verdict_before_the_holdout_runs_stops_it(planted
         closest_miss={"check": "deflated_sharpe", "value": 0.9, "threshold": 0.95},
         cost=COST,
         bars=bars,
+        rules_version=RULES_VERSION,
         result_json="{}",
     )
     fetched = len(recording.fetches)
@@ -325,3 +331,55 @@ def test_a_trial_that_turns_the_verdict_before_the_holdout_runs_stops_it(planted
     assert refused.value.reason == "NOT_CANDIDATE"
     assert ledger.holdout_spend(spec.family_id) is None
     assert len(recording.fetches) == fetched
+
+
+def test_a_rule_change_stops_the_holdout_request_and_the_holdout(planted, tmp_path, monkeypatch):
+    # CANDIDATE, request and approval, then the trade rules change (RULES_VERSION goes up): the
+    # Holdout would judge the Combination by other rules than its Trial. No new request is
+    # recorded, the approved grant spends nothing, and not one Holdout bar is fetched.
+    path = tmp_path / "desk.db"
+    ledger, market, recording, hypothesis = desk(path, planted)
+    trial(ledger, market, hypothesis, use_m1=False)
+    grant = ledger.approve_holdout(request_holdout(ledger, hypothesis, now=NOW))
+    monkeypatch.setattr("vibedesk.gauntlet.trial.RULES_VERSION", RULES_VERSION + 1)
+    fetched = len(recording.fetches)
+
+    with pytest.raises(HoldoutRefused) as asked:
+        request_holdout(ledger, hypothesis, now=NOW)
+    with pytest.raises(HoldoutRefused) as spent:
+        run_holdout(ledger, market, grant, now=NOW, use_m1=False)
+
+    assert asked.value.reason == spent.value.reason == "RULES_CHANGED"
+    assert f"rules version {RULES_VERSION};" in str(spent.value)
+    assert requests(path) == 1
+    assert ledger.holdout_spend(ledger.hypothesis(hypothesis).family_id) is None
+    assert len(recording.fetches) == fetched
+
+
+def test_a_candidate_from_before_rules_versions_cannot_ask_for_the_holdout(candidate, tmp_path):
+    # A CANDIDATE recorded by migration 1 alone has no rules version: nobody can say which
+    # rules judged it, so it cannot ask for the Holdout.
+    *_, first, _ = candidate
+    path = tmp_path / "desk.db"
+    old = sqlite3.connect(path)
+    old.executescript(f"BEGIN;\n{MIGRATIONS[0]}\nPRAGMA user_version = 1;\nCOMMIT;")
+    old.execute("INSERT INTO families (idea) VALUES ('London breakout')")
+    old.execute(
+        "INSERT INTO hypotheses (family_id, spec_json, entry_block, symbol, timeframe)"
+        " VALUES (1, ?, 'range_breakout', 'GOLD', 'M15')",
+        (validate(SPEC).model_dump_json(),),
+    )
+    old.execute(
+        "INSERT INTO trials (hypothesis_id, verdict, cost_json, bars_count, bars_first,"
+        " bars_last, bars_sha256, result_json) VALUES (1, 'CANDIDATE', ?, 1, 0, 0, '', ?)",
+        (COST.to_json(), json.dumps(first.record)),
+    )
+    old.commit()
+    old.close()
+
+    with Ledger(path) as ledger, pytest.raises(HoldoutRefused) as refused:
+        request_holdout(ledger, 1, now=NOW)
+
+    assert refused.value.reason == "RULES_CHANGED"
+    assert "before rules were versioned" in str(refused.value)
+    assert requests(path) == 0

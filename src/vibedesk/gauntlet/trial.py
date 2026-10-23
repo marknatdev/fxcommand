@@ -5,9 +5,10 @@ runs the Gauntlet (walk-forward, spread stress, the Coin-Flip Baseline, the Defl
 PBO and the Prosecutor), decides the Verdict and records the Trial in the Ledger. The record is
 complete when it is written: every figure a Verdict Card shows is in its result JSON (spec §1).
 
-`request_holdout` is the gate in front of the Ledger's Holdout Request: only a CANDIDATE, and
-only when the Holdout is expected to hold enough trades to judge. `run_holdout` spends an
-approved grant: it trades the Combination chosen on the last research years over the Holdout.
+`request_holdout` is the gate in front of the Ledger's Holdout Request: only a CANDIDATE judged
+under today's trade rules (vibedesk.rules), and only when the Holdout is expected to hold enough
+trades to judge. `run_holdout` spends an approved grant: it trades the Combination chosen on the
+last research years over the Holdout.
 
 The result JSON never holds NaN or Infinity, which browsers' JSON.parse rejects: NaN is null,
 and an infinite value (a profit factor with no losing trade) is the string "inf" or "-inf".
@@ -38,12 +39,13 @@ from vibedesk.gauntlet.walkforward import (
     WalkForward,
     walk_forward,
 )
-from vibedesk.ledger import BudgetExhausted, Ledger
+from vibedesk.ledger import BudgetExhausted, Ledger, TrialRecord
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.data import MarketData
 from vibedesk.market.grant import HOLDOUT_START, HoldoutGrant
+from vibedesk.rules import RULES_VERSION
 
-RESULT_VERSION = 1
+RESULT_VERSION = 2  # 2: records name their rules_version
 MIN_HOLDOUT_TRADES = 30
 MIN_HOLDOUT_PROFIT_FACTOR = 1.1
 PASS, HOLDOUT_FAIL = "PASS", "HOLDOUT FAIL"
@@ -55,7 +57,7 @@ class HoldoutRefused(Exception):
 
     def __init__(self, reason: str, detail: str) -> None:
         super().__init__(f"{reason}: {detail}")
-        self.reason = reason  # NOT_CANDIDATE or INSUFFICIENT_TRADES
+        self.reason = reason  # NOT_CANDIDATE, RULES_CHANGED or INSUFFICIENT_TRADES
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -125,6 +127,7 @@ def run_trial(
     record = _plain(
         {
             "version": RESULT_VERSION,
+            "rules_version": RULES_VERSION,
             "hypothesis_id": hypothesis_id,
             "family_id": family_id,
             "trial_number": trial_number,
@@ -157,6 +160,7 @@ def run_trial(
         closest_miss=verdict.closest_miss,
         cost=cost,
         bars=bars,
+        rules_version=RULES_VERSION,
         result_json=json.dumps(record, allow_nan=False),
     )
     return TrialResult(trial_id, verdict, wf, baseline, record)
@@ -172,16 +176,14 @@ def expected_holdout_trades(record: dict, now: datetime) -> float:
 def request_holdout(ledger: Ledger, hypothesis_id: int, now: datetime | None = None) -> int:
     """Ask for the Holdout of a Hypothesis whose latest Trial is a CANDIDATE.
 
-    Refused, with nothing recorded, unless the latest Trial is a CANDIDATE and the Holdout is
-    expected to hold at least MIN_HOLDOUT_TRADES trades. Then the Ledger records the request,
-    which waits for the owner (and refuses once the family has spent its Holdout).
+    Refused, with nothing recorded, unless the latest Trial is a CANDIDATE judged under today's
+    trade rules and the Holdout is expected to hold at least MIN_HOLDOUT_TRADES trades. Then the
+    Ledger records the request, which waits for the owner (and refuses once the family has spent
+    its Holdout).
     """
     now = now or datetime.now(UTC)
-    trials = ledger.trials_for(hypothesis_id)
-    if not trials or trials[-1].verdict != CANDIDATE:
-        latest = trials[-1].verdict if trials else "no Trial"
-        raise HoldoutRefused("NOT_CANDIDATE", f"the latest Trial is {latest}")
-    expected = expected_holdout_trades(json.loads(trials[-1].result_json), now)
+    trial = _current_candidate(ledger, hypothesis_id)
+    expected = expected_holdout_trades(json.loads(trial.result_json), now)
     if expected < MIN_HOLDOUT_TRADES:
         raise HoldoutRefused(
             "INSUFFICIENT_TRADES",
@@ -201,9 +203,10 @@ def run_holdout(
 ) -> HoldoutResult:
     """Spend the family's Holdout on the Hypothesis the grant was approved for.
 
-    The latest Trial must still be a CANDIDATE, as when the request was made: a Trial run
-    since then (one more N to deflate by) can have turned the Verdict, and a stale CANDIDATE
-    must not spend the Holdout. It is refused before any bar is fetched.
+    The latest Trial must still be a CANDIDATE under today's trade rules, as when the request
+    was made. A Trial run since then (one more N to deflate by) can have turned the Verdict,
+    and a rule change since then would judge the Holdout by other rules than its Trial. Either
+    way the Holdout is refused before any bar is fetched.
 
     The Holdout trades the Combination that Trial chose on the last research years, under
     that Trial's Cost Model. It is simulated over all the data, so its indicators
@@ -212,11 +215,7 @@ def run_holdout(
     """
     now = now or datetime.now(UTC)
     hypothesis = ledger.hypothesis(ledger.holdout_request(grant.request_id).hypothesis_id)
-    trials = ledger.trials_for(hypothesis.id)
-    if not trials or trials[-1].verdict != CANDIDATE:
-        latest = trials[-1].verdict if trials else "no Trial"
-        raise HoldoutRefused("NOT_CANDIDATE", f"the latest Trial is {latest}")
-    trial = trials[-1]
+    trial = _current_candidate(ledger, hypothesis.id)
     stored = json.loads(trial.result_json)
     chosen = stored["walk_forward"]["holdout_choice"]
     if chosen is None:
@@ -240,6 +239,7 @@ def run_holdout(
     record = _plain(
         {
             "version": RESULT_VERSION,
+            "rules_version": RULES_VERSION,
             "hypothesis_id": hypothesis.id,
             "trial_id": trial.id,
             "combination": combination.label(),
@@ -258,6 +258,26 @@ def run_holdout(
     )
     spend_id = ledger.record_holdout(grant, verdict, json.dumps(record, allow_nan=False))
     return HoldoutResult(spend_id, verdict, holdout, result, record)
+
+
+def _current_candidate(ledger: Ledger, hypothesis_id: int) -> TrialRecord:
+    """The latest Trial, which must be a CANDIDATE judged under today's trade rules."""
+    trials = ledger.trials_for(hypothesis_id)
+    if not trials or trials[-1].verdict != CANDIDATE:
+        latest = trials[-1].verdict if trials else "no Trial"
+        raise HoldoutRefused("NOT_CANDIDATE", f"the latest Trial is {latest}")
+    trial = trials[-1]
+    if trial.rules_version != RULES_VERSION:
+        if trial.rules_version is None:
+            ran = "before rules were versioned"
+        else:
+            ran = f"under rules version {trial.rules_version}"
+        raise HoldoutRefused(
+            "RULES_CHANGED",
+            f"the latest Trial ran {ran}; today's rules are version {RULES_VERSION}."
+            " Run a new Trial first",
+        )
+    return trial
 
 
 # The stored record ---------------------------------------------------------------------------
