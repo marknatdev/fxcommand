@@ -6,9 +6,19 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "numba>=0.61",
     "numpy>=2.0",
+    "pyarrow>=26.0.0",
     "pydantic>=2.9",
     "tzdata>=2024.1",
 ]
+
+[project.optional-dependencies]
+# The live MT5 terminal, for the read-only `desk` commands; tests never need it.
+mt5 = [
+    "metatrader5>=5.0.6231 ; sys_platform == 'win32'",
+]
+
+[project.scripts]
+desk = "vibedesk.cli:main"
 
 [dependency-groups]
 dev = [

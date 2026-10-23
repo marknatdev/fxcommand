@@ -20,7 +20,7 @@ Detailed tasks: [todo.md](todo.md). Finished milestones: [done/](done/).
 - **Guard tests:**
   - The existing scan for `order_send`, `order_check`, `positions_*` and `orders_*` in `src/` stays.
   - New: an allowlist test parses `src/` and fails on any MetaTrader5 attribute outside the list above.
-  - New: only `market/mt5.py` may import `MetaTrader5`.
+  - New: only `market/mt5_api.py` may import `MetaTrader5`, inside `real_api()`, which wraps it in `ReadOnlyMt5`: at run time every name off the allowlist raises, so even a name the scan missed can't reach an order call.
 - **Agents and tests:** tests run on `FakeMt5` only. Agents may run the read-only commands (`desk smoke`, `desk import`, `desk floors`) against the real terminal; nothing in M3 can place, change or close an order.
 
 ## Definitions the tests depend on

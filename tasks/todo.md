@@ -15,12 +15,12 @@
 - `market/mt5_api.py`: an `Mt5Api` Protocol with exactly the allowed calls (`initialize`, `shutdown`, `last_error`, `symbol_info`, `symbol_info_tick`, `symbol_select`, `copy_rates_range`, `copy_ticks_range`) and the constants M3 uses. `SymbolInfo` and `Tick` as the fields M3 reads (point, digits, swap_long, swap_short, swap_mode, swap_rollover3days; time, time_msc, bid, ask).
 - `market/fake_mt5.py`: `FakeMt5`, which serves `SyntheticBarSource` bars converted to server-clock time as MT5's structured arrays (`time`, `open`, `high`, `low`, `close`, `tick_volume`, `spread`, `real_volume`), ticks with a known spread distribution, and `symbol_info`. It can be told to return a partial chunk first (history still downloading) and to cap reads (the "Max bars" setting), so T4 can test both.
 - `pyproject.toml`: `pyarrow`; `MetaTrader5` as an optional `mt5` extra for Windows; `[project.scripts] desk = "vibedesk.cli:main"` with a stub `cli.py` that prints its commands.
-- Guard tests: the MT5 attribute allowlist (an AST scan of `src/`), and "only `market/mt5.py` imports MetaTrader5".
+- Guard tests: the MT5 attribute allowlist (an AST scan of `src/`), and "only `market/mt5_api.py` imports MetaTrader5", through `real_api()` and `ReadOnlyMt5`.
 
 **Acceptance criteria:**
-- [ ] `FakeMt5` satisfies `Mt5Api` (a structural check), and its bars round-trip to the `SyntheticBarSource` bars they came from once T1's conversion exists (that check lands in T1).
-- [ ] The allowlist guard fails on a planted `mt5.order_send` and on a planted `mt5.account_info`, and passes on `src/`.
-- [ ] `uv sync` works without the `mt5` extra; `uv run desk` prints the command list.
+- [x] `FakeMt5` satisfies `Mt5Api` (a structural check), and its bars round-trip to the `SyntheticBarSource` bars they came from once T1's conversion exists (that check lands in T1).
+- [x] The allowlist guard fails on a planted `mt5.order_send` and on a planted `mt5.account_info`, and passes on `src/`.
+- [x] `uv sync` works without the `mt5` extra; `uv run desk` prints the command list.
 
 **Verification:** `uv run pytest tests/test_mt5_guard.py tests/test_fake_mt5.py`
 
@@ -29,6 +29,17 @@
 **Files (owned):** `src/vibedesk/market/mt5_api.py`, `src/vibedesk/market/fake_mt5.py`, `src/vibedesk/cli.py` (stub), `pyproject.toml`, `uv.lock`, `tests/test_mt5_guard.py`, `tests/test_fake_mt5.py`
 
 **Scope:** M
+
+**Result (2026-10-23):**
+- **The contract, from a read-only probe of the real terminal** (no prices printed): `copy_rates_range` and `copy_ticks_range` return the dtypes in `RATE_DTYPE` and `TICK_DTYPE`; a bound's UTC wall time is read as server wall time (a UTC 00:00 bound returned GOLD's first M15 bar at server 01:00, after its daily break); D1 bars open at server 00:00. The constants are copied from MetaTrader5 5.0.6231.
+- **Three layers of read-only:**
+  - the AST scan fails on any MT5 function off the allowlist, on any object, so `api.copy_rates_from_pos` is caught as well as `mt5.order_send`, plus any import of MetaTrader5 (also by `importlib` name) outside `mt5_api.py`;
+  - `real_api()` returns the module wrapped in `ReadOnlyMt5`, which raises on every other name at run time;
+  - with the extra installed, a test checks the scan's list of MT5 functions against the real module, and that every non-allowed public name raises.
+- **`FakeMt5`:** server wall-clock times across a DST change (UTC+2 then UTC+3), D1 at server midnight, refuses naive bounds, `None` and `last_error()` before `initialize`, settling reads, a bar cap, a live clock (the forming bar), ticks with chosen spreads and missing asks, a stale tick at the weekend.
+- **`desk`:** the entry point and a stub; each command says it arrives in T5.
+- **Finding for T6:** at probe time (Friday 01:51 UTC) the terminal's last GOLD tick was about 19 hours old. Check the terminal is connected and receiving quotes before T6.
+- **Suites:** the default suite passes 860 tests (1 skipped without the extra). `uv run --extra mt5 pytest tests/test_mt5_guard.py` runs the real-module check.
 
 ---
 
