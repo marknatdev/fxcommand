@@ -1,7 +1,11 @@
+from dataclasses import fields
+
 import numpy as np
 import pytest
 
 from vibedesk.market.bars import Bars, Timeframe
+
+ARRAYS = ("time", "open", "high", "low", "close", "spread")
 
 
 def make_bars(**overrides):
@@ -67,6 +71,58 @@ def test_between_is_half_open_on_time():
 
     assert window.time.tolist() == [900]
     assert window.symbol == "GOLD"
+
+
+def ten_bars():
+    close = 100.0 + np.arange(10.0)
+    return make_bars(
+        time=np.arange(10) * 900,
+        open=close - 0.5,
+        high=close + 1.0,
+        low=close - 1.0,
+        close=close,
+        spread=np.full(10, 30),
+    )
+
+
+def test_between_returns_read_only_views_of_the_bars():
+    bars = ten_bars()
+
+    window = bars.between(900, 5 * 900)
+    inner = window.between(2 * 900, 3 * 900)
+
+    assert len(window) == 4 and len(inner) == 1
+    for name in ARRAYS:
+        for part in (window, inner):
+            assert np.shares_memory(getattr(part, name), getattr(bars, name))
+            assert not getattr(part, name).flags.writeable
+    with pytest.raises(ValueError):
+        window.close[0] = 1.0
+
+
+@pytest.mark.parametrize(
+    "start, end", [(900, 5 * 900), (0, 10 * 900), (-(2**62), 2**62), (450, 451), (-1, 0)]
+)
+def test_between_equals_bars_built_by_the_copying_constructor(start, end):
+    bars = ten_bars()
+    keep = (bars.time >= start) & (bars.time < end)
+    copied = Bars(
+        bars.symbol,
+        bars.timeframe,
+        bars.point,
+        bars.digits,
+        *(getattr(bars, name)[keep] for name in ARRAYS),
+    )
+
+    window = bars.between(start, end)
+
+    assert len(window) == len(copied)
+    for f in fields(Bars):
+        got, want = getattr(window, f.name), getattr(copied, f.name)
+        if f.name in ARRAYS:
+            assert got.dtype == want.dtype and np.array_equal(got, want)
+        else:
+            assert got == want
 
 
 def test_timeframe_seconds():

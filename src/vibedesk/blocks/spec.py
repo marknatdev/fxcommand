@@ -12,7 +12,7 @@ import itertools
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, get_args
+from typing import Literal
 
 from pydantic import (
     BaseModel,
@@ -26,11 +26,12 @@ from pydantic import (
 )
 
 from vibedesk.blocks.registry import LIBRARY, BlockRegistry, Kind
+from vibedesk.market.universe import SYMBOLS
 
 MAX_COMBINATIONS = 50
+_SIZING_LIST = "sizing doesn't change a Trial's R, so it takes one value: give one, not a list"
 
-Symbol = Literal["GOLD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD"]
-SYMBOLS = get_args(Symbol)
+Symbol = Literal[SYMBOLS]  # a tuple inside Literal[...] expands to its members
 Direction = Literal["long", "short", "both"]
 
 Scalar = StrictBool | StrictInt | StrictFloat | StrictStr
@@ -204,6 +205,11 @@ def _slot_grid(
     axes = []
     for name in names:
         values = ref.params[name]
+        # Layer A measures in R and shows money at a fixed 1% (spec §6.1), so a sizing list only
+        # repeats the same Combinations: N for the Deflated Sharpe grows and PBO sees ties.
+        if kind is Kind.SIZING and isinstance(values, list):
+            errors.append(SpecError(f"{path}.params.{name}", _SIZING_LIST))
+            continue
         values = values if isinstance(values, list) else [values]
         problem = _list_problem(values)
         if problem:
