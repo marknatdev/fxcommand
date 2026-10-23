@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields
 from enum import StrEnum
 
 import numpy as np
@@ -89,6 +89,15 @@ class Bars:
         return len(self.time)
 
     def between(self, start: int, end: int) -> Bars:
-        """Bars whose open time is in [start, end), as UTC epoch seconds."""
+        """Bars whose open time is in [start, end), as UTC epoch seconds.
+
+        The result holds read-only views of these bars' arrays, not copies: a slice of valid bars
+        is valid, so it skips the constructor's copy and checks. It keeps these bars' memory alive
+        for as long as it lives.
+        """
         lo, hi = np.searchsorted(self.time, [start, end])
-        return replace(self, **{name: getattr(self, name)[lo:hi] for name in _ARRAYS})
+        window = object.__new__(Bars)
+        for field in fields(Bars):
+            value = getattr(self, field.name)
+            object.__setattr__(window, field.name, value[lo:hi] if field.name in _ARRAYS else value)
+        return window

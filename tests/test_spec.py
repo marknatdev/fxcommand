@@ -1,12 +1,15 @@
 import copy
 import json
-from typing import Literal
+from typing import Literal, get_args
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
 
 from vibedesk.blocks.registry import BlockRegistry, Kind
-from vibedesk.blocks.spec import MAX_COMBINATIONS, SpecInvalid, expand_grid, validate
+from vibedesk.blocks.spec import MAX_COMBINATIONS, SpecInvalid, Symbol, expand_grid, validate
+from vibedesk.market.importer import UNIVERSE
+from vibedesk.market.synthetic import PROFILES
+from vibedesk.market.universe import SYMBOLS
 
 
 class _Params(BaseModel):
@@ -142,6 +145,34 @@ def test_grid_over_the_limit_is_rejected(registry):
 )
 def test_invalid_specs_report_where_they_fail(registry, change, path):
     assert path in paths_of(variant(**change), registry)
+
+
+@pytest.mark.parametrize("risk_pct", [[0.5, 1.0], [1.0], [], [0.5, 2.0]])
+def test_sizing_takes_one_value_not_a_list(registry, risk_pct):
+    [(path, reason)] = errors_of(variant(sizing__params={"risk_pct": risk_pct}), registry)
+
+    assert path == "sizing.params.risk_pct"
+    assert "doesn't change a Trial's R" in reason and "one value" in reason
+
+
+def test_a_sizing_list_is_reported_with_the_other_errors(registry):
+    spec = variant(entry__block="no_such_block", sizing__params={"risk_pct": [0.5, 1.0]})
+
+    assert {"entry.block", "sizing.params.risk_pct"} <= paths_of(spec, registry)
+
+
+def test_an_unknown_symbol_is_told_the_symbols_it_could_be(registry):
+    [(path, reason)] = errors_of(variant(symbol="DOGEUSD"), registry)
+
+    assert path == "symbol"
+    assert all(f"'{symbol}'" in reason for symbol in SYMBOLS)
+
+
+def test_the_spec_the_importer_and_the_synthetic_bars_share_one_universe():
+    assert len(set(SYMBOLS)) == len(SYMBOLS)
+    assert get_args(Symbol) == SYMBOLS
+    assert UNIVERSE == SYMBOLS
+    assert set(PROFILES) == set(SYMBOLS)
 
 
 def test_missing_stop_is_rejected(registry):

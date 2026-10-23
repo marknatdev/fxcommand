@@ -50,8 +50,9 @@ from vibedesk.market.mt5 import Mt5BarSource
 from vibedesk.market.mt5_api import Mt5Api
 from vibedesk.market.quality import server_days
 from vibedesk.market.server_time import server_to_utc
+from vibedesk.market.universe import SYMBOLS
 
-UNIVERSE = ("GOLD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD")
+UNIVERSE = SYMBOLS
 TIMEFRAMES = (Timeframe.M1, Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1)
 MAX_READS = 6  # reads of one chunk before it counts as never settling
 LATE_START = timedelta(days=4)  # longer than a weekend plus a New Year holiday
