@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 
 from vibedesk.market.bars import Bars, Timeframe
-from vibedesk.market.quality import Mask, build_mask, extend_mask, server_days
-from vibedesk.market.server_time import DAY, server_offset
+from vibedesk.market.quality import Mask, build_mask, extend_mask
+from vibedesk.market.server_time import DAY, server_days, server_offset
 from vibedesk.market.synthetic import SyntheticBarSource
 
 EPOCH = date(1970, 1, 1)
@@ -139,6 +139,65 @@ def test_a_later_import_never_judges_an_old_day_again():
     assert later.first_usable_month == mask.first_usable_month
     assert later.masked_days == (old_thin, date(2025, 1, 15), date(2025, 1, 29))
     assert later.judged_through == date(2025, 1, 31)
+
+
+def test_a_weekday_without_m15_bars_is_masked_on_every_timeframe():
+    """A weekday with no M15 bars counts 0 of them, so it is thin: the bars it has on the other
+    timeframes are never served unvetted."""
+    gap = date(2024, 3, 20)
+    m15 = planted_m15()
+
+    mask = build_mask(take(m15, server_days(m15.time) != (gap - EPOCH).days), CUTOFF)
+
+    assert mask.masked_days == (date(2024, 3, 13), gap, date(2024, 4, 17))
+    assert mask.median == build_mask(m15, CUTOFF).median == 96
+    for timeframe in Timeframe:
+        bars = PLANTED.fetch("GOLD", timeframe)
+        on_gap = server_days(bars.time) == (gap - EPOCH).days
+        assert on_gap.any() and not mask.keep(bars.time[on_gap]).any(), timeframe
+
+
+def test_the_frozen_median_counts_only_days_with_bars():
+    """Empty weekdays are judged, but the median still counts days with bars only: with three
+    empty weekdays in five it would be 0, and no day would ever be thin."""
+    days = weekdays(date(2024, 9, 2), date(2025, 1, 1))
+    counts = {day: 96 for day in days if day.weekday() in (1, 3)}
+
+    mask = build_mask(m15_with(counts), datetime(2025, 1, 1, tzinfo=UTC))
+
+    assert mask.median == 96
+    assert mask.first_usable_month == date(2024, 9, 1)
+    assert mask.masked_days == tuple(day for day in days if day.weekday() not in (1, 3))
+
+
+def test_a_later_import_masks_a_new_weekday_without_bars():
+    research = {day: 96 for day in weekdays(date(2024, 10, 1), date(2025, 1, 1))}
+    mask = build_mask(m15_with(research), datetime(2025, 1, 1, tzinfo=UTC))
+    empty = date(2025, 1, 15)
+    new = {day: 96 for day in weekdays(date(2025, 1, 1), date(2025, 2, 1)) if day != empty}
+
+    later = extend_mask(mask, m15_with(research | new), datetime(2025, 2, 1, tzinfo=UTC))
+
+    assert later.median == mask.median == 96
+    assert later.masked_days == (empty,)
+    assert later.judged_through == date(2025, 1, 31)
+
+
+def test_a_holiday_without_bars_is_masked_and_loses_nothing():
+    """A day with no bars on any timeframe is masked like any empty weekday, which takes no bar
+    away: every timeframe serves what it served when the day was full."""
+    holiday = (date(2024, 3, 29) - EPOCH).days  # Good Friday
+    m15 = planted_m15()
+    full = build_mask(m15, CUTOFF)
+
+    mask = build_mask(take(m15, server_days(m15.time) != holiday), CUTOFF)
+
+    assert mask.masked_days == (date(2024, 3, 13), date(2024, 3, 29), date(2024, 4, 17))
+    assert mask.median == full.median
+    for timeframe in Timeframe:
+        bars = PLANTED.fetch("GOLD", timeframe)
+        bars = take(bars, server_days(bars.time) != holiday)
+        assert np.array_equal(mask.keep(bars.time), full.keep(bars.time)), timeframe
 
 
 def test_an_earlier_cutoff_changes_nothing():

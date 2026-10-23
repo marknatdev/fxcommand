@@ -1,4 +1,5 @@
 import copy
+import inspect
 import json
 from typing import Literal, get_args
 
@@ -7,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from vibedesk.blocks.registry import BlockRegistry, Kind
 from vibedesk.blocks.spec import MAX_COMBINATIONS, SpecInvalid, Symbol, expand_grid, validate
-from vibedesk.market.importer import UNIVERSE
+from vibedesk.market.importer import import_history, refresh
 from vibedesk.market.synthetic import PROFILES
 from vibedesk.market.universe import SYMBOLS
 
@@ -171,7 +172,8 @@ def test_an_unknown_symbol_is_told_the_symbols_it_could_be(registry):
 def test_the_spec_the_importer_and_the_synthetic_bars_share_one_universe():
     assert len(set(SYMBOLS)) == len(SYMBOLS)
     assert get_args(Symbol) == SYMBOLS
-    assert UNIVERSE == SYMBOLS
+    for run in (import_history, refresh):
+        assert inspect.signature(run).parameters["symbols"].default is SYMBOLS
     assert set(PROFILES) == set(SYMBOLS)
 
 

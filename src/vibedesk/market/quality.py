@@ -9,6 +9,12 @@ per server day, against the symbol's median over the Research Window (2014-2024)
 - from then on, a thin day is a server day with fewer than half that median, and it is excluded
   from every timeframe of the symbol.
 
+The median, and each month's median day, count only days with bars, so weekends and holidays
+don't drag them. But every server weekday from the first usable month on is judged, with or
+without bars: a weekday with no M15 bars counts 0, so it is thin, and the bars it has on other
+timeframes are never served unvetted. A holiday with no bars at all loses nothing by it. A day
+with bars outside Monday to Friday is judged too.
+
 Only server days that have closed are judged, and each one only once. The mask is frozen at the
 first import: the median comes from the Research Window alone, and a later import judges just
 the days that closed since. So a Trial's bars, and their fingerprint in the Ledger, never change.
@@ -23,7 +29,7 @@ import numpy as np
 
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.grant import HOLDOUT_START, RESEARCH_START
-from vibedesk.market.server_time import server_days
+from vibedesk.market.server_time import DAY, server_days, server_weekdays
 
 THIN_FRACTION = 0.5  # of the Research Window's median M15 bars per server day
 
@@ -69,9 +75,10 @@ class Mask:
 
 
 def build_mask(m15: Bars, cutoff: datetime) -> Mask:
-    """Judge every server day of `m15` that closed by `cutoff`, and freeze the median.
+    """Judge every server weekday from the first usable month on, and every day of `m15` with
+    bars, that closed by `cutoff`; and freeze the median.
 
-    The median counts only days with at least one bar, so weekends and holidays don't drag it.
+    The median, and each month's median day, count only days with at least one bar.
     """
     days, counts, cutoff_day = _closed_day_counts(m15, cutoff)
     research = (days >= _day_number(RESEARCH_START.date())) & (
@@ -87,21 +94,23 @@ def build_mask(m15: Bars, cutoff: datetime) -> Mask:
     if not usable:
         raise ValueError(f"no month of {m15.symbol} reaches half its median M15 bars per day")
     first_month = usable[0].astype("datetime64[D]").item()
-    thin = (days >= _day_number(first_month)) & (counts < threshold)
+    judged, judged_counts = _judged_days(days, counts, _day_number(first_month), cutoff_day)
     return Mask(
         median=median,
         first_usable_month=first_month,
         judged_through=_date(cutoff_day - 1),
-        masked_days=tuple(_date(day) for day in days[thin]),
+        masked_days=tuple(_date(day) for day in judged[judged_counts < threshold]),
     )
 
 
 def extend_mask(mask: Mask, m15: Bars, cutoff: datetime) -> Mask:
-    """`mask` plus a judgement of the server days of `m15` that closed after the last judged one
-    and by `cutoff`, against the frozen median. Days judged before are never judged again."""
+    """`mask` plus a judgement of the server days that closed after the last judged one and by
+    `cutoff`, against the frozen median: every weekday, and every day of `m15` with bars. Days
+    judged before are never judged again. `m15` must hold every bar after the last judged day."""
     days, counts, cutoff_day = _closed_day_counts(m15, cutoff)
-    new = days > _day_number(mask.judged_through)
-    thin = days[new & (counts < THIN_FRACTION * mask.median)]
+    first = _day_number(mask.judged_through) + 1
+    judged, judged_counts = _judged_days(days, counts, first, cutoff_day)
+    thin = judged[judged_counts < THIN_FRACTION * mask.median]
     return Mask(
         median=mask.median,
         first_usable_month=mask.first_usable_month,
@@ -120,6 +129,21 @@ def _closed_day_counts(m15: Bars, cutoff: datetime) -> tuple[np.ndarray, np.ndar
     days, counts = np.unique(server_days(m15.time), return_counts=True)
     closed = days < cutoff_day
     return days[closed], counts[closed], cutoff_day
+
+
+def _judged_days(
+    days: np.ndarray, counts: np.ndarray, first: int, end: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """(server days, M15 bars on each) to judge in [first, end): every weekday, 0 bars if it has
+    none, and every other day with bars."""
+    span = np.arange(first, end, dtype=np.int64)
+    # A date's UTC midnight lies on the same server day, which starts two or three hours sooner.
+    weekdays = span[server_weekdays(span * DAY) < 5]
+    inside = (days >= first) & (days < end)
+    judged = np.union1d(weekdays, days[inside])
+    judged_counts = np.zeros(len(judged), dtype=np.int64)
+    judged_counts[np.searchsorted(judged, days[inside])] = counts[inside]
+    return judged, judged_counts
 
 
 def _day_number(day: date) -> int:

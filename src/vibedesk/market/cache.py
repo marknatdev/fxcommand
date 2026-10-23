@@ -5,7 +5,8 @@ Layout, under a data directory `root` (`data/` for the desk; tests pass a tempor
 - `bars/{symbol}/meta.json`: point, digits, the data-quality mask and the last import time.
 
 Every file is written under a temporary name and renamed into place, so a crash never leaves
-half a year. The importer writes chunk by chunk with `write_chunk`, then calls `record_import`,
+half a year; a rename onto a file a reader holds open, which Windows refuses, is retried for a
+moment. The importer writes chunk by chunk with `write_chunk`, then calls `record_import`,
 which judges the days that closed. Everything else reads through `CachedBarSource`, which applies
 the mask, behind `MarketData` and its Holdout guard. `summarize` gives the data report its
 structural facts per year, read from the times and spreads alone.
@@ -20,13 +21,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
+from time import sleep
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from vibedesk.market.bars import Bars, Timeframe
-from vibedesk.market.quality import Mask, build_mask, extend_mask, server_days
+from vibedesk.market.quality import Mask, build_mask, extend_mask
+from vibedesk.market.server_time import server_days
 
 SCHEMA = pa.schema(
     [
@@ -42,12 +45,15 @@ COLUMNS = tuple(SCHEMA.names)
 
 GAP_HOURS = 2  # a stretch this long with no bar inside a server week is a gap in the report
 LONGEST_GAPS = 5  # how many of a year's gaps the summary lists
+REPLACE_TRIES = 10  # renames of a written file onto one another program holds open
+REPLACE_WAIT = 0.1  # seconds between them
 
 _SYMBOL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._#-]*")
 
 
 class CacheError(Exception):
-    """The cache has no such symbol, no mask yet, or a file in the wrong shape."""
+    """The cache has no such symbol, no mask yet, a file in the wrong shape, or a file another
+    program holds open for too long to be replaced."""
 
 
 @dataclass(frozen=True)
@@ -139,19 +145,23 @@ def read_meta(root: Path, symbol: str) -> Meta:
     )
 
 
-def record_import(root: Path, symbol: str, cutoff: datetime) -> Meta:
-    """Judge the server days that closed by `cutoff`, and record `cutoff` as the last import.
+def record_import(
+    root: Path, symbol: str, cutoff: datetime, *, judge_until: datetime | None = None
+) -> Meta:
+    """Judge the server days that closed by `judge_until`, `cutoff` if not given, and record
+    `cutoff` as the last import.
 
     The first call builds the mask from the cached M15 bars and freezes it; a later call only
     judges the days after the last judged one (quality.py). The importer calls this once all of
-    an import's chunks are written.
+    an import's chunks are written, judging until its last M15 bar, whose day may still fill.
     """
     meta = read_meta(root, symbol)
+    until = cutoff if judge_until is None else min(cutoff, judge_until)
     if meta.mask is None:
-        mask = build_mask(read_unmasked(root, symbol, Timeframe.M15), cutoff)
+        mask = build_mask(read_unmasked(root, symbol, Timeframe.M15), until)
     else:
         since = datetime.combine(meta.mask.judged_through, datetime.min.time(), UTC)
-        mask = extend_mask(meta.mask, read_unmasked(root, symbol, Timeframe.M15, since), cutoff)
+        mask = extend_mask(meta.mask, read_unmasked(root, symbol, Timeframe.M15, since), until)
     meta = replace(meta, mask=mask, last_import=cutoff.astimezone(UTC))
     _write_meta(root, meta)
     return meta
@@ -325,10 +335,31 @@ def _write_atomic(path: Path, write: Callable[[Path], None]) -> None:
     tmp = path.with_name(path.name + ".tmp")
     try:
         write(tmp)
-        os.replace(tmp, path)
+        _replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _replace(tmp: Path, path: Path) -> None:
+    """Rename `tmp` over `path`, retrying for a moment while another program holds `path` open.
+
+    Windows refuses to replace a file a reader has open, such as a Trial reading its year; a
+    reader holds a file only while it reads it, so a refresh racing one waits instead of dying
+    part way with a raw error.
+    """
+    for attempt in range(1, REPLACE_TRIES + 1):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as error:
+            if attempt == REPLACE_TRIES:
+                raise CacheError(
+                    f"{path} is held open by another program, so it could not be replaced after "
+                    f"{REPLACE_TRIES} tries; it was left as it was. Run the import again once "
+                    f"the reader is done ({error})"
+                ) from error
+            sleep(REPLACE_WAIT)
 
 
 def _chunk_range(year: int, month: int | None = None) -> tuple[int, int]:

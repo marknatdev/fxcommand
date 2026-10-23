@@ -5,12 +5,14 @@ serves only what the frozen mask keeps, and reports Holdout years by structural 
 import dataclasses
 import json
 import os
+import re
 from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
 import pytest
-from test_quality import CUTOFF, MASKED, PLANTED, SPARSE_UNTIL, as_dates, plant, take
+from test_quality import CUTOFF, MASKED, PLANTED, SPARSE_UNTIL, as_dates, plant, take, weekdays
 
+import vibedesk.market.cache as cache
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.cache import (
     COLUMNS,
@@ -26,7 +28,7 @@ from vibedesk.market.cache import (
     write_chunk,
 )
 from vibedesk.market.grant import HOLDOUT_START, RESEARCH_START
-from vibedesk.market.quality import server_days
+from vibedesk.market.server_time import server_days
 from vibedesk.market.synthetic import SyntheticBarSource
 
 # Five weeks over New Year, from a Monday to a Saturday.
@@ -229,6 +231,55 @@ def test_a_failed_rename_leaves_the_old_files_intact(tmp_path, monkeypatch):
     assert [p.name for p in tmp_path.rglob("*.tmp")] == []
 
 
+def held_open(times, replace=os.replace):
+    """os.replace as Windows does it while a reader holds the target open, `times` times."""
+    refused = []
+
+    def replacing(src, dst):
+        if len(refused) < times:
+            refused.append(dst)
+            raise PermissionError(13, "Access is denied", str(dst))
+        replace(src, dst)
+
+    return replacing, refused
+
+
+def test_a_file_held_open_for_a_moment_is_replaced_once_let_go(tmp_path, monkeypatch):
+    """On Windows a file a Trial is reading can't be replaced; a refresh racing it waits a
+    moment instead of dying part way."""
+    m15 = NEW_YEAR.fetch("GOLD", Timeframe.M15).between(0, HOLDOUT)
+    write_chunk(tmp_path, m15, 2024)
+    mid_december = int(datetime(2024, 12, 20, tzinfo=UTC).timestamp())
+    replacing, refused = held_open(2)
+    waits = []
+    monkeypatch.setattr(os, "replace", replacing)
+    monkeypatch.setattr(cache, "sleep", waits.append)
+
+    write_chunk(tmp_path, m15.between(0, mid_december), 2024)
+
+    assert refused == [year_file(tmp_path, Timeframe.M15, 2024)] * 2
+    assert waits == [cache.REPLACE_WAIT] * 2
+    assert_same(read_unmasked(tmp_path, "GOLD", Timeframe.M15), m15.between(0, mid_december))
+    assert [p.name for p in tmp_path.rglob("*.tmp")] == []
+
+
+def test_a_file_held_open_too_long_fails_by_name_and_stays_as_it_was(tmp_path, monkeypatch):
+    m15 = NEW_YEAR.fetch("GOLD", Timeframe.M15).between(0, HOLDOUT)
+    write_chunk(tmp_path, m15, 2024)
+    path = year_file(tmp_path, Timeframe.M15, 2024)
+    before = path.read_bytes()
+    replacing, refused = held_open(cache.REPLACE_TRIES)
+    monkeypatch.setattr(os, "replace", replacing)
+    monkeypatch.setattr(cache, "sleep", lambda seconds: None)
+
+    with pytest.raises(CacheError, match=re.escape(f"{path} is held open by another program")):
+        write_chunk(tmp_path, m15.between(0, HOLDOUT - 86400), 2024)
+
+    assert len(refused) == cache.REPLACE_TRIES
+    assert path.read_bytes() == before
+    assert [p.name for p in tmp_path.rglob("*.tmp")] == []
+
+
 # The mask behind CachedBarSource. --------------------------------------------------------------
 
 
@@ -312,7 +363,9 @@ def test_a_refresh_never_changes_the_research_bars(tmp_path):
     record_import(tmp_path, "GOLD", first_cutoff)
     first = research_bytes(tmp_path)
     first_mask = read_meta(tmp_path, "GOLD").mask
-    assert first_mask.masked_days == (old_thin,)
+    # The first usable month's weekdays before the data starts have no bars: masked, losing none.
+    before_the_data = tuple(weekdays(date(2024, 12, 2), date(2024, 12, 9)))
+    assert first_mask.masked_days == (*before_the_data, old_thin)
 
     store(tmp_path, source, m15=plant(m15, date(2014, 1, 1), later_days | {new_thin: 10}))
     meta = record_import(tmp_path, "GOLD", refresh_cutoff)
@@ -321,7 +374,7 @@ def test_a_refresh_never_changes_the_research_bars(tmp_path):
     assert as_dates(server_days(backfilled.time)).count(old_thin) == 96  # the backfill landed
     assert research_bytes(tmp_path) == first
     assert meta.mask.median == first_mask.median == 96
-    assert meta.mask.masked_days == (old_thin, new_thin)
+    assert meta.mask.masked_days == (*before_the_data, old_thin, new_thin)
     assert meta.mask.judged_through == date(2025, 2, 14)
 
 
