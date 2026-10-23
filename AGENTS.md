@@ -1,0 +1,149 @@
+# Vibe Desk: handoff for agents
+
+Read this first. It is the whole picture as of 2026-10-23: what the project is, what works, how to run and change it, and what is still open. `CLAUDE.md` holds the short rules; the detail lives here.
+
+## 1. What it is
+
+A local web app for one owner who trades GOLD and FX majors on MT5 with the broker XM. The owner chats a trading idea in plain words. An AI (through OmniRoute) turns it into a **Strategy Spec** built from a fixed library of **Blocks**. Deterministic Python code then tests the Spec on about 12 years of real XM history and gives an honest **Verdict**. The AI only writes Specs; it never trades, and nothing in the app can place an order.
+
+The owner wants fast answers about ideas, not more process. On 2026-10-23 they dropped the earlier rigor rules ("make it simple, done now"). Favour shipping working features over adding guards, checkpoints or reviews.
+
+## 2. Status at a glance
+
+| Area | State |
+|---|---|
+| Web app (chat, test, results, saved chats, claude.ai-like design) | Working, committed. Owner reviewing. |
+| Real data | All 8 symbols imported from the owner's XM terminal, read-only, through 2026-10-22; spreads and swaps measured. |
+| AI (OmniRoute) | Configured by the owner (key, tailnet URL, model `agy/gemini-4-argon-high`); `/api/models` answers. **A real draft has not succeeded yet**: OmniRoute answers 503 `resource_pressure` because the shared server is out of memory (section 9). |
+| Test engine (Gauntlet, Ledger) | Done (milestones M1 to M3), about 1,240 tests green. |
+| Telegram alerts, MCP server, live trading | Not built. A live EA idea is parked on the board (CCC-82). |
+
+First real results: a GOLD H1 Donchian breakout was "No edge" (1,184 blind trades, profit factor 0.80, 7 of 8 years losing); an EURUSD H4 RSI bounce never traded (too few trades to pick settings).
+
+## 3. Run it
+
+The owner double-clicks the desktop shortcut **"Vibe Desk"**, which runs `Start Vibe Desk.bat`:
+1. if the app already answers on port 8765, it only opens the browser;
+2. otherwise it opens an SSH tunnel to OmniRoute (only needed when the URL is `http://127.0.0.1:20128/v1`), starts the server and opens http://127.0.0.1:8765.
+
+**After changing Python code, restart the server**: the .bat reuses a running one. Stop the process listening on 8765 (and its parent `cmd` running the .bat), then start the .bat again. The page (`static/index.html`) is read on every request, so HTML/JS changes need only a browser reload.
+
+```bash
+uv sync --extra mt5                        # dependencies, with the MT5 package (Windows only)
+uv run --extra mt5 vibedesk-web --open     # the app by hand, port 8765
+uv run python tests/demo_server.py 8766    # the app with a canned AI and a throwaway Ledger and settings, over the real bars
+uv run pytest                              # default suite, 4 workers, ~45 s
+uv run pytest -n 0 tests/test_app.py       # the app's tests
+uv run pytest -m slow                      # known answers, benchmarks, 12-year import (~4 min)
+uv run ruff check src tests && uv run ruff format --check src tests
+uv run desk smoke | import | refresh | floors | data-report   # read-only MT5 data commands
+```
+
+`.claude/launch.json` defines `vibedesk-demo` (port 8766) and `vibedesk` (port 8765) for the desktop app's browser preview. Use the demo server for click-throughs so the owner's history stays clean.
+
+## 4. How the app works
+
+1. **Chat.** `POST /api/draft {message, chat_id?}`: the server loads the chat so far, `research.draft_spec` sends it to the AI with a system prompt listing every Block (generated from the registry), parses the ```json block, validates it, and on errors feeds them back (up to 3 tries). The user message and the AI's answer (text + Spec) are saved to the chat.
+2. **Test.** `POST /api/trial {spec, chat_id?}`: `Desk.run` validates the Spec, takes the symbol's latest measured cost, registers it in the Ledger and calls `gauntlet.trial.run_trial` (about 10 s). The page gets a summary; the chat gets a result message with a note that tells the AI the numbers next time.
+3. **Carry on.** The next message in the same chat reaches the AI with the whole conversation, test results included, so "make it trade more" builds on the last Spec.
+
+| Endpoint | What |
+|---|---|
+| `GET /` | the page |
+| `GET /api/status` | data per symbol, data-update progress, settings (never the key) |
+| `GET /api/models`, `POST /api/settings` | OmniRoute models; save URL, key, model |
+| `GET /api/chats`, `GET /api/chats/{id}`, `DELETE /api/chats/{id}` | Recents, one chat, delete |
+| `POST /api/draft`, `POST /api/trial` | above |
+| `GET /api/trials`, `GET /api/trials/{id}` | past tests, one test's summary |
+| `POST /api/data/update` | import or refresh every symbol from MT5 and re-measure spreads, in a background thread |
+
+On start, `restore_old_trials` gives every test that has no chat (run before chats existed, or through the API without a `chat_id`) a chat of its own.
+
+## 5. Code map
+
+- `src/vibedesk/app/`: the app.
+  - `server.py`: FastAPI, `create_app(root, llm=None, db=None, settings_root=None)` (tests pass a fake LLM and temp paths), `main()` for `vibedesk-web`.
+  - `research.py`: Idea to Spec (`draft_spec`, `system_prompt`, `catalog`, `normalize`: the browser writes 2.0 as 2, and a param list mixing 1.5 and 2 is invalid, so numbers in a list are made one type).
+  - `llm.py`: OmniRoute client (OpenAI-compatible `/models`, `/chat/completions`), retries 429/502/503/504.
+  - `desk.py`: `Desk` (run, history, data status), `DataUpdate`, `summarize` (what the page shows).
+  - `chats.py`: saved chats in `data/chats.db` (SQLite, editable), `ai_history`, `result_message`.
+  - `settings.py`: `data/settings.json`, then `.env` / environment (`VIBEDESK_LLM_URL`, `_KEY`, `_MODEL`).
+  - `static/index.html`: the single page (vanilla JS, Chart.js from cdnjs, fonts from Google Fonts with system fallbacks).
+- `src/vibedesk/blocks/`: the Block Library and Strategy Specs (`spec.py`: `validate`, `expand_grid`, at most 50 combinations).
+  - Entries: `donchian_breakout`, `ma_cross`, `rsi_threshold`, `bollinger_touch`, `pullback_to_ma`, `range_breakout`.
+  - Filters: `ma_slope`, `adx`, `atr_regime`, `session_window`, `day_of_week`.
+  - Exits: `atr_stop` (required), `r_target`, `atr_target`, `atr_trailing`, `time_exit`, `opposite_signal`. Sizing: `fixed_risk`.
+- `src/vibedesk/engine/`: numba fill engine, costs and swaps, metrics in R.
+- `src/vibedesk/gauntlet/`: walk-forward, Coin-Flip Baseline, statistics, Prosecutor, Pass Bar (`verdict.py`), `trial.py` (`run_trial`, Holdout functions).
+- `src/vibedesk/ledger/store.py`: the SQLite Ledger (`data/desk.db`), append-only by triggers.
+- `src/vibedesk/market/`: bars, the XM server clock (`server_time.py`), the Holdout guard (`data.py`), the MT5 seam (`mt5_api.py` with `real_api()` and `ReadOnlyMt5`, `fake_mt5.py`, `mt5.py`), the Parquet cache and data-quality mask (`cache.py`, `quality.py`), costs (`costs.py`), the importer, the data report.
+- `src/vibedesk/cli.py`: the `desk` commands.
+- `tests/`: `test_app.py` (the app), `demo_server.py` (click-through server), `reference_engine.py` (an independent twin of the engine), guard tests (no order calls, MT5 allowlist, Ledger has no UPDATE/DELETE except `app/chats.py`).
+
+## 6. The test engine, briefly
+
+- **Walk-forward:** blind years 2017 to 2024; for each, the Spec's settings that did best on the 3 years before are traded blind. A setting needs 30 training trades to be picked, else the year trades nothing.
+- **Costs:** spread = max(bar spread, Spread Floor) + 1 point slippage per fill; swaps as measured today, a swap the position would earn counted as 0.
+- **R:** profit in units of the stop distance.
+- **Verdict:** CANDIDATE (shown as "Looks real") only if every check passes, else REJECT ("No edge") with the closest miss. Core checks: profit factor ≥ 1.2, trades ≥ 100, at least 5 of 8 profitable years, profit factor at 2× spread ≥ 1.05, beats 95% of 1,000 random coin-flip trade sets, Deflated Sharpe ≥ 0.95, PBO ≤ 0.3. The Prosecutor adds: top 5 trades ≤ 50% of profit, neighbour settings PF ≥ 1.0, longs and shorts PF ≥ 1.0, quiet/normal/busy regimes PF ≥ 0.9.
+- **Ledger:** every test is a Trial in an Idea Family (one family per entry Block and symbol). The app extends a family's Trial Budget by itself. Rows are never changed; a Trial run by mistake stays (Trial #1 "GOLD breakout smoke test" was a speed test).
+- **Holdout:** 2025-01-01 on is locked behind a Ledger grant and the app never uses it. A "check on 2025 to today" button would be the next honest step for a CANDIDATE.
+
+## 7. Data
+
+`data/` is not in git (about 570 MB of bars):
+- `bars/{SYMBOL}/{TF}/…` Parquet chunks (M1 by month, others by year, e.g. `bars/GOLD/D1/2014.parquet`) and `bars/{SYMBOL}/meta.json` with the mask;
+- `costs/{SYMBOL}.jsonl` spread and swap measurements;
+- `desk.db` the Ledger; `chats.db` the chats; `settings.json` the OmniRoute settings (holds the key: never print, log or commit it).
+
+Symbols: GOLD, EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, NZDUSD. First usable month: GOLD 2014-06, FX 2014-01. Spread floors (2026-10-23): GOLD 55 points, EURUSD 20, GBPUSD 24, USDJPY 25, AUDUSD 24, USDCAD 30, USDCHF 26, NZDUSD 30.
+
+Refresh with the app's "Update data" button or `uv run desk refresh` then `uv run desk floors`. The MT5 terminal (`C:\Program Files\MetaTrader 5`) must be running, logged in to XM and receiving quotes (`uv run desk smoke` checks the live tick). All MT5 access is read-only.
+
+## 8. Rules and safety
+
+- **No orders, ever.** `src/` reaches MT5 only through `real_api()`, which wraps it in `ReadOnlyMt5`; guard tests fail on any order or position call. Agents and tests never place trades, even on demo, and never start anything live. Only the owner does.
+- Everything else from the old rule set (Holdout lock, every look is a Trial, rules versioning with fingerprint pins, served bars never change, XM clock checks) still runs and its tests stay green, but it no longer gates new work. Don't extend it unless the owner asks. If a change alters trades on purpose, bump `RULES_VERSION` in `src/vibedesk/rules.py` and re-pin `tests/test_rules_version.py` (`uv run python tests/test_rules_version.py` prints the new pins).
+- Commit as you go without asking; messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` (or your own agent's line). Don't push. Record plans and results in `tasks/todo.md`.
+- The owner's Ubuntu server (`ubuntu@54.254.218.196`, key `D:\millmaker\ssh-key.pem`, tailnet `ip-172-26-4-45`) is shared with other projects (Hermes agents, Open WebUI, aipass, the Vibe Kanban backend, OmniRoute). Read-only checks only unless the owner asks for a change.
+
+## 9. Known issues and open items, most important first
+
+1. **OmniRoute answers 503 `resource_pressure`.** The server had 131 MB free of 3.8 GB, swap 1.6 of 2 GB used, and six or more `hermes` processes holding about 1.7 GB (2026-10-23). The app retries for ~17 s, then shows the reason in the chat. Fix on the server (owner's call): stop idle Hermes agents, add memory, or relax OmniRoute's pressure threshold. Then confirm one real draft end to end.
+2. **XM's clock probably follows European daylight saving.** The XM clock checks fail in most years: FX pairs show 15 to 20 weekend M15 bars and 3 to 4 weeks with 6 D1 bars a year; GOLD's daily break moves in 2014, 2019, 2020, 2024 and 2025. About 4 weeks a year fits XM switching on European dates while `market/server_time.py` assumes New York's. In those weeks bar times in UTC are an hour off, which matters for `session_window` and `range_breakout`. Confirm from the bars, then fix `server_offset` and re-import. Board issue: "Issue · XM clock checks fail most years".
+3. **The AI prompt is untested against the real model.** Watch for Specs with grids over 12 combinations, wrong param names, or prose that promises profit; tune `research.system_prompt`.
+4. `desk import --start` mid-year: M1 starts at that month, other timeframes at 1 January, so that January is served without M1. The default start (2014-01-01) is fine.
+5. Owner decisions left as they are: the Holdout counts a trade still open at data end at its last price; `atr_target` ignores the stop distance it receives.
+6. ADR 0005 (the AI's prose has no digits) is not enforced by the simple app.
+7. Not built: a Holdout button, Telegram alerts and an MCP server (milestone M6), a Playwright end-to-end suite (M7), the live/demo Forward Arena (Layer B). A live EA with hard caps is parked as CCC-82; Claude Code's auto-mode safety check blocked work on it, so the owner must allow it before anyone builds it.
+
+## 10. The Vibe Kanban board (owner's rule)
+
+Whenever a task, decision or issue starts, finishes or changes, update the board in the same turn.
+- Vibe Kanban runs on the owner's laptop (`vibe-kanban.exe`, web UI on 127.0.0.1, port changes) with its data on the server. Project "Fxcommand", id `0f530a08-1bad-4dbd-ad53-b2452e8c7e07`. Statuses: Backlog, To do, In progress, In review, Done, Cancelled.
+- Use the `vibe_kanban` MCP. If it isn't connected, run it over stdio: `npx -y vibe-kanban@latest --mcp` and speak JSON-RPC (`initialize`, `notifications/initialized`, `tools/call` with `list_issues`, `create_issue`, `update_issue`, …). `update_issue` replaces the whole description; `create_issue` takes no status, so set it with `update_issue` after.
+- Titles: `Roadmap · Layer A · M5 …` (epics), `M5 · …` (tasks, as sub-issues of their epic), `Issue · …`, `Decision · …`, `Chore · …`, `Bug · …`, `Layer B · …`.
+- Don't call the board's API with the token the local app hands out (`/api/auth/token`); Claude Code's safety check blocked that as credential exploration.
+
+Recent cards: CCC-83 the simple app (In review), CCC-87 the redesign (In review), CCC-88 saved chats (Done), CCC-82 live EA (parked, Backlog), plus the XM clock issue and the OmniRoute-key chore (To do).
+
+## 11. Traps on this machine
+
+- Windows 11; the shell tools are Git Bash and PowerShell. In Git Bash, arguments starting with `/` get rewritten to Windows paths (`/v1/x` became `C:/Program Files/Git/v1/x`): set `MSYS_NO_PATHCONV=1` or avoid leading slashes. `/tmp` in Git Bash and in Windows Python are different folders.
+- Git has `core.autocrlf=true`; files may be LF or CRLF in the working tree. The Edit tool copes; for scripted edits keep each file's line endings.
+- Install the MT5 package with `uv sync --extra mt5`; tests never need it (they use `FakeMt5`).
+- numba compiles on first use, so the first Trial in a fresh process is slower.
+- `tests/test_app.py::test_the_pages_script_parses` runs `node --check` on the page's script; a stray brace once stopped the whole page.
+- Browser checks in the desktop app's preview pane: emulated viewports can render oddly; check layout with `getBoundingClientRect` and `scrollWidth` as well as screenshots. A modal `<dialog>` (Settings opens by itself when no key is saved) makes the rest of the page inert, so close it before clicking.
+
+## 12. Documents
+
+- `docs/intent/vibe-desk.md` (why), `docs/ideas/vibe-desk.md` (the locked one-pager), `docs/spec/layer-a-verdict-engine.md` (the engine's spec), `CONTEXT.md` (glossary: Spec, Block, Trial, Idea Family, Verdict, Holdout, Spread Floor, R, …).
+- `docs/adr/0001` to `0007`: Block-composed strategies; the fixed Holdout; every evaluation is a Trial; the Spread Floor cost model; no digits in the AI's prose; the app is the single writer; the Pass Bar ignores win rate.
+- `tasks/plan.md` and `tasks/todo.md` (M3 and everything since, including the simple app), `tasks/done/` (M1, M2).
+
+## 13. History
+
+- 2026-10-21: fresh start; intent, spec, glossary and ADRs written.
+- 2026-10-22: M1 (Blocks, Specs, engine) and M2 (Gauntlet, Ledger, Trials, Holdout) done; known-answer tests pass (random walk always rejected, a planted edge found).
+- 2026-10-23: M3 (MT5 read-only data: seam, clock, cache and mask, costs, importer, `desk` commands) done, plus a tuning pass and an independent review. The owner then dropped the rigor rules. In the same session: real import of all 8 symbols; the web app with AI chat and one-click start; the claude.ai-like redesign; saved chats; OmniRoute retries.

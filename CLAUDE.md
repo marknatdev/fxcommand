@@ -2,6 +2,7 @@
 
 An AI research desk for one owner who trades GOLD and FX on MT5 (XM). The owner chats an Idea, the Research Desk builds a block-based Strategy Spec, and the Gauntlet gives an honest Verdict. Deterministic code executes; the AI never trades.
 
+- **Handoff:** `AGENTS.md` has the whole picture (status, how the app works, data, AI, board, known issues, traps). Read it first and keep it current when something it describes changes.
 - **Intent:** `docs/intent/vibe-desk.md`. **Spec:** `docs/spec/layer-a-verdict-engine.md`. **Glossary:** `CONTEXT.md` (use its terms exactly). **Decisions:** `docs/adr/`.
 - **Current work:** `tasks/plan.md` (definitions the tests depend on) and `tasks/todo.md` (tasks, results, checkpoints). Finished milestones: `tasks/done/`.
 
