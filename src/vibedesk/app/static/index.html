@@ -340,7 +340,7 @@ async function loadStatus() {
 }
 
 async function openSettings() {
-  $("settings").showModal();
+  if (!$("settings").open) $("settings").showModal();
   $("modelsNote").textContent = "Loading models…";
   const { models, error } = await api("/api/models");
   const current = $("llmModel").dataset.current || "";
@@ -355,11 +355,17 @@ $("settingsBtn").onclick = openSettings;
 $("saveSettings").onclick = async (e) => {
   e.preventDefault();
   const body = { llm_url: $("llmUrl").value, llm_model: $("llmModel").value };
-  if ($("llmKey").value) body.llm_key = $("llmKey").value;
+  const newKey = !!$("llmKey").value;
+  if (newKey) body.llm_key = $("llmKey").value;
   await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
   $("llmKey").value = "";
+  await loadStatus();
+  if (newKey && !body.llm_model) {  // the model list needs the key: show it now and let them pick
+    await openSettings();
+    $("modelsNote").textContent = "Key saved. Now pick a chat model and press Save. " + $("modelsNote").textContent;
+    return;
+  }
   $("settings").close();
-  loadStatus();
 };
 $("updateBtn").onclick = async () => { await api("/api/data/update", { method: "POST" }); loadStatus(); };
 EXAMPLES.forEach((text) => {
