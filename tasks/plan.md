@@ -33,8 +33,14 @@ These are fixed before code, so no test is tuned after the fact.
 - **No ambiguity for trading bars:** New York changes its clocks at 02:00 on a Sunday, which is 09:00 server time, while the market is closed.
 - **Requests:** `copy_rates_range` and `copy_ticks_range` take server-clock bounds. A UTC range is widened by one day on each side, converted, and trimmed back to the UTC range after conversion.
 - **Checks:**
-  - **Round trip:** utc → server → utc is the identity for every minute of 2014–2026, including every DST weekend.
-  - **Structure, on real data, per year:** every D1 bar opens at 17:00 New York; every H4 bar opens at a server hour divisible by 4; every M15 bar sits on the 15-minute UTC grid. A year that breaks this means XM's clock differed then, and the import report fails it.
+  - **Round trip:** utc → server → utc is the identity for every minute of 2014–2026 outside server Sunday (amended at T1's merge, 2026-10-23). `server_offset` looks up one offset per UTC day, so on the first seven UTC hours of each switch Sunday it can't be inverted; those 10,920 minutes all fall on server Sunday, when no bar opens, and the tests pin them exactly.
+  - **Structure (`check_clock`), on real data, per year:** every D1 bar opens at 17:00 New York; every H4 bar opens at a server hour divisible by 4; every M15 bar sits on the 15-minute UTC grid. These catch our own bugs (times shifted between MT5 and the cache). They can't catch XM's clock having been set differently: MT5 builds D1 and H4 bars on its own server clock, and the conversion maps server midnight to 17:00 New York by construction.
+  - **XM's clock (added at T1's merge), on real data, per year:** a different past clock would show as:
+    - a bar opening on a server Saturday or Sunday (on a fixed GMT+2 clock, US summer weeks would open at server Sunday 23:00);
+    - a full trading week without exactly 5 D1 bars;
+    - GOLD's daily break (the server hour with no M15 bars on a normal weekday) moving between US summer and winter.
+
+    A year that fails one of these blocks the checkpoint until it is explained and handled.
   - **Live tick (`desk smoke`):** while the market is open, the converted `symbol_info_tick` time is within 120 s of the system's UTC clock. At the weekend this check is skipped with a message, and the structural checks still run.
 
 ### Import and cache (spec §4)

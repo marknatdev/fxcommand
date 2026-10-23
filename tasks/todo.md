@@ -48,10 +48,10 @@
 **Description:** Add `server_to_utc(server)` beside `server_offset(utc)` in `server_time.py`, as the plan defines it. Build `Mt5BarSource(api, symbols)`: a `BarSource` that widens a UTC range by a day, converts it to server-clock bounds, calls `copy_rates_range`, converts the times to UTC, trims to the range, and returns `Bars` with the symbol's point and digits. It drops MT5's extra columns.
 
 **Acceptance criteria:**
-- [ ] Round trip: utc → server → utc is the identity for every minute of 2014–2026, with every US DST weekend named in a test.
-- [ ] Bars fetched from `FakeMt5` through `Mt5BarSource` equal the `SyntheticBarSource` bars exactly, for every timeframe, across a DST change.
-- [ ] D1 bars convert to 17:00 New York opens and H4 bars to server hours divisible by 4 (a structural check that T6 reuses on real data).
-- [ ] A range that ends inside a weekend or a holiday returns the right bars, with no off-by-one at either end.
+- [x] Round trip: utc → server → utc is the identity for every minute of 2014–2026, with every US DST weekend named in a test (except the pinned server-Sunday minutes; see the result).
+- [x] Bars fetched from `FakeMt5` through `Mt5BarSource` equal the `SyntheticBarSource` bars exactly, for every timeframe, across a DST change.
+- [x] D1 bars convert to 17:00 New York opens and H4 bars to server hours divisible by 4 (a structural check that T6 reuses on real data).
+- [x] A range that ends inside a weekend or a holiday returns the right bars, with no off-by-one at either end.
 
 **Verification:** `uv run pytest tests/test_server_time.py tests/test_mt5_source.py`
 
@@ -61,6 +61,17 @@
 
 **Scope:** M
 
+**Result (worktree session, merged 2026-10-23 as `3a58e3a`, branch commit `4ebe894`):**
+- **`server_to_utc`:** the plan's formula, vectorised with one zoneinfo lookup per server hour. `check_clock({timeframe: utc_times})` returns, per UTC year and timeframe, the number of bars that break the rule.
+- **`Mt5BarSource(api, *, clock=now)`:** selects the symbol once, takes point and digits from `symbol_info`, widens by a day, converts, trims to [start, end). A missing start means `RESEARCH_START`, a missing end `clock()`. The bar still forming at the end is included; T4's cutoff keeps closed bars only. The caller owns `initialize` and `shutdown`. Failures raise `Mt5Error` with `last_error()`.
+- **Evidence:**
+  - 6,837,120 minutes of 2014–2026 checked one year at a time; the only misses are exactly 26 × 420 = 10,920, the first seven UTC hours of each switch Sunday, all on server Sunday. The 26 switch dates are named and checked against the time-zone database. Every trading minute of each switch weekend round-trips exactly.
+  - FakeMt5 through `Mt5BarSource` equals the source bars on all 5 timeframes for GOLD and EURUSD, across the 2025-11-02 and 2026-03-08 switches.
+  - Clock checks: converted bars pass; a year shifted by 1 h fails D1 and H4, by 10 min all three.
+  - Weekend, both switch Sundays, Christmas, a D1 week from Monday 00:00 UTC (4 bars, not 5), and 40 random ranges on every timeframe: no off-by-one.
+- **Deviations:** the round trip (above; plan amended); no `symbols` parameter (names pass to MT5, which rejects unknown ones).
+- **Finding, adopted into the plan:** the structural checks can't catch XM's clock having been set differently in the past. The plan now adds the XM clock checks (no weekend bars, 5 D1 bars a week, GOLD's daily break hour) for T5's data report and T6.
+
 ---
 
 ## T2: Parquet cache + data-quality mask + `CachedBarSource`
@@ -68,12 +79,12 @@
 **Description:** `market/cache.py`: write one year (or month) of `Bars` to `data/bars/{symbol}/{timeframe}/{year}.parquet` through a temporary file and a rename, and read a UTC range back across year files. `market/quality.py`: the first usable month and thin days, as the plan defines them, frozen from the Research Window and stored in `meta.json`. `CachedBarSource(root)`: a `BarSource` that reads the cache and applies the mask.
 
 **Acceptance criteria:**
-- [ ] Write then read gives back exactly the same `Bars`, including across year boundaries and for an empty year.
-- [ ] A crash between the temporary write and the rename leaves the old file intact (a test that fails the rename).
-- [ ] On synthetic data with a planted sparse start (one bar a day until a given month) and planted thin days, the mask finds exactly that month and exactly those days.
-- [ ] A later refresh that adds days never changes the mask on old days, so a re-read of 2014–2024 is byte-for-byte the same.
-- [ ] `MarketData(CachedBarSource(...), ledger)` keeps the Holdout guard: the existing guard tests pass with the cache behind the facade. A new guard: Parquet is read only in `market/cache.py`.
-- [ ] The cache's per-year summary (the input to the data report) gives only bar counts, masked days, spreads and gaps for years from `HOLDOUT_START` on; a test checks it holds no price or return field for those years.
+- [x] Write then read gives back exactly the same `Bars`, including across year boundaries and for an empty year.
+- [x] A crash between the temporary write and the rename leaves the old file intact (a test that fails the rename).
+- [x] On synthetic data with a planted sparse start (one bar a day until a given month) and planted thin days, the mask finds exactly that month and exactly those days.
+- [x] A later refresh that adds days never changes the mask on old days, so a re-read of 2014–2024 is byte-for-byte the same.
+- [x] `MarketData(CachedBarSource(...), ledger)` keeps the Holdout guard: the existing guard tests pass with the cache behind the facade. A new guard: Parquet is read only in `market/cache.py`.
+- [x] The cache's per-year summary (the input to the data report) gives only bar counts, masked days, spreads and gaps for years from `HOLDOUT_START` on; a test checks it holds no price or return field for those years.
 
 **Verification:** `uv run pytest tests/test_cache.py tests/test_quality.py tests/test_holdout_guard.py`
 
@@ -83,6 +94,23 @@
 
 **Scope:** M
 
+**Result (worktree session, merged 2026-10-23 as `4f446cb`, branch commit `3023acc`):**
+- **API:** `write_chunk(root, bars, year, month=None)` replaces one UTC year (or a month of it, merged into the year file); `record_import(root, symbol, cutoff)` judges the server days that closed by the cutoff (the first call builds and freezes the mask); `CachedBarSource(root)`; `read_unmasked` (guarded like `.fetch(`); `read_meta`; `summarize(root, symbol)`. `root` is the data folder, with the cache under `root/bars/`.
+- **Evidence:**
+  - round trips on all 5 timeframes across New Year and for empty chunks;
+  - a failed `os.replace` leaves the year file and `meta.json` byte-identical, with no temporary file left;
+  - the planted case gives median 96, first usable month 2024-02 and exactly the planted thin days (47 bars masked, 48 kept);
+  - a refresh that backfills and adds days leaves 2014–2024 byte-identical;
+  - every facade test also runs over the cache;
+  - two caches that differ only in Holdout prices give identical summaries;
+  - three deliberate breaks (median over all days, mask rebuilt per import, write without the temporary file) were each caught.
+- **Choices beyond the plan:**
+  - A server day is served only once an import has judged it, so a bar once served is never taken back. Today's bars wait for the next import.
+  - `meta.json` also stores the frozen median and `judged_through`.
+  - Thin days are judged only from the first usable month on.
+  - A gap is 2 hours or more with no bar inside one server week (weekends are no gap). The summary is structural for every year, read from `time` and `spread` only.
+  - The Parquet guard is broad: outside `market/cache.py`, no pyarrow, pandas, polars, duckdb or fastparquet import, no Parquet reader names, and no `.parquet` string (docstrings excepted).
+
 ---
 
 ## T3: Spread Floor + swap into a `CostSnapshot`
@@ -90,11 +118,11 @@
 **Description:** `market/costs.py`: `measure_floor(api, symbol, now)` reads 14 days of ticks before `now` (`COPY_TICKS_INFO`), keeps ticks with both a bid and an ask, and returns the median, the 90th percentile and the count of `(ask − bid) / point`. `measure_cost(api, symbol, now)` adds the swap from `symbol_info`, refusing a `swap_mode` other than 1. Each measurement is appended to `data/costs/{symbol}.jsonl`; `current_cost(root, symbol)` returns the latest as a `CostSnapshot` with 1 point of slippage.
 
 **Acceptance criteria:**
-- [ ] On `FakeMt5` ticks with a known spread distribution, the median and p90 match a hand computation, and ticks missing a side are not counted.
-- [ ] `swap_mode` 2 is refused with a message naming the symbol and the mode.
-- [ ] The triple-swap day comes from `swap_rollover3days`, in the `CostSnapshot`'s numbering.
-- [ ] `current_cost` returns the latest line; an older line is never rewritten.
-- [ ] The snapshot's `to_json` round-trips, as the Ledger stores it.
+- [x] On `FakeMt5` ticks with a known spread distribution, the median and p90 match a hand computation, and ticks missing a side are not counted.
+- [x] `swap_mode` 2 is refused with a message naming the symbol and the mode.
+- [x] The triple-swap day comes from `swap_rollover3days`, in the `CostSnapshot`'s numbering.
+- [x] `current_cost` returns the latest line; an older line is never rewritten.
+- [x] The snapshot's `to_json` round-trips, as the Ledger stores it.
 
 **Verification:** `uv run pytest tests/test_market_costs.py`
 
@@ -104,17 +132,31 @@
 
 **Scope:** S
 
+**Result (worktree session, merged 2026-10-23 as `b5b121b`, branch commit `bb8f575`):**
+- **API:** `measure_floor`, `measure_cost` (writes nothing), `record_cost(root, measurement)` (appends), `current_cost(root, symbol)`. Failures raise `CostError`, whose message starts with the symbol; a naive `now` raises `ValueError`.
+- **Evidence:**
+  - two whole weeks across the 8 March switch, with a cycle of spreads whose 100s miss their ask: 25,920 ticks, median 55, p90 70 (counting the ask-less ticks would give 52.5 and 61); missing bids are ignored too;
+  - swap_mode 2 is refused before any tick is read;
+  - triple-swap day 3 gives 3 nights Wed→Thu and 1 Fri→Mon (day 5 the reverse); day 7 is refused;
+  - appends leave the earlier bytes as an unchanged prefix, and a stored line holds no price;
+  - seven deliberate breaks were each caught.
+- **Notes:** the triple-swap mapping is the identity (both number days from Sunday = 0); spreads are rounded to whole points before the median; `symbol_select` is not called here, so the CLI selects each symbol before measuring.
+
 ---
 
 ## Checkpoint A (after T0–T3)
-- [ ] Default suite green on the fakes, ruff clean
-- [ ] The owner reviews
+- [x] Default suite green on the fakes, ruff clean: a trial merge of T1–T3 passed 1045 tests (with the timing tests) and the 6 slow tests (203 s), 2026-10-23
+- [x] The owner reviews (merge approved 2026-10-23)
+
+**Contract fixes at merge:** `mt5_api.py`'s docstring named the wrong importing module (it is `mt5_api.py` itself, in `real_api()`); `FakeMt5` takes any `BarSource`, not only a `SyntheticBarSource`.
 
 ---
 
 ## T4: Importer and refresh
 
 **Description:** `market/importer.py`: import every symbol and timeframe from an `Mt5BarSource` into the cache, chunk by chunk (M1 by month, others by year). Each import fixes a cutoff when it starts and keeps only bars closed by then; a chunk is accepted only after two reads agree on those closed bars. It builds the mask at the first import and extends it on refresh. `refresh` re-imports the current chunk and the one before it. One importer at a time, by a lock file. It returns a report: chunks read, bars per chunk, retries, capped chunks (counts only, no prices).
+
+**From T1 and T2:** read with `Mt5BarSource` (it includes the forming bar; the cutoff drops it), write with `write_chunk`, and call `record_import(root, symbol, cutoff)` once, after every chunk of the import has settled. `CachedBarSource` withholds server days not yet judged, so a read-back ends at the last server day closed by the cutoff. The Parquet guard forbids naming Parquet files in `src/` outside `cache.py`; tests that hash files compute the paths themselves.
 
 **Acceptance criteria:**
 - [ ] A full import from `FakeMt5` into a temporary cache, read back through `MarketData`, equals the synthetic bars after the mask.
@@ -139,10 +181,13 @@
 ## T5: `desk` commands
 
 **Description:** Fill in `cli.py`: `desk smoke`, `desk import`, `desk refresh`, `desk floors` and `desk data-report`, as the plan defines them. The real `MetaTrader5` module is loaded only inside these commands; every command takes the API as a parameter so tests pass `FakeMt5`.
+- `desk floors`: select each symbol, then `record_cost(root, measure_cost(api, symbol, now))`; report a `CostError` per symbol.
+- `desk data-report`: joins T2's `summarize`, T1's `check_clock` and the plan's XM clock checks (no bar on a server Saturday or Sunday, 5 D1 bars per full week, GOLD's daily break at the same server hour in US summer and winter), computed inside `market/` from bar times only.
 
 **Acceptance criteria:**
 - [ ] `desk smoke` on `FakeMt5` prints the report and exits 0; with a fake that fails `initialize`, or a tick more than 120 s off, it exits non-zero with the reason. At a fake weekend the tick check is skipped and says so.
 - [ ] `desk data-report` on a fake cache shows the first usable month, masked days per year and the clock checks per year; a fake year with a shifted clock fails.
+- [ ] A fake year built on a fixed GMT+2 server clock (no US daylight saving) fails the XM clock checks: weekend bars in US summer, and GOLD's break moving by an hour.
 - [ ] No command imports `MetaTrader5` when given a fake (checked with the module made unimportable).
 - [ ] No command prints a price or a return for a date from `HOLDOUT_START` on: `desk smoke` prints counts and times, and the data report shows only structural facts for Holdout years (a test scans the output).
 
@@ -169,7 +214,8 @@
 **Acceptance criteria:**
 - [ ] `desk smoke` passes, with the live tick check run while the market is open.
 - [ ] Every symbol and timeframe is in the cache from its first usable month; GOLD's first usable month is recorded.
-- [ ] The structural clock checks pass for every year of every symbol, or a failing year is explained and handled before the checkpoint.
+- [ ] The structural clock checks and the XM clock checks pass for every year of every symbol, or a failing year is explained and handled before the checkpoint.
+- [ ] Before importing, the terminal is connected and receiving quotes (T0 found its last GOLD tick about 19 hours old); a stale terminal would freeze partial days as masked.
 - [ ] Spread Floors and swaps are measured for all 8 symbols and compared with the probe (GOLD about 55 points, EURUSD about 20).
 - [ ] Masked days per year are listed, with anything surprising explained.
 

@@ -1,8 +1,9 @@
 """FakeMt5: the MT5 terminal as the tests need it, behind the same contract as the real one.
 
-It serves SyntheticBarSource bars the way MT5 does: times in server wall-clock seconds written as
-UTC, bounds read the same way, None plus `last_error()` on failure. It can also misbehave the
-ways a real terminal does, so the importer can be tested against them:
+It serves a BarSource's bars (a SyntheticBarSource, in tests) the way MT5 does: times in server
+wall-clock seconds written as UTC, bounds read the same way, None plus `last_error()` on
+failure. It can also misbehave the ways a real terminal does, so the importer can be tested
+against them:
 - `settling_reads`: the first reads of each range return only part of it, as while the terminal
   is still downloading history;
 - `max_bars`: a read returns at most this many bars (the latest), as with a low "Max bars in
@@ -24,7 +25,8 @@ import numpy as np
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.mt5_api import RATE_DTYPE, SWAP_IN_POINTS, TICK_DTYPE
 from vibedesk.market.server_time import server_offset
-from vibedesk.market.synthetic import PROFILES, SyntheticBarSource
+from vibedesk.market.source import BarSource
+from vibedesk.market.synthetic import PROFILES
 
 # MT5's error codes for the failures the fake can produce.
 RES_S_OK = (1, "Success")
@@ -69,7 +71,7 @@ class FakeMt5:
 
     def __init__(
         self,
-        source: SyntheticBarSource,
+        source: BarSource,  # point and digits come from the synthetic PROFILES
         *,
         now: datetime | Callable[[], datetime] | None = None,
         swaps: dict[str, tuple[float, float]] | None = None,

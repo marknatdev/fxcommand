@@ -1,8 +1,9 @@
 """The seam between Vibe Desk and the MetaTrader 5 terminal: only the read-only calls M3 needs.
 
-The real adapter is the `MetaTrader5` module itself, imported only by market/mt5.py. The fake is
-FakeMt5 (market/fake_mt5.py). tests/test_mt5_guard.py fails on any MetaTrader5 attribute outside
-ALLOWED, so no code can reach an order call (spec §3.3, §9.1).
+The real adapter is the `MetaTrader5` module itself, imported only here, inside `real_api()`,
+which wraps it in ReadOnlyMt5. The fake is FakeMt5 (market/fake_mt5.py). tests/test_mt5_guard.py
+fails on any MetaTrader5 attribute outside ALLOWED, so no code can reach an order call (spec
+§3.3, §9.1).
 
 MT5's quirks, which this contract keeps in view (probed read-only, 2026-10-23):
 - Every time it returns (a bar's `time`, a tick's `time` and `time_msc`) is server wall-clock time
