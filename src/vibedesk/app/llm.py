@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from typing import Protocol
 
 import httpx
+
+BUSY = {429, 502, 503, 504}  # OmniRoute or the model behind it is overloaded: worth a retry
+RETRY_WAITS = (2.0, 5.0, 10.0)  # seconds before each retry
 
 
 class LlmError(Exception):
@@ -37,14 +41,20 @@ class OmniRoute:
     def _call(self, method: str, path: str, body: dict | None = None) -> dict:
         if not self.key:
             raise LlmError("no OmniRoute key yet: add it in Settings")
-        try:
-            response = httpx.request(method, self.url + path, json=body, timeout=self.timeout,
-                                     headers={"Authorization": f"Bearer {self.key}"})  # fmt: skip
-        except httpx.HTTPError as error:
-            raise LlmError(
-                f"can't reach OmniRoute at {self.url} ({error.__class__.__name__}). Is the SSH "
-                "tunnel up? The start script opens it."
-            ) from error
-        if response.status_code >= 400:
-            raise LlmError(f"OmniRoute said {response.status_code}: {response.text[:300]}")
-        return response.json()
+        headers = {"Authorization": f"Bearer {self.key}"}
+        for wait in (*RETRY_WAITS, None):
+            try:
+                response = httpx.request(method, self.url + path, json=body, headers=headers,
+                                         timeout=self.timeout)  # fmt: skip
+            except httpx.HTTPError as error:
+                raise LlmError(
+                    f"can't reach OmniRoute at {self.url} ({error.__class__.__name__}). Is the "
+                    "SSH tunnel up? The start script opens it."
+                ) from error
+            if response.status_code in BUSY and wait is not None:
+                time.sleep(wait)  # the shared server is busy: try again shortly
+                continue
+            if response.status_code >= 400:
+                raise LlmError(f"OmniRoute said {response.status_code}: {response.text[:300]}")
+            return response.json()
+        raise AssertionError("unreachable")

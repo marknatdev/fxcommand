@@ -91,6 +91,23 @@ def test_a_reply_without_a_fence_still_parses():
     assert split_reply('Sure. {"a": 1} ') == ("Sure.", '{"a": 1}')
 
 
+def test_omniroute_retries_while_busy_then_gives_the_reason(monkeypatch):
+    import httpx
+
+    import vibedesk.app.llm as llm
+
+    replies = [httpx.Response(503, text="resource pressure")] * 2 + [
+        httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}]})
+    ]
+    monkeypatch.setattr(llm.httpx, "request", lambda *a, **k: replies.pop(0))
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    assert llm.OmniRoute("http://x/v1", "key", "m").chat([]) == "hi"
+
+    monkeypatch.setattr(llm.httpx, "request", lambda *a, **k: httpx.Response(503, text="busy"))
+    with pytest.raises(llm.LlmError, match="OmniRoute said 503: busy"):
+        llm.OmniRoute("http://x/v1", "key", "m").chat([])
+
+
 @pytest.fixture
 def client(tmp_path):
     return TestClient(create_app(tmp_path / "data", llm=ScriptedLlm(reply(EXAMPLE)),
