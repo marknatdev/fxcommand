@@ -11,7 +11,7 @@ M2 runs on `SyntheticBarSource` only. It uses no MT5 (that is M3) and no LLM (M4
 - a Trial on 12 years of synthetic M15 takes ≤ 60 s;
 - the Holdout and Ledger guard tests pass.
 
-Detailed tasks: [todo.md](todo.md). The finished M1 plan: [done/m1-plan.md](done/m1-plan.md).
+Detailed tasks: [m2-todo.md](m2-todo.md). The finished M1 plan: [m1-plan.md](m1-plan.md).
 
 ## Definitions the tests depend on
 
@@ -35,7 +35,7 @@ These are fixed before code, so no test is tuned after the fact.
   - the same long/short mix;
   - the fold's chosen combination's exits (stop, target, trailing, time, opposite);
   - the same Cost Model.
-- **Exact trade counts (amended 2026-10-22, owner's decision).** Each random trade is drawn on its own at a distinct bar of its server hour, from trades the engine simulated alone from flat. A run is not held to one position at a time. Deferring blocked entries piled them onto post-exit hours, and redrawing them one position at a time biased long-holding Specs toward short, losing trades (see T7 in todo.md).
+- **Exact trade counts (amended 2026-10-22, owner's decision).** Each random trade is drawn on its own at a distinct bar of its server hour, from trades the engine simulated alone from flat. A run is not held to one position at a time. Deferring blocked entries piled them onto post-exit hours, and redrawing them one position at a time biased long-holding Specs toward short, losing trades (see T7 in m2-todo.md).
 - **Why exact counts matter:** fewer baseline trades would narrow the net-R distribution and make the 95th percentile easier to beat, which is a bias toward false CANDIDATEs. A test asserts that the realised counts equal the strategy's.
 
 ### Statistics
@@ -148,5 +148,5 @@ If T10 measures more than 60 s, the levers are, in order:
 ## Open questions and follow-ups
 
 - **Time filters:** `session_window` and `day_of_week` judge the entry bar, the next bar's open (decided and built 2026-10-22). It matters on H4/D1.
-- **Stop and reverse (decided and built 2026-10-22, after M2):** an opposite signal closes the trade, and when the Spec's own entry for the other side is valid at that bar (filters, direction, a usable stop), the reverse opens at the same open. The rules and evidence are under "After M2" in todo.md.
+- **Stop and reverse (decided and built 2026-10-22, after M2):** an opposite signal closes the trade, and when the Spec's own entry for the other side is valid at that bar (filters, direction, a usable stop), the reverse opens at the same open. The rules and evidence are under "After M2" in m2-todo.md.
 - **Known-answer floor (decided 2026-10-22):** T10 runs the known-answer test with a 17-point Spread Floor.

@@ -61,7 +61,7 @@ There is one seam per external dependency, and each has a real adapter and a fak
 
 | Seam | Real adapter | Fake adapter (tests, E2E) |
 |---|---|---|
-| `BarSource` | `Mt5BarSource`. Read only: it uses only `initialize`, `copy_rates_range`, `copy_ticks_range`, `symbol_info`, `symbol_select` and `shutdown`. | `SyntheticBarSource`: seeded random walk, plus planted edge series with known answers |
+| `BarSource` | `Mt5BarSource`. Read only: it uses only `initialize`, `copy_rates_range`, `copy_ticks_range`, `symbol_info`, `symbol_info_tick` (the §10 clock check), `symbol_select`, `last_error` and `shutdown`. An allowlist guard test enforces this (M3 plan). | `SyntheticBarSource`: seeded random walk, plus planted edge series with known answers |
 | `LLM` | `OmniRouteLLM`: OpenAI-compatible chat completions with tools, at `http://127.0.0.1:20128/v1` (configurable), combo `vibe-desk` | `ScriptedLLM`, which replays recorded tool-call scripts |
 | `Notifier` | `TelegramNotifier`, which calls the Bot API over httpx | `RecordingNotifier` |
 | `Clock` | `SystemClock` | `FixedClock` |

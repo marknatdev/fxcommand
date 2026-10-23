@@ -1,7 +1,7 @@
 # M2 tasks: Gauntlet and Ledger
 
-- **Spec:** [docs/spec/layer-a-verdict-engine.md](../docs/spec/layer-a-verdict-engine.md), §4, §6, §9 and §10.
-- **Plan and definitions:** [plan.md](plan.md). Tasks follow its "Definitions the tests depend on" exactly.
+- **Spec:** [docs/spec/layer-a-verdict-engine.md](../../docs/spec/layer-a-verdict-engine.md), §4, §6, §9 and §10.
+- **Plan and definitions:** [m2-plan.md](m2-plan.md). Tasks follow its "Definitions the tests depend on" exactly.
 - **Commands:** `uv run pytest` (default suite), `uv run pytest -m slow` (known answers and benchmark), `uv run ruff check`, `uv run ruff format --check`.
 
 **File ownership.** Each Phase 1 task owns its files and touches no one else's, so T1–T5 can run in parallel worktrees. Shared files (`pyproject.toml`, `__init__.py` re-exports) change only in the task named for them.
@@ -55,7 +55,7 @@
 **Scope:** M
 
 **Result (merged 2026-10-22, `da81f96`):**
-- **Parameters:** `PLANTED_EDGE = SyntheticConfig(reveal=2.0, follow=0.6, follow_hours=3)`, calibrated on seeds 1–5. The full write-up is [docs/research/2026-10-22-planted-edge.md](../docs/research/2026-10-22-planted-edge.md).
+- **Parameters:** `PLANTED_EDGE = SyntheticConfig(reveal=2.0, follow=0.6, follow_hours=3)`, calibrated on seeds 1–5. The full write-up is [docs/research/2026-10-22-planted-edge.md](../../docs/research/2026-10-22-planted-edge.md).
 - **Accepted by the owner:** the hidden daily directions are balanced within 20-server-day blocks (10 up, 10 down, random order) instead of independent coin flips. Independent flips made the price level wander (seed 3: 1014 → 412), and the fixed-point Spread Floor then swamped the edge. Each day is still a fair coin, and lag-1 autocorrelation of daily returns moves from −0.004 to −0.031.
 - **Profit factor after costs, seeds 1–5:**
 
@@ -513,3 +513,26 @@ The output is a `WalkForward` result holding:
 **For Layer B (the live runner):** a live runner always sits on the last bar, where the filter uses the clock's next open. Across the weekend and the daily break that can differ from the bar the order actually fills on, so the runner must re-check time filters against the real fill bar before it sends.
 
 - [x] The owner reviews (approved 2026-10-23)
+
+---
+
+## Before M3: rules_version (2026-10-23, owner's request)
+
+**What it does:**
+- `src/vibedesk/rules.py` holds `RULES_VERSION = 1` (today's rules: M2, with stop-and-reverse and entry-bar time filters) and the bump rule: bump for any change that can alter an existing Spec's trades or Verdict on the same bars and Cost Model (engine fills and exits, what a Block means, walk-forward and stitching, the Coin-Flip Baseline, the Pass Bar, Prosecutor or Holdout thresholds). A new Block, a refactor or an app change is no bump.
+- **Ledger migration 2:** `trials.rules_version`. Trials recorded before it keep NULL; a trigger refuses any new Trial without one, and `record_trial` requires a positive integer.
+- **The Holdout gate:** `request_holdout` and `run_holdout` refuse with `RULES_CHANGED` when the latest Trial's rules version is not today's (NULL included). `run_holdout` refuses before any bar is fetched. The remedy is a new Trial under today's rules, which counts against the Trial Budget and adds to N, as every evaluation does (ADR 0003).
+- Trial and Holdout records carry `rules_version`; `RESULT_VERSION` is 2.
+
+**The tripwire (`tests/test_rules_version.py`):** each part of the rules is run on fixed synthetic data and hashed, with floats to 9 significant digits: every Block (on the look-ahead test's parameters), the engine on 40 reference-twin cases and 20 reversal cases, one small Trial end to end (a 2-Combination H1 grid with a session filter and an opposite exit: walk-forward, stitching, baseline, every check with its threshold), and the thresholds themselves. A pinned part that changes fails by name; a new Block only needs a pin. It adds about 3 s to the default suite.
+- **Only what the rules decide:** the Trial part hashes the verdict, the checks (name, value, threshold, status), the walk-forward figures, the baseline numbers, the Deflated Sharpe, PBO and the Holdout rate, not ids, versions or display fields. Adding a field to the record doesn't trip it.
+- **Inputs pinned apart:** `inputs:bars` (the exact bytes of every synthetic bar series used) and `inputs:cases` (the look-ahead parameters, the engine cases, the Trial Spec). They are no rules, but they move every part, so a changed input fails first with "re-pin in a commit of its own, no bump". The shared generators (`SyntheticBarSource`, `PARAMS`, `random_case`, `reversal_case`) carry a note pointing here.
+- **Checked that it trips:** undoing the entry-bar time filter changes `block:day_of_week`, `block:session_window`, `engine:reversal` and `trial`; moving the Holdout profit factor to 1.15 changes `thresholds`; adding fields to the Trial record leaves `trial` unchanged; a nudged synthetic spread changes `inputs:bars`.
+
+**Evidence:**
+- Tests: a rule change after a grant refuses both a new request and the Holdout (no fetch, no spend); a CANDIDATE recorded under migration 1 can't ask for the Holdout ("before rules were versioned"); a migration-1 Ledger opens with its old Trial intact and NULL; bad rules versions (0, None, True, 1.0) are refused.
+- **Suites:** the default suite passes 845 tests in about 28 s; the slow suite passes all 6 tests in 206 s. Ruff is clean.
+
+**For the owner:** a re-run after a rule change is charged like any Trial. If rule changes should not cost the family Trials, that needs a decision (and an ADR 0003 amendment).
+
+- [x] The owner reviews (approved 2026-10-23; re-runs after a rule change stay charged)
