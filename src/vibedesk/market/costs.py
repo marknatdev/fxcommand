@@ -18,6 +18,7 @@ import numpy as np
 from vibedesk.engine.costs import CostSnapshot
 from vibedesk.market.mt5_api import SWAP_IN_POINTS, Mt5Api, SymbolInfo
 from vibedesk.market.server_time import server_offset
+from vibedesk.market.universe import SYMBOLS
 
 FLOOR_WINDOW = timedelta(days=14)
 SLIPPAGE_POINTS = 1.0  # charged on every fill
@@ -157,4 +158,7 @@ def _utc(now: datetime) -> datetime:
 
 
 def _path(root: Path | str, symbol: str) -> Path:
+    # The name becomes part of a file path, so only a symbol Vibe Desk trades may reach it.
+    if symbol not in SYMBOLS:
+        raise CostError(f"{symbol!r}: not a symbol Vibe Desk trades ({', '.join(SYMBOLS)})")
     return Path(root) / "costs" / f"{symbol}.jsonl"

@@ -223,3 +223,11 @@ def test_an_mt5_failure_names_the_symbol_and_the_terminal_error(source):
         measure_cost(FakeMt5(source), "GOLD", NOW)  # never initialized
     with pytest.raises(CostError, match="GOLD: copy_ticks_range failed: .*Call failed"):
         measure_floor(connected(TicksFail(source)), "GOLD", NOW)
+
+
+def test_a_symbol_outside_the_universe_never_reaches_a_file_path(tmp_path):
+    # The symbol becomes part of a file name, so `../x` must not climb out of the costs folder.
+    for symbol in ("../../outside", "GOLD/../../x", "DOGEUSD"):
+        with pytest.raises(CostError, match="not a symbol Vibe Desk trades"):
+            current_cost(tmp_path, symbol)
+    assert not any(tmp_path.rglob("*.jsonl"))

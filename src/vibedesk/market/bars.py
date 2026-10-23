@@ -69,6 +69,10 @@ class Bars:
                 raise ValueError(f"{name} must be one-dimensional with the same length as time")
         if n > 1 and np.any(np.diff(arrays["time"]) <= 0):
             raise ValueError("bar times must be strictly increasing")
+        # NaN passes every comparison below, so prices are checked on their own first.
+        for name in ("open", "high", "low", "close"):
+            if not np.all(np.isfinite(arrays[name]) & (arrays[name] > 0)):
+                raise ValueError(f"{name} prices must be finite and positive")
         body_top = np.maximum(arrays["open"], arrays["close"])
         body_bottom = np.minimum(arrays["open"], arrays["close"])
         if np.any(arrays["high"] < body_top):

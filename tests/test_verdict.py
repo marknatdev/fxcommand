@@ -239,6 +239,14 @@ def test_positive_folds_scale_with_the_number_of_folds():
     assert (eight.threshold, eight.value, eight.status) == (5, 7, PASS)
 
 
+def test_a_year_that_trades_nothing_is_not_a_positive_fold():
+    # A fold with no eligible Combination trades nothing and nets 0R: no profitable year, so a
+    # strategy that trades in only half its years can't pass on the empty ones.
+    check = pass_bar(walk(folds=(1, 2, 1, 3, 0, 0, 0, 0)), baseline(), 0.97, 0.1)[2]
+
+    assert (check.value, check.threshold, check.status) == (4, 5, FAIL)
+
+
 def test_pbo_may_be_na_but_the_core_checks_may_not():
     na_pbo = pass_bar(walk(), baseline(), 0.97, math.nan)
     na_core = pass_bar(walk(pf=math.nan), baseline(), math.nan, 0.1)

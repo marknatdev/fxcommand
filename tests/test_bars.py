@@ -49,6 +49,10 @@ def test_bars_are_read_only_and_do_not_alias_the_input():
         (dict(low=[99.0, 100.0, 102.1]), "low"),
         (dict(spread=[30, -1, 40]), "spread"),
         (dict(point=0.0), "point"),
+        (dict(high=[101.0, np.nan, 103.0]), "high prices must be finite and positive"),
+        (dict(low=[99.0, -np.inf, 101.0]), "low prices must be finite and positive"),
+        (dict(open=[0.0, 101.0, 102.0], low=[0.0, 100.0, 101.0]), "open prices"),
+        (dict(close=[101.0, 102.0, np.inf]), "close prices must be finite"),
     ],
 )
 def test_bars_reject_inconsistent_data(overrides, message):
