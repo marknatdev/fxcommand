@@ -9,14 +9,27 @@ unjudged.
 It reads chunk by chunk, M1 by UTC calendar month and the other timeframes by UTC calendar year,
 and accepts a chunk only when two reads in a row agree on its closed bars: a terminal still
 downloading history returns less at first, and a live market adds a bar between two reads, which
-the cutoff hides. Three guards keep a bad read out of what Trials see:
-- a chunk may not change bars on server days the mask has already judged: those are served, and
-  a Trial's bars, and their fingerprint in the Ledger, must stay the same. The import fails,
-  naming the chunk and the first day that changed, and writes nothing for it;
+the cutoff hides. Four guards keep a bad read out of what Trials see:
+- a chunk may not change any bar the cache serves (on a judged day the mask lets through): a
+  Trial's bars, and their fingerprint in the Ledger, must stay the same. The import fails,
+  naming the chunk and the first day that changed, and writes nothing for it. Masked days are
+  never served, so bars a broker later fills onto one, a holiday say, may change; it stays masked;
 - a chunk that looks short is flagged in the report, and a flagged M15 chunk stops its symbol
   before any day is judged, since the mask is judged on M15;
-- days are judged (`record_import`) only after every chunk of the symbol settled, and only when
-  the run imported M15. An import that fails half way has judged nothing, so serves nothing new.
+- a terminal that has just reconnected has a live tick, but its history can still stop days
+  before it, and two reads agree on that. So when the run's last closed M15 bar closed more than
+  MAX_LAG before the symbol's cutoff, the symbol fails before any day is judged. Two hours allow
+  for GOLD's daily break; at a weekend the tick itself is stale, so the lag stays small;
+- days are judged (`record_import`) only after every chunk of the symbol settled, only when the
+  run imported M15, and only up to the day of the run's last M15 bar, which stays open: it may
+  still be filling, and a day after it is empty because the history stops there, not because the
+  market was shut. So at a weekend, Friday waits for the import that brings Monday's bars. An
+  import that fails half way has judged nothing, so serves nothing new.
+
+A judged day is served on every timeframe at once, so a run that imports M15, and so judges, must
+import every timeframe in TIMEFRAMES: one it left out would find days judged without its bars,
+and every later import of it would be refused there. A refresh of some timeframes only leaves out
+M15, and judges nothing.
 
 `refresh` re-imports from the earlier of the chunk before the cutoff's and the chunk of the last
 import, through the cutoff's chunk. That covers a month or year that ended since the last import,
@@ -48,14 +61,14 @@ from vibedesk.market.cache import (
 from vibedesk.market.grant import RESEARCH_START
 from vibedesk.market.mt5 import Mt5BarSource
 from vibedesk.market.mt5_api import Mt5Api
-from vibedesk.market.quality import server_days
-from vibedesk.market.server_time import server_to_utc
+from vibedesk.market.quality import Mask
+from vibedesk.market.server_time import server_days, server_to_utc
 from vibedesk.market.universe import SYMBOLS
 
-UNIVERSE = SYMBOLS
 TIMEFRAMES = (Timeframe.M1, Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1)
 MAX_READS = 6  # reads of one chunk before it counts as never settling
 LATE_START = timedelta(days=4)  # longer than a weekend plus a New Year holiday
+MAX_LAG = timedelta(hours=2)  # from the last M15 bar's close to the cutoff; over GOLD's break
 _ARRAYS = ("time", "open", "high", "low", "close", "spread")
 _EPOCH = date(1970, 1, 1)
 
@@ -133,7 +146,7 @@ def import_history(
     api: Mt5Api,
     root: Path,
     *,
-    symbols: Sequence[str] = UNIVERSE,
+    symbols: Sequence[str] = SYMBOLS,
     timeframes: Sequence[Timeframe] = TIMEFRAMES,
     start: datetime = RESEARCH_START,
     clock: Callable[[], datetime] = _now,
@@ -151,7 +164,7 @@ def refresh(
     api: Mt5Api,
     root: Path,
     *,
-    symbols: Sequence[str] = UNIVERSE,
+    symbols: Sequence[str] = SYMBOLS,
     timeframes: Sequence[Timeframe] = TIMEFRAMES,
     clock: Callable[[], datetime] = _now,
 ) -> ImportReport:
@@ -206,6 +219,13 @@ def _run(
     timeframes: Sequence[Timeframe],
     cutoff: datetime,
 ) -> ImportReport:
+    missing = [str(timeframe) for timeframe in TIMEFRAMES if timeframe not in timeframes]
+    if Timeframe.M15 in timeframes and missing:
+        raise ImportFailed(
+            "a run that imports M15 judges days, and a judged day is served on every timeframe, "
+            f"so it must import them all; this one is without {', '.join(missing)}. A refresh "
+            "of some timeframes only must leave out M15"
+        )
     chunks: list[ChunkReport] = []
     symbols: list[SymbolReport] = []
     with import_lock(root), _connected(api):
@@ -216,8 +236,9 @@ def _run(
                     f"{symbol}'s first import needs M15: the data-quality mask is judged on it"
                 )
             until = _symbol_cutoff(api, symbol, cutoff)
-            judged = _judged_through(root, symbol)
+            mask = read_meta(root, symbol).mask if _has_meta(root, symbol) else None
             seen: set[Timeframe] = set()  # timeframes with bars in an earlier chunk
+            last_m15: int | None = None  # the open time of the last closed M15 bar read
             for chunk in symbol_chunks:
                 if chunk.start >= until:  # after the last tick: no bar there has closed
                     continue
@@ -225,13 +246,15 @@ def _run(
                 flag = _flag(chunk, bars, after_data=chunk.timeframe in seen, cutoff=until)
                 if len(bars):
                     seen.add(chunk.timeframe)
-                if judged is not None:
-                    _refuse_changes_to_judged_days(root, chunk, bars, judged)
+                    if chunk.timeframe is Timeframe.M15:  # its chunks come in time order
+                        last_m15 = int(bars.time[-1])
+                if mask is not None:
+                    _refuse_changes_to_served_bars(root, chunk, bars, mask)
                 # An empty chunk is written only to clear bars the cache held there before.
                 if len(bars) or _cached(root, chunk):
                     write_chunk(root, bars, chunk.year, chunk.month)
                 chunks.append(ChunkReport(chunk, len(bars), reads, flag))
-            symbols.append(_judge(root, symbol, until, timeframes, chunks))
+            symbols.append(_judge(root, symbol, until, timeframes, chunks, last_m15))
     return ImportReport(cutoff, tuple(chunks), tuple(symbols))
 
 
@@ -252,8 +275,10 @@ def _judge(
     cutoff: datetime,
     timeframes: Sequence[Timeframe],
     chunks: list[ChunkReport],
+    last_m15: int | None,
 ) -> SymbolReport:
-    """Judge the server days closed by the cutoff, if this run makes that safe."""
+    """Judge the server days closed by the cutoff and before the day of the last M15 bar, if
+    this run makes that safe."""
     if not _has_meta(root, symbol):  # the terminal had no bars for it at all
         return SymbolReport(symbol, cutoff, None, judged=False)
     short = [c for c in chunks if c.chunk.symbol == symbol and c.flag]
@@ -265,11 +290,38 @@ def _judge(
         )
     if Timeframe.M15 not in timeframes:
         return SymbolReport(symbol, cutoff, _judged_through(root, symbol), judged=False)
+    _refuse_lagging_history(symbol, cutoff, last_m15)
     try:
-        meta = record_import(root, symbol, cutoff)
+        # The last M15 bar's own day may still be filling, so it is judged by the next import.
+        meta = record_import(root, symbol, cutoff, judge_until=_utc(last_m15))
     except ValueError as error:  # no M15 in the Research Window to judge days by
         raise ImportFailed(str(error)) from error
     return SymbolReport(symbol, cutoff, meta.mask.judged_through, judged=True)
+
+
+def _refuse_lagging_history(symbol: str, cutoff: datetime, last_m15: int | None) -> None:
+    """Fail when the run's last closed M15 bar closed more than MAX_LAG before the cutoff.
+
+    The last tick bounds the cutoff, but a terminal that has just reconnected has a live tick
+    while its history may still stop days earlier, and two reads agree on that history. Judged
+    by the tick, the missing days would be judged empty and served so; the full history would
+    then change bars on judged days, and every later import would be refused.
+    """
+    if last_m15 is None:
+        raise ImportFailed(
+            f"this run read no closed M15 bar of {symbol} before its cutoff "
+            f"({cutoff:%Y-%m-%d %H:%M} UTC). The terminal may still be downloading its history; "
+            f"no day of {symbol} was judged"
+        )
+    close = _utc(last_m15 + Timeframe.M15.seconds)
+    lag = cutoff - close
+    if lag > MAX_LAG:
+        raise ImportFailed(
+            f"{symbol}'s M15 history ends {lag.total_seconds() / 3600:.1f} hours before its "
+            f"cutoff ({cutoff:%Y-%m-%d %H:%M} UTC): its last closed M15 bar closed at "
+            f"{close:%Y-%m-%d %H:%M} UTC. The terminal may still be downloading its history; "
+            f"no day of {symbol} was judged. Import again once it has caught up"
+        )
 
 
 def _settled(source: Mt5BarSource, chunk: Chunk, cutoff: datetime) -> tuple[Bars, int]:
@@ -297,32 +349,36 @@ def _same(a: Bars, b: Bars) -> bool:
     return all(np.array_equal(getattr(a, name), getattr(b, name)) for name in _ARRAYS)
 
 
-def _refuse_changes_to_judged_days(root: Path, chunk: Chunk, bars: Bars, judged: date) -> None:
-    """Fail, before writing, if the chunk changes any bar on a server day already judged."""
-    old = read_unmasked(root, chunk.symbol, chunk.timeframe, chunk.start, chunk.end)
-    last = (judged - _EPOCH).days
-    old = _through_day(old, last)
-    new = _through_day(bars, last)
-    if _same(old, new):
+def _refuse_changes_to_served_bars(root: Path, chunk: Chunk, bars: Bars, mask: Mask) -> None:
+    """Fail, before writing, if the chunk changes any bar the cache serves: one on a judged day
+    that the mask lets through. Bars it never serves (masked days, days before the first usable
+    month, days not judged yet) may change."""
+    cached = read_unmasked(root, chunk.symbol, chunk.timeframe, chunk.start, chunk.end)
+    old = _served(cached, mask)
+    new = _served(bars, mask)
+    if all(np.array_equal(old[name], new[name]) for name in _ARRAYS):
         return
-    n = min(len(old), len(new))
+    n = min(len(old["time"]), len(new["time"]))
     differs = np.zeros(n, dtype=bool)
     for name in _ARRAYS:
-        differs |= getattr(old, name)[:n] != getattr(new, name)[:n]
+        differs |= old[name][:n] != new[name][:n]
     first = int(np.argmax(differs)) if differs.any() else n
-    time = old.time[first] if first < len(old) else new.time[first]
+    # Where one side has bars the other lacks, the earlier time names the day that changed.
+    times = [side["time"][first] for side in (old, new) if first < len(side["time"])]
+    time = min(times)
     day = _EPOCH + timedelta(days=int(server_days(np.array([time]))[0]))
     raise ImportFailed(
         f"{chunk} would change bars on {day}, a server day already judged and served "
-        f"({len(old)} cached bars there, {len(new)} read now). A Trial's bars must never change; "
+        f"({len(old['time'])} served bars there, {len(new['time'])} read now). A Trial's bars "
+        "must never change; "
         "the terminal's history may be incomplete or revised. Nothing was written for this chunk"
     )
 
 
-def _through_day(bars: Bars, last_day: int) -> Bars:
-    keep = server_days(bars.time) <= last_day
-    n = int(keep.sum())  # bars are sorted, so the judged ones come first
-    return bars.between(int(np.iinfo(np.int64).min), int(bars.time[n - 1]) + 1 if n else -(2**62))
+def _served(bars: Bars, mask: Mask) -> dict[str, np.ndarray]:
+    """The columns of the bars the cache would serve under `mask`."""
+    keep = mask.keep(bars.time)
+    return {name: getattr(bars, name)[keep] for name in _ARRAYS}
 
 
 def _flag(chunk: Chunk, bars: Bars, *, after_data: bool, cutoff: datetime) -> str | None:
@@ -394,6 +450,10 @@ def _cutoff(clock: Callable[[], datetime]) -> datetime:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("the clock must give a timezone-aware UTC datetime")
     return now.astimezone(UTC).replace(microsecond=0)
+
+
+def _utc(epoch: int) -> datetime:
+    return datetime.fromtimestamp(epoch, UTC)
 
 
 @contextmanager

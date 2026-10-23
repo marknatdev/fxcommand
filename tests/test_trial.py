@@ -162,11 +162,30 @@ def test_the_deflated_sharpe_counts_every_trial_of_the_family(candidate):
     assert second.record["deflated_sharpe"]["n_trials"] == 2
 
 
-def test_each_trial_number_seeds_its_own_baseline(candidate):
+def test_settling_on_m1_is_recorded_and_seeds_its_own_baseline(candidate):
+    # M1 changes how same-bar conflicts settle, so it is part of what the Trial judged: it is
+    # recorded with its fingerprint, and it changes the baseline's seed.
     _, _, _, _, first, second = candidate
 
     assert first.record["trial_number"] == 1 and second.record["trial_number"] == 2
+    assert first.record["m1"]["used"] and first.record["m1"]["bars"] > 0
+    assert len(first.record["m1"]["sha256"]) == 64
+    assert second.record["m1"] == {"used": False, "bars": 0, "sha256": None}
     assert first.record["baseline"]["seed"] != second.record["baseline"]["seed"]
+
+
+def test_an_unchanged_rerun_draws_the_same_baseline(planted, tmp_path):
+    # The seed comes from what the Trial judges, not from its number, so re-running the same
+    # Spec on the same bars can't re-roll the baseline's luck. The Deflated Sharpe gives such a
+    # re-run nothing to deflate by either (identical Sharpes, so V[SR] = 0).
+    ledger, market, _, hypothesis = desk(tmp_path / "desk.db", planted)
+
+    first = trial(ledger, market, hypothesis, use_m1=False)
+    again = trial(ledger, market, hypothesis, use_m1=False)
+
+    assert again.record["trial_number"] == 2
+    assert again.record["baseline"]["seed"] == first.record["baseline"]["seed"]
+    assert again.record["baseline"]["net_r"] == first.record["baseline"]["net_r"]
 
 
 def test_the_research_window_never_reaches_the_holdout(candidate):
@@ -279,6 +298,12 @@ def test_a_holdout_without_the_edge_fails(walk, tmp_path):
     trial(ledger, market, hypothesis, use_m1=False)
     stored = ledger.trials_for(hypothesis)[-1]
     record = strict(stored.result_json)
+    # The Holdout gate re-judges the stored daily R's Deflated Sharpe, so the forged CANDIDATE
+    # carries a blind record that would pass it; the Holdout itself still sees no edge.
+    days = len(record["walk_forward"]["daily_r"]["r"])
+    record["walk_forward"]["daily_r"]["r"] = (
+        0.5 + np.random.default_rng(0).normal(size=days)
+    ).tolist()
     ledger.record_trial(
         hypothesis,
         combinations=list(
@@ -383,3 +408,60 @@ def test_a_candidate_from_before_rules_versions_cannot_ask_for_the_holdout(candi
     assert refused.value.reason == "RULES_CHANGED"
     assert "before rules were versioned" in str(refused.value)
     assert requests(path) == 0
+
+
+def daily_r_with_sharpe(sharpe, days, seed=0):
+    """Daily R whose sample Sharpe is exactly `sharpe`."""
+    z = np.random.default_rng(seed).normal(size=days)
+    return (sharpe + (z - z.mean()) / z.std(ddof=1)).tolist()
+
+
+def test_a_sibling_grid_can_turn_a_candidate_stale_before_the_holdout(planted, tmp_path):
+    # A CANDIDATE is judged at N = 1: a daily Sharpe of 0.065 over 2,000 days has a Deflated
+    # Sharpe of about Phi(0.065 x sqrt(1999)) = 0.998. Then a sibling Hypothesis of the same
+    # family (same entry Block and symbol, ADR 0003) records 23 REJECTs of a 48-Combination grid:
+    # N = 1 + 23 x 48 = 1105, and the luck a grid that wide finds by chance (SR0 about 0.07)
+    # overtakes 0.065. The CANDIDATE never had a new Trial of its own, yet the Holdout is refused.
+    path = tmp_path / "desk.db"
+    ledger, market, recording, a = desk(path, planted)
+    family = ledger.hypothesis(a).family_id
+    eight = Bars("GOLD", Timeframe.M15, 0.01, 2, 1_420_070_400 + 900 * np.arange(8),
+                 *[np.full(8, 1200.0)] * 4, np.full(8, 30))  # fmt: skip
+    record = {
+        "walk_forward": {"daily_r": {"r": daily_r_with_sharpe(0.065, 2000)}},
+        "holdout": {"rate_per_year": 100.0},
+    }
+    [only] = expand_grid(validate(SPEC))
+    ledger.record_trial(
+        a, combinations=[(only, 0.065)], verdict=CANDIDATE, closest_miss=None, cost=COST,
+        bars=eight, rules_version=RULES_VERSION, result_json=json.dumps(record),
+    )  # fmt: skip
+    grant = ledger.approve_holdout(request_holdout(ledger, a, now=NOW))  # fine at N = 1
+
+    mults = [round(0.5 + 0.25 * k, 2) for k in range(48)]
+    sibling = SPEC | {
+        "exit": SPEC["exit"] | {"stop": {"block": "atr_stop", "params": {"mult": mults}}}
+    }
+    b = ledger.register_hypothesis(family, sibling)
+    grid = expand_grid(validate(ledger.hypothesis(b).spec_json))
+    rng = np.random.default_rng(1)
+    for _ in range(23):
+        sharpes = rng.normal(0.0, 0.0216, len(grid))
+        ledger.record_trial(
+            b, combinations=list(zip(grid, sharpes, strict=True)), verdict=REJECT,
+            closest_miss={"check": "profit_factor", "value": 0.9, "threshold": 1.2}, cost=COST,
+            bars=eight, rules_version=RULES_VERSION, result_json="{}",
+        )  # fmt: skip
+    fetched = len(recording.fetches)
+
+    with pytest.raises(HoldoutRefused) as asked:
+        request_holdout(ledger, a, now=NOW)
+    with pytest.raises(HoldoutRefused) as spent:
+        run_holdout(ledger, market, grant, now=NOW)
+
+    assert ledger.deflation_inputs(family)[0] == 1105
+    assert asked.value.reason == spent.value.reason == "DEFLATED_SHARPE_FELL"
+    assert "N = 1105" in str(spent.value)
+    assert requests(path) == 1
+    assert ledger.holdout_spend(family) is None
+    assert len(recording.fetches) == fetched

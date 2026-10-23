@@ -275,3 +275,31 @@
 - [ ] Every M3 "done when" item in spec §10 is met
 - [ ] `uv run pytest` and `uv run pytest -m slow` are green; ruff is clean
 - [ ] The owner reviews
+
+
+---
+
+## Tuning pass and independent review (2026-10-23, owner: "tune until perfect")
+
+**Review fixes and the team's work, all merged earlier:** T4 (`89ac0e4`); price checks in `Bars`, symbol-checked cost paths, a positive-folds test (`39ac2c4`); the project `CLAUDE.md` (`f89fe7f`); `Bars.between` returns views, one symbol list in `market/universe.py`, no lists on sizing (`ad223a3`); one home for the server calendar and `sessions` moved to `market` (`d8d3ac2`); one `server_bound` (`a85af68`); tests for four unprotected rules (`df00c31`, `5912e18`).
+
+**Checks on master `5912e18`:** the slow suite passed (7, 4 min 12 s); the whole-suite mutation run caught all 19 mutants (7 had survived the first review).
+
+**An independent review (a fresh agent, read-only, with experiments) then found, and this pass fixed (uncommitted, for review):**
+1. **Critical: a stale CANDIDATE could spend the Holdout.** The gate only looked at the same Hypothesis's latest Trial, but N is family-wide: a sibling Hypothesis's grid raised N from 1 to 1,105 and the CANDIDATE's Deflated Sharpe fell from 0.998 to 0.397, yet the request was accepted. Now `request_holdout` and `run_holdout` re-judge the stored daily R's Deflated Sharpe at the family's N today and refuse with `DEFLATED_SHARPE_FELL` (spec §6.3 gate table). Test: `test_a_sibling_grid_can_turn_a_candidate_stale_before_the_holdout`, failing without the gate.
+2. **Required: today's swap credit was paid on every night back to 2014.** On a no-edge short-only random walk it moved the profit factor from 0.96 to 1.05. The Trial's `CostSnapshot` now counts a swap the position would earn as zero; the cost log keeps the measured rates (ADR 0004 amended).
+3. **Required: judging ran ahead of the history.** A reconnected terminal's live tick with history still stopping days earlier had Monday and Tuesday judged empty, then wedged every refresh. Now a run whose last M15 bar closed more than 2 h before the cutoff fails before judging, and the last M15 bar's own day stays open (plan, "Import and cache").
+4. **Required: a weekday with no M15 bars was judged but never masked**, so its H1/D1/M1 bars were served unvetted. Every server weekday is now judged; an empty one is masked (plan, "Data-quality mask").
+5. **Required: a judging run that left out a timeframe locked it out for good.** A run that imports M15 must now import every timeframe.
+6. **Required: a one-line order call slipped past the guards** (`getattr(api._module, "order" "_send")`). The scan now flags MT5 function names as strings (the parser joins split halves) and any `_module` reach outside `mt5_api.py`; the docstrings no longer claim the wrapper is airtight.
+7. **Consider: a Windows rename onto a held cache file died with a raw `PermissionError`.** Retried briefly, then a `CacheError` naming the file.
+8. **Consider: re-running an unchanged Spec re-rolled the Coin-Flip Baseline for free.** The seed now comes from what the Trial judges (its Combinations, bars, M1 bars and the rules version). This changes what a Trial computes, so **`RULES_VERSION` is 2** (note in `rules.py`); only the `trial` fingerprint moved, re-pinned with `PINNED_FOR = 2`.
+9. **Consider: M1 was not fingerprinted.** Trial and Holdout records now carry `m1` (used, bar count, sha256); the Holdout settles on M1 when its Trial did. `RESULT_VERSION` is 3.
+- **Nits:** the `UNIVERSE` alias is gone; `server_days` is imported from `server_time`.
+- **Follow-on found while merging:** with empty weekdays now masked, a broker filling bars onto a holiday later would have wedged every refresh. The served-bars guard now compares only bars the cache serves, and names the earliest changed day.
+
+**Final checks on the combined work (uncommitted):** ruff clean; the default suite 1188 passed (1 skipped without the mt5 extra); the slow suite 7 passed (4 min 2 s); the whole-suite mutation run caught all 25 mutants (the 19 above plus 6 for today's fixes), every file restored.
+
+**Open owner decisions:** the Holdout counts a trade still open at data end at its last price (walk-forward training excludes such trades); `atr_target` receives a stop distance it ignores (trivial cost). Both kept as they are for now (owner, 2026-10-23).
+
+- [x] The owner reviews (approved 2026-10-23)

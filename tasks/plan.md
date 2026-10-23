@@ -48,15 +48,19 @@ These are fixed before code, so no test is tuned after the fact.
 - **Range:** from `RESEARCH_START` (2014-01-01) to now. Holdout years are imported too: a Holdout run needs them, and only the `MarketData` facade, behind the grant, can read them.
 - **Closed bars only:** each import fixes a cutoff time when it starts. Only bars that have closed by then (open time + timeframe ≤ cutoff) are cached. The bar still forming is never cached, so no partial bar is kept for good.
 - **Chunks:** M1 by calendar month, the others by calendar year. MT5 may still be downloading history when first asked, so a chunk is accepted only when two reads in a row return the same closed bars (count and last time). Comparing closed bars only means a new bar arriving between reads does not stop the current chunk from settling.
+- **Each symbol's cutoff** is the earlier of the clock and its last tick (T4).
+- **History that lags the tick** (added after the independent review, 2026-10-23): a terminal that has just reconnected has a live tick while its history can still stop days earlier, and two reads agree on that. When a run's last closed M15 bar closed more than 2 hours before the symbol's cutoff, the symbol fails before any day is judged. Days are judged only before the day of the run's last M15 bar, which stays open; at a weekend, Friday is judged by the import that brings Monday.
+- **Every timeframe or none:** a run that imports M15 judges days, and a judged day is served on every timeframe, so it must import all five. A refresh of some timeframes only leaves out M15 and judges nothing.
+- **Served bars never change:** a chunk that would change any bar the cache serves (on a judged day the mask lets through) fails the import, naming the chunk and the first changed day. Masked days are never served, so bars a broker fills onto one later may change; it stays masked.
 - **Layout:**
   - `data/bars/{symbol}/{timeframe}/{year}.parquet`: UTC `time` (int64), `open`, `high`, `low`, `close` (float64) and `spread` (int32).
   - `data/bars/{symbol}/meta.json`: point, digits, the first usable month, the masked days, the last import time.
-- **Writes:** every file is written to a temporary name and renamed into place, so a crash never leaves half a year. One importer at a time, enforced by a lock file. (ADR 0006 makes the app the single writer; until M5 builds the app, the CLI writes, and M5 moves refresh into the app.)
-- **Refresh:** incremental. The current chunk and the one before it are re-imported, which covers a year or month that ended since the last refresh. Older chunks are never touched again.
+- **Writes:** every file is written to a temporary name and renamed into place, so a crash never leaves half a year. On Windows a rename onto a file a reader holds open fails; it is retried 10 times, 0.1 s apart, then fails naming the file. One importer at a time, enforced by a lock file. (ADR 0006 makes the app the single writer; until M5 builds the app, the CLI writes, and M5 moves refresh into the app.)
+- **Refresh:** incremental. It re-imports from the earlier of the chunk before the cutoff's and the chunk of the last import, through the cutoff's chunk (T4): a year or month that ended since, or a refresh missed for a while.
 
 ### Data-quality mask (spec §4)
 - **First usable month:** the first calendar month in which the median count of M15 bars per server day reaches 50% of the symbol's median over the Research Window. Bars before it are excluded. GOLD is expected around mid-2014.
-- **Thin days:** a server day with fewer than 50% of that median M15 count is excluded from every timeframe of the symbol.
+- **Thin days:** a server day with fewer than 50% of that median M15 count is excluded from every timeframe of the symbol. Every server weekday from the first usable month on is judged, with or without bars: a weekday with no M15 bars counts 0, so it is masked, and its bars on other timeframes are never served unvetted (added after the independent review). The median and each month's median day count only days with bars.
 - **Frozen at first import:** the median comes from the Research Window only (2014–2024), and the mask is stored in `meta.json`. A refresh adds new days to the mask but never re-judges old ones, so a Trial's bars, and their fingerprint in the Ledger, stay the same.
 - **Where it applies:** `CachedBarSource` applies the mask on every read, so Trials and Holdouts see the same bars.
 
@@ -131,5 +135,5 @@ Every report (the import report, `desk data-report`, `desk smoke`) is computed i
 
 ## Carried forward
 
-- **For M5 (the API and app):** the grant is reusable until the spend is recorded; bind each Holdout Request to its Trial id; concurrent Trials can share a seed; schedule the nightly refresh and the weekly floors.
+- **For M5 (the API and app):** the grant is reusable until the spend is recorded; bind each Holdout Request to its Trial id; run one family's Trials one at a time, since each reads the family's N when it starts (the Holdout gate re-checks N, but a Verdict card shows N as judged); schedule the nightly refresh and the weekly floors; a one-click start (double-click) that sets up and opens the app, so the owner can test it themselves (owner's request, 2026-10-23: wait for the real app rather than a demo now).
 - **For Layer B (the live runner):** it always sits on the latest bar, where a time filter uses the clock's next open; it must re-check time filters against the bar it actually fills on.

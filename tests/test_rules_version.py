@@ -38,7 +38,7 @@ from vibedesk.market.data import MarketData
 from vibedesk.market.synthetic import SyntheticBarSource
 from vibedesk.rules import RULES_VERSION
 
-PINNED_FOR = 1  # the RULES_VERSION these pins were taken under
+PINNED_FOR = 2  # the RULES_VERSION these pins were taken under
 PINNED = {
     "inputs:bars": "cdc3af79776dc042",
     "inputs:cases": "806038e6be1488f5",
@@ -62,7 +62,7 @@ PINNED = {
     "block:time_exit": "0805495db21c14e4",
     "engine:random": "7081790f4b974fc2",
     "engine:reversal": "eaa5920b37d4ed55",
-    "trial": "5ba7d911d9878bc8",
+    "trial": "acb42b7f1383c729",
     "thresholds": "69aa95512d63496e",
 }
 

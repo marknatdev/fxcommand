@@ -3,8 +3,10 @@
 Three layers, each tested here:
 - only market/mt5_api.py imports MetaTrader5;
 - no code in src/ names an MT5 function off the allowlist, on any object (an API handed in as a
-  parameter is caught as well as the module);
+  parameter is caught as well as the module), nor as a string (`getattr(api, "order" "_send")`:
+  the parser joins the two halves into one constant), nor reaches into ReadOnlyMt5's `_module`;
 - at run time the real module is reached only through ReadOnlyMt5, which refuses every other name.
+Python can't stop an order call written on purpose; these guards stop one written by accident.
 """
 
 import ast
@@ -58,6 +60,10 @@ def scan(root: Path, importer: Path | None = None) -> list[tuple[str, int, str]]
                 hits.append((name, node.lineno, "import MetaTrader5"))
             if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN:
                 hits.append((name, node.lineno, node.attr))
+            if isinstance(node, ast.Attribute) and node.attr == "_module" and path != importer:
+                hits.append((name, node.lineno, "_module"))
+            if isinstance(node, ast.Constant) and node.value in FORBIDDEN:
+                hits.append((name, node.lineno, repr(node.value)))
             if isinstance(node, ast.Constant) and node.value == "MetaTrader5" and path != importer:
                 hits.append((name, node.lineno, "'MetaTrader5'"))  # importlib by name
     return hits
@@ -76,6 +82,8 @@ def test_the_scan_catches_what_it_must(tmp_path):
     )
     (tmp_path / "names.py").write_text("from MetaTrader5 import positions_get, symbol_info\n")
     (tmp_path / "fine.py").write_text("def bars(api):\n    return api.copy_rates_range('GOLD')\n")
+    (tmp_path / "split.py").write_text("def send(api, r):\n    getattr(api, 'order' '_send')(r)\n")
+    (tmp_path / "inside.py").write_text("def raw(api):\n    return api._module\n")
 
     hits = {(file, what) for file, _, what in scan(tmp_path)}
 
@@ -87,6 +95,8 @@ def test_the_scan_catches_what_it_must(tmp_path):
         ("sneaky.py", "'MetaTrader5'"),
         ("names.py", "import MetaTrader5"),
         ("names.py", "positions_get"),
+        ("split.py", "'order_send'"),
+        ("inside.py", "_module"),
     }
 
 

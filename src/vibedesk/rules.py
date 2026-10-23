@@ -18,6 +18,9 @@ fingerprints each part of the rules and names the one that changed without a bum
 Versions:
 1. 2026-10-23: the M2 rules, with opposite-signal stop and reverse and time filters that judge
    the entry bar.
+2. 2026-10-23: the Coin-Flip Baseline's seed comes from what a Trial judges (its Combinations,
+   its bars and M1 bars, and this version), not from the Trial's number, so re-running an
+   unchanged Spec on unchanged data draws the same runs instead of re-rolling its luck.
 """
 
-RULES_VERSION = 1
+RULES_VERSION = 2

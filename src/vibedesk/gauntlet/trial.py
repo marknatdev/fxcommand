@@ -16,6 +16,7 @@ and an infinite value (a profit factor with no losing trade) is the string "inf"
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -31,7 +32,13 @@ from vibedesk.engine.simulate import ExitReason, Trades, simulate
 from vibedesk.gauntlet.baseline import RUNS, Baseline, coin_flip_baseline
 from vibedesk.gauntlet.prosecutor import prosecute
 from vibedesk.gauntlet.stats import deflated_sharpe, pbo
-from vibedesk.gauntlet.verdict import CANDIDATE, Verdict, decide, pass_bar
+from vibedesk.gauntlet.verdict import (
+    CANDIDATE,
+    MIN_DEFLATED_SHARPE,
+    Verdict,
+    decide,
+    pass_bar,
+)
 from vibedesk.gauntlet.walkforward import (
     BLIND_YEARS,
     MIN_TRAIN_TRADES,
@@ -39,13 +46,13 @@ from vibedesk.gauntlet.walkforward import (
     WalkForward,
     walk_forward,
 )
-from vibedesk.ledger import BudgetExhausted, Ledger, TrialRecord
-from vibedesk.market.bars import Timeframe
+from vibedesk.ledger import BarsFingerprint, BudgetExhausted, Ledger, TrialRecord
+from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.data import MarketData
 from vibedesk.market.grant import HOLDOUT_START, HoldoutGrant
 from vibedesk.rules import RULES_VERSION
 
-RESULT_VERSION = 2  # 2: records name their rules_version
+RESULT_VERSION = 3  # 2: records name their rules_version; 3: and the M1 bars they settled on
 MIN_HOLDOUT_TRADES = 30
 MIN_HOLDOUT_PROFIT_FACTOR = 1.1
 PASS, HOLDOUT_FAIL = "PASS", "HOLDOUT FAIL"
@@ -117,7 +124,8 @@ def run_trial(
         min_trades=min_trades,
     )
     trial_number = used + 1
-    seed = _seed(family_id, hypothesis_id, trial_number)
+    m1_print = _fingerprint(m1)
+    seed = _seed(combinations, BarsFingerprint.of(bars), m1_print)
     baseline = coin_flip_baseline(wf, seed=seed, runs=runs)
     n_trials, var_sharpe = ledger.deflation_inputs(family_id, pending_sharpes=wf.blind_sharpe)
     dsr = deflated_sharpe(wf.metrics.daily_r, n_trials, var_sharpe)
@@ -138,6 +146,7 @@ def run_trial(
             "closest_miss": verdict.closest_miss,
             "checks": [c.to_dict() for c in verdict.checks],
             "cost": json.loads(cost.to_json()),
+            "m1": _m1_record(use_m1, m1_print),
             "walk_forward": _walk_forward_record(wf),
             "baseline": {
                 "seed": seed,
@@ -198,7 +207,7 @@ def run_holdout(
     grant: HoldoutGrant,
     *,
     now: datetime | None = None,
-    use_m1: bool = True,
+    use_m1: bool | None = None,
     train_years: int = TRAIN_YEARS,
 ) -> HoldoutResult:
     """Spend the family's Holdout on the Hypothesis the grant was approved for.
@@ -209,7 +218,8 @@ def run_holdout(
     way the Holdout is refused before any bar is fetched.
 
     The Holdout trades the Combination that Trial chose on the last research years, under
-    that Trial's Cost Model. It is simulated over all the data, so its indicators
+    that Trial's Cost Model, settling same-bar conflicts on M1 when the Trial did (`use_m1`
+    None) unless told otherwise. It is simulated over all the data, so its indicators
     are warm, and judged on the trades entered from HOLDOUT_START on: PASS with a profit
     factor of at least MIN_HOLDOUT_PROFIT_FACTOR over at least MIN_HOLDOUT_TRADES trades.
     """
@@ -222,6 +232,8 @@ def run_holdout(
         raise HoldoutRefused("NOT_CANDIDATE", "the Trial chose no Combination for the Holdout")
     combination = expand_grid(validate(hypothesis.spec_json))[chosen]
 
+    if use_m1 is None:
+        use_m1 = stored.get("m1", {}).get("used", True)
     first_blind = stored["walk_forward"]["years"][0]
     start = datetime(first_blind - train_years, 1, 1, tzinfo=UTC)
     timeframe = Timeframe(hypothesis.timeframe)
@@ -243,6 +255,7 @@ def run_holdout(
             "hypothesis_id": hypothesis.id,
             "trial_id": trial.id,
             "combination": combination.label(),
+            "m1": _m1_record(use_m1, _fingerprint(m1)),
             "verdict": verdict,
             "trades": len(holdout),
             "profit_factor": result.profit_factor,
@@ -261,7 +274,8 @@ def run_holdout(
 
 
 def _current_candidate(ledger: Ledger, hypothesis_id: int) -> TrialRecord:
-    """The latest Trial, which must be a CANDIDATE judged under today's trade rules."""
+    """The latest Trial, which must be a CANDIDATE judged under today's trade rules, whose
+    Deflated Sharpe still clears the bar at the family's N today."""
     trials = ledger.trials_for(hypothesis_id)
     if not trials or trials[-1].verdict != CANDIDATE:
         latest = trials[-1].verdict if trials else "no Trial"
@@ -276,6 +290,19 @@ def _current_candidate(ledger: Ledger, hypothesis_id: int) -> TrialRecord:
             "RULES_CHANGED",
             f"the latest Trial ran {ran}; today's rules are version {RULES_VERSION}."
             " Run a new Trial first",
+        )
+    # The Deflated Sharpe was judged at the family's N when the Trial ran. Every later Trial of
+    # the family, on any of its Hypotheses, adds to N (ADR 0003): a sibling Hypothesis grid can
+    # turn a CANDIDATE stale without a new Trial of its own. So it is judged again, at today's N.
+    family_id = ledger.hypothesis(hypothesis_id).family_id
+    n_trials, var_sharpe = ledger.deflation_inputs(family_id)
+    daily_r = json.loads(trial.result_json)["walk_forward"]["daily_r"]["r"]
+    dsr = deflated_sharpe(daily_r, n_trials, var_sharpe)
+    if not dsr >= MIN_DEFLATED_SHARPE:
+        raise HoldoutRefused(
+            "DEFLATED_SHARPE_FELL",
+            f"the family has run more Trials since this CANDIDATE: at N = {n_trials} its "
+            f"Deflated Sharpe is {dsr:.3f}, below {MIN_DEFLATED_SHARPE}",
         )
     return trial
 
@@ -341,11 +368,29 @@ def _holdout_rate(wf: WalkForward) -> float:
     return float(wf.blind_trades[wf.holdout_choice].mean())
 
 
-def _seed(family_id: int, hypothesis_id: int, trial_number: int) -> int:
-    """The Coin-Flip Baseline's seed, fixed by which Trial this is, so a rerun draws the same."""
+def _seed(combinations, bars: BarsFingerprint, m1: BarsFingerprint | None) -> int:
+    """The Coin-Flip Baseline's seed, fixed by what the Trial judges: its Combinations, its
+    bars and M1 bars, and the trade rules. Re-running an unchanged Spec on unchanged data draws
+    the same runs, so a Spec just under the 95th percentile can't re-roll its luck (the
+    Deflated Sharpe gives identical re-runs nothing to deflate by)."""
+    digest = hashlib.sha256(f"rules {RULES_VERSION}".encode())
+    for combination in combinations:
+        digest.update(combination.label().encode())
+    for fingerprint in (bars, m1):
+        digest.update(b"none" if fingerprint is None else fingerprint.sha256.encode())
     return int(
-        np.random.SeedSequence([family_id, hypothesis_id, trial_number]).generate_state(1)[0]
+        np.random.SeedSequence(int.from_bytes(digest.digest()[:16], "big")).generate_state(1)[0]
     )
+
+
+def _fingerprint(bars: Bars | None) -> BarsFingerprint | None:
+    return None if bars is None or not len(bars) else BarsFingerprint.of(bars)
+
+
+def _m1_record(used: bool, m1: BarsFingerprint | None) -> dict:
+    """Whether M1 settled same-bar conflicts, and which M1 bars: a rerun on other M1 data
+    settles them differently, and the main bars' fingerprint can't tell."""
+    return {"used": used, "bars": m1.count if m1 else 0, "sha256": m1.sha256 if m1 else None}
 
 
 def _plain(value):

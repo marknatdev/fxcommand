@@ -177,7 +177,7 @@ A Trial's Verdict is **CANDIDATE** only if every check passes. Otherwise it is *
 | Out-of-sample profit factor | ≥ 1.2 over the stitched blind years, with ≥ 100 trades |
 | Fold consistency | ≥ 5 of 8 folds have positive R |
 | Spread stress | profit factor ≥ 1.05 when the floor and bar spreads are doubled |
-| Coin-Flip Baseline | net R is above the 95th percentile of 1,000 runs. Each run uses the same trade count per fold, the same session-hour distribution, the same long/short mix, the same exits and the same Cost Model. Seeded by Trial id. |
+| Coin-Flip Baseline | net R is above the 95th percentile of 1,000 runs. Each run uses the same trade count per fold, the same session-hour distribution, the same long/short mix, the same exits and the same Cost Model. Seeded by what the Trial judges (its Combinations, bars, M1 bars and the rules version), so re-running an unchanged Spec on unchanged data draws the same runs (rules version 2). |
 | Deflated Sharpe | probability ≥ 0.95 (Bailey and López de Prado). The return series is the **daily R** over the stitched blind years, with every trading day counted including zero days. T, skew and kurtosis come from that series. N and the variance of Sharpe across trials follow §6.4. |
 | PBO | ≤ 0.3 by CSCV over 16 time blocks of the blind years and the Spec's grid combinations. A grid of one combination gives "n/a", which neither passes nor fails. |
 | Prosecutor | no red flag. A red flag is any of these: the top 5 trades make > 50% of net R; the median profit factor of neighbouring grid combinations (±1 step) is < 1.0; for `both`, any side with ≥ 30 trades has profit factor < 1.0; any ATR-tercile regime with ≥ 30 trades has profit factor < 0.9. The LLM writes the narrative only from these results. |
@@ -192,8 +192,12 @@ The **Holdout** check, run only once an approved Holdout Request exists:
 | Situation | Outcome |
 |---|---|
 | Verdict isn't CANDIDATE | Refused |
+| The Trial ran under other trade rules | Refused with `RULES_CHANGED` (`src/vibedesk/rules.py`) |
+| At the family's N today, the Trial's Deflated Sharpe is below 0.95 | Refused with `DEFLATED_SHARPE_FELL`. Trials of sibling Hypotheses raise N too (§6.4). |
 | Expected Holdout trades < 30 | Refused with `INSUFFICIENT_TRADES`. Nothing is spent. |
 | Otherwise | Recorded as awaiting the owner |
+
+The Holdout run checks the first three rows again, before it fetches a single Holdout bar.
 
 Expected Holdout trades = blind-year trades per year × Holdout years.
 

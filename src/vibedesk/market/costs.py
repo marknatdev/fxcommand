@@ -52,12 +52,16 @@ class CostMeasurement:
     triple_swap_day: int  # MT5 numbering, 0 = Sunday, as in CostSnapshot
 
     def snapshot(self) -> CostSnapshot:
+        """The Cost Model a Trial runs with. A swap the position would earn counts as zero:
+        today's rates are charged on every night back to 2014, and nothing records what XM paid
+        then, so a credit could flatter a strategy that merely holds the paying side (ADR 0004).
+        A swap the position pays is charged in full. The measured rates stay in the log line."""
         return CostSnapshot(
             point=self.point,
             spread_floor_points=self.spread_floor_points,
             slippage_points=SLIPPAGE_POINTS,
-            swap_long_points=self.swap_long_points,
-            swap_short_points=self.swap_short_points,
+            swap_long_points=min(self.swap_long_points, 0.0),
+            swap_short_points=min(self.swap_short_points, 0.0),
             triple_swap_day=self.triple_swap_day,
             as_of=datetime.fromisoformat(self.measured_at).date().isoformat(),
         )

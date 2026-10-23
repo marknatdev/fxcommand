@@ -34,7 +34,7 @@ uv run desk                               # read-only market commands (M3 T5)
 - **Every evaluation is a Trial** (ADR 0003). No uncounted look at real results: a run on real data that isn't recorded in the Ledger prints timing and sanity only.
 - **The Ledger is append-only.** No UPDATE or DELETE outside migrations; a schema change is a new migration.
 - **Trading rules are versioned.** A change that can alter an existing Spec's trades or Verdict bumps `RULES_VERSION` in `src/vibedesk/rules.py` with a note, then re-pins `tests/test_rules_version.py`. A refactor must pass that test with its pins unchanged; never re-pin to make a refactor green.
-- **Served bars never change.** The importer refuses a chunk that would change bars on a server day already judged.
+- **Served bars never change.** The importer refuses a chunk that would change any bar the cache serves (a judged day the mask lets through). It never judges ahead of the history: a run whose M15 history lags the last tick by more than 2 h fails, and a run that imports M15 imports every timeframe.
 
 ## Working here
 

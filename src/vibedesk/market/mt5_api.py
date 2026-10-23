@@ -2,8 +2,9 @@
 
 The real adapter is the `MetaTrader5` module itself, imported only here, inside `real_api()`,
 which wraps it in ReadOnlyMt5. The fake is FakeMt5 (market/fake_mt5.py). tests/test_mt5_guard.py
-fails on any MetaTrader5 attribute outside ALLOWED, so no code can reach an order call (spec
-§3.3, §9.1).
+fails on any MT5 function named off ALLOWED, as an attribute or a string, and on any reach into
+the wrapped module, so an order call can't be written by accident (spec §3.3, §9.1). Python can't
+make the wrapper airtight against one written on purpose; the scan is the guard.
 
 MT5's quirks, which this contract keeps in view (probed read-only, 2026-10-23):
 - Every time it returns (a bar's `time`, a tick's `time` and `time_msc`) is server wall-clock time
@@ -145,7 +146,8 @@ class Mt5Api(Protocol):
 
 class ReadOnlyMt5:
     """The real MetaTrader5 module behind the allowlist: any other attribute raises, so code
-    handed the real terminal cannot reach an order call even by a name the guard missed."""
+    handed the real terminal can't call an order function by name. The module itself sits on
+    `_module`, which only this file may touch (tests/test_mt5_guard.py)."""
 
     def __init__(self, module: object) -> None:
         object.__setattr__(self, "_module", module)

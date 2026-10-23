@@ -177,11 +177,12 @@ def test_current_cost_is_the_latest_line_and_older_lines_stay(source, tmp_path):
         spread_floor_points=65.0,
         slippage_points=1.0,
         swap_long_points=-83.83,
-        swap_short_points=20.64,
+        swap_short_points=0.0,  # XM pays +20.64 on shorts today; no credit is counted
         triple_swap_day=3,
         as_of="2026-03-22",
     )
     assert current_cost(tmp_path, "GOLD") != first.snapshot()
+    assert json.loads(after.splitlines()[-1])["swap_short_points"] == 20.64  # the log keeps it
 
 
 def test_the_snapshot_round_trips_as_the_ledger_stores_it(source, tmp_path):
@@ -231,3 +232,17 @@ def test_a_symbol_outside_the_universe_never_reaches_a_file_path(tmp_path):
         with pytest.raises(CostError, match="not a symbol Vibe Desk trades"):
             current_cost(tmp_path, symbol)
     assert not any(tmp_path.rglob("*.jsonl"))
+
+
+@pytest.mark.parametrize(
+    "swaps, charged",
+    [((-83.83, 20.64), (-83.83, 0.0)), ((5.0, -7.5), (0.0, -7.5)), ((-1.0, -2.0), (-1.0, -2.0))],
+)
+def test_a_swap_credit_counts_as_zero_and_a_charge_in_full(source, swaps, charged):
+    # Today's swap is charged on every night back to 2014; a credit could flatter a strategy
+    # that only holds the side XM pays, so the Cost Model counts it as zero (ADR 0004).
+    api = connected(FakeMt5(source, swaps={"GOLD": swaps}))
+
+    snapshot = measure_cost(api, "GOLD", NOW).snapshot()
+
+    assert (snapshot.swap_long_points, snapshot.swap_short_points) == charged
