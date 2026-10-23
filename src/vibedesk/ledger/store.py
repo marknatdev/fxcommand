@@ -442,6 +442,26 @@ class Ledger:
             ).fetchall()
             return [self._trial_record(row) for row in rows]
 
+    def recent_trials(self, limit: int = 50) -> list[dict]:
+        """The newest Trials with their Spec and Idea, for the app's history list."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT t.id, t.verdict, t.created_at, h.symbol, h.timeframe, h.spec_json,"
+                " f.idea FROM trials t JOIN hypotheses h ON h.id = t.hypothesis_id"
+                " JOIN families f ON f.id = h.family_id ORDER BY t.id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def family_for(self, entry_block: str, symbol: str) -> int | None:
+        """The Idea Family that already holds this entry Block on this symbol, if any."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT family_id FROM hypotheses WHERE entry_block = ? AND symbol = ? LIMIT 1",
+                (entry_block, symbol),
+            ).fetchone()
+        return None if row is None else row["family_id"]
+
     def trial_count(self, family_id: int) -> int:
         """Trials recorded across all of the family's Hypotheses."""
         with self._lock:

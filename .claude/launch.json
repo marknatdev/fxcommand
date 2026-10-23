@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "vibedesk-demo",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "tests/demo_server.py", "8766"],
+      "port": 8766
+    },
+    {
+      "name": "vibedesk",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "--extra", "mt5", "vibedesk-web"],
+      "port": 8765
+    }
+  ]
+}

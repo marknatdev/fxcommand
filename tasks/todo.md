@@ -328,3 +328,24 @@
 **Open owner decisions:** the Holdout counts a trade still open at data end at its last price (walk-forward training excludes such trades); `atr_target` receives a stop distance it ignores (trivial cost). Both kept as they are for now (owner, 2026-10-23).
 
 - [x] The owner reviews (approved 2026-10-23)
+
+---
+
+## Simple app, built in one session (2026-10-23, owner: "forget the rigor rules, make it simple, done now")
+
+**Owner's choices:** web app with AI chat; OmniRoute for the AI; real XM data now; no rules except no orders, commit as we go.
+
+**Built:**
+- `src/vibedesk/app/`: a FastAPI server and one page (`static/index.html`). Chat an Idea; the AI (OmniRoute, OpenAI-compatible) writes a Strategy Spec from the Block Library, with validation errors fed back up to 3 times; "Run test" runs it as a Trial on the real cache (walk-forward, blind years 2017-2024, real spreads and swaps) in about 10 s; the page shows the Verdict ("Looks real" or "No edge"), KPIs, cumulative R, net R per year and every check; each result goes back into the chat so "make it trade more" works; past tests are listed. Settings hold the OmniRoute URL, key (never sent back to the page) and model. "Update data" imports or refreshes every symbol from MT5 (read-only) and re-measures spreads.
+- `Start Vibe Desk.bat` and a desktop shortcut "Vibe Desk": opens the SSH tunnel to OmniRoute (it listens only on the server), starts the app and opens the browser.
+- The app extends a family's Trial Budget by itself and reuses the family that already holds an entry Block on a symbol.
+
+**Real data (M3 T6 in effect):** all 8 symbols imported from the XM terminal (read-only), about 5 million bars each, judged through 2026-10-22; GOLD's first usable month is 2014-06, the FX pairs' 2014-01. Spread floors: GOLD 55 points, EURUSD 20, GBPUSD 24, USDJPY 25, AUDUSD 24, USDCAD 30, USDCHF 26, NZDUSD 30.
+
+**Evidence:** `tests/test_app.py` (12 tests: the draft loop, the key never sent back, a Trial end to end on synthetic bars, the browser's 2.0-to-2 numbers); default suite 1237 passed; ruff clean. A click-through in the browser (canned AI, real bars, throwaway Ledger): chat, Spec card, Run test on real EURUSD H4 and GOLD H1, Verdict, charts, checks, history, phone width without sideways scrolling. The OmniRoute tunnel answers (401 until the key is set). Two bugs found and fixed: the browser wrote 2.0 back as 2 and the Spec refused [1.5, 2]; a test with 0 trades blamed the wrong check.
+
+**First real results:** GOLD H1 Donchian breakout (20 or 55, ADX, ATR stop, 2R or 3R target): No edge, 1,184 blind trades, profit factor 0.80, 7 of 8 years losing. EURUSD H4 RSI bounce with ADX under 25, long only: never traded (no setting made 30 trades in its training years).
+
+**Not verified:** the AI path against the real OmniRoute, which needs the owner's key.
+
+**Known issue (not fixed):** XM's clock checks fail in most years: EURUSD shows 15-20 weekend M15 bars and 3-4 weeks with 6 D1 bars a year, and GOLD's daily break differs between summer and winter in 2014, 2019, 2020, 2024 and 2025. About 4 weeks a year fits XM switching its clock on European daylight-saving dates while `server_time` assumes New York's; in those weeks bar times would be an hour off (mostly matters for session filters).

@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vibe Desk</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #16181d; --muted: #646b78; --line: #e3e6eb;
+  --accent: #2f6fed; --accent-ink: #ffffff; --good: #15803d; --good-bg: #e8f6ed;
+  --bad: #b42318; --bad-bg: #fdecea; --na: #8a8f98; --chip: #eef2fb; --code: #f1f3f6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111317; --panel: #191c22; --ink: #e8eaee; --muted: #9aa1ad; --line: #2a2f38;
+    --accent: #5b8cff; --accent-ink: #0b0d10; --good: #4ade80; --good-bg: #13291c;
+    --bad: #f87171; --bad-bg: #2d1515; --na: #7c828c; --chip: #222837; --code: #20242c;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 12px 16px;
+  border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 18px; margin: 0 8px 0 0; }
+.pill { font-size: 12.5px; padding: 3px 9px; border-radius: 99px; background: var(--chip); color: var(--muted); }
+.pill.ok { color: var(--good); } .pill.warn { color: var(--bad); }
+.spacer { flex: 1; }
+button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  padding: 7px 12px; border-radius: 8px; cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+button:disabled { opacity: .55; cursor: default; }
+main { display: grid; grid-template-columns: minmax(320px, 440px) 1fr; gap: 16px; padding: 16px;
+  max-width: 1400px; margin: 0 auto; }
+@media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; min-width: 0; }
+.panel h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
+#chat { display: flex; flex-direction: column; gap: 10px; max-height: 58vh; overflow-y: auto; margin-bottom: 10px; }
+.msg { padding: 9px 11px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.user { background: var(--chip); align-self: flex-end; max-width: 90%; }
+.msg.ai { background: var(--code); }
+.msg.err { background: var(--bad-bg); color: var(--bad); }
+.spec { margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--panel); }
+.spec .row { display: flex; gap: 8px; font-size: 13.5px; }
+.spec .k { color: var(--muted); min-width: 64px; }
+.spec .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+textarea { width: 100%; font: inherit; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 9px; resize: vertical; }
+textarea.json { font: 12.5px/1.4 ui-monospace, Consolas, monospace; min-height: 220px; margin-top: 8px; }
+.compose { display: flex; gap: 8px; align-items: flex-end; }
+.compose textarea { min-height: 64px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; }
+.chip { font-size: 12.5px; background: var(--chip); border: 0; padding: 5px 9px; border-radius: 12px; text-align: left; white-space: normal; max-width: 100%; }
+.compose textarea { min-width: 0; }
+.verdict { border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+.verdict.good { background: var(--good-bg); color: var(--good); }
+.verdict.bad { background: var(--bad-bg); color: var(--bad); }
+.verdict b { font-size: 22px; display: block; }
+.verdict span { color: var(--ink); opacity: .85; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.kpi { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.kpi small { color: var(--muted); display: block; font-size: 12px; }
+.kpi div { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.charts { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-bottom: 12px; }
+@media (max-width: 700px) { .charts { grid-template-columns: 1fr; } }
+.chart { position: relative; height: 260px; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tag { font-size: 11.5px; font-weight: 700; padding: 2px 6px; border-radius: 5px; }
+.tag.PASS { color: var(--good); background: var(--good-bg); }
+.tag.FAIL { color: var(--bad); background: var(--bad-bg); }
+.tag.NA { color: var(--na); background: var(--code); }
+.muted { color: var(--muted); }
+.table-wrap { overflow-x: auto; }
+#history .item { display: flex; gap: 10px; align-items: center; padding: 8px 4px; border-bottom: 1px solid var(--line); cursor: pointer; }
+#history .item:hover { background: var(--code); }
+#history .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.empty { color: var(--muted); padding: 30px 6px; text-align: center; }
+dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); width: min(520px, 92vw); }
+dialog label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+dialog input, dialog select { width: 100%; font: inherit; padding: 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+#updateLog { font: 12.5px/1.4 ui-monospace, Consolas, monospace; background: var(--code); border-radius: 8px; padding: 8px; max-height: 160px; overflow-y: auto; white-space: pre-wrap; display: none; margin: 0 16px; }
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: s 1s linear infinite; vertical-align: -1px; }
+@keyframes s { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Vibe Desk</h1>
+  <span id="dataPill" class="pill">data …</span>
+  <span id="aiPill" class="pill">AI …</span>
+  <span class="spacer"></span>
+  <button id="updateBtn" title="Import or refresh every symbol from MT5 (read-only) and re-measure spreads">Update data</button>
+  <button id="settingsBtn">Settings</button>
+</header>
+<pre id="updateLog"></pre>
+<main>
+  <section class="panel">
+    <h2>Your idea</h2>
+    <div id="chat"></div>
+    <div class="compose">
+      <textarea id="input" placeholder="Describe a trading idea, e.g. buy GOLD when it breaks the 20-bar high on H1, stop at 2 ATR"></textarea>
+      <button id="send" class="primary">Send</button>
+    </div>
+    <div class="chips" id="examples"></div>
+  </section>
+  <section>
+    <div class="panel" id="result"><div class="empty">Chat an idea, then press <b>Run test</b>. The result shows here: tested walk-forward on real XM data, 2017–2024 blind years, with spreads and swaps.</div></div>
+    <div class="panel" style="margin-top:16px">
+      <h2>Past tests</h2>
+      <div id="history"><div class="empty">None yet.</div></div>
+    </div>
+  </section>
+</main>
+
+<dialog id="settings">
+  <form method="dialog" id="settingsForm">
+    <h3 style="margin-top:0">Settings</h3>
+    <label for="llmUrl">OmniRoute URL</label>
+    <input id="llmUrl" placeholder="http://127.0.0.1:20128/v1">
+    <label for="llmKey">OmniRoute API key <span id="keyState" class="muted"></span></label>
+    <input id="llmKey" type="password" placeholder="leave empty to keep the saved key" autocomplete="off">
+    <label for="llmModel">Model</label>
+    <select id="llmModel"></select>
+    <p class="muted" id="modelsNote" style="font-size:13px"></p>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button value="cancel">Close</button>
+      <button id="saveSettings" value="default" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const history = [];  // the chat sent to the AI: {role, content}
+let lastIdea = "";
+let equityChart = null, yearChart = null;
+
+const EXAMPLES = [
+  "Buy and sell GOLD breakouts of the 20 or 55 bar high/low on H1, stop 2 ATR, target 2R",
+  "EURUSD: buy when RSI(14) crosses up through 30 on H4, only when ADX is under 25",
+  "GBPUSD London open range breakout on M15, stop 1.5 ATR, out after 16 bars",
+  "GOLD trend pullback: buy dips to the 20 EMA when the 100 SMA slopes up, H1",
+];
+const CHECK_NAMES = {
+  profit_factor: "Profit factor (blind years)", trades: "Number of trades",
+  positive_folds: "Profitable years", stress_profit_factor: "Profit factor at 2× spread",
+  coin_flip_baseline: "Beats random trades", deflated_sharpe: "Sharpe after luck correction",
+  pbo: "Chance it's overfit", neighbour_profit_factor: "Nearby settings also work",
+  long_profit_factor: "Longs profit factor", short_profit_factor: "Shorts profit factor",
+  top5_share: "Profit not from 5 lucky trades",
+};
+
+async function api(path, options = {}) {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || res.statusText);
+  return body;
+}
+const fmt = (v, d = 2) => v === null || v === undefined || Number.isNaN(v) ? "–" : Number(v).toFixed(d);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function addMsg(kind, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + kind;
+  div.textContent = text;
+  $("chat").appendChild(div);
+  $("chat").scrollTop = $("chat").scrollHeight;
+  return div;
+}
+
+function blockText(ref) {
+  if (!ref) return "";
+  const params = Object.entries(ref.params || {}).map(([k, v]) => `${k} ${Array.isArray(v) ? "[" + v.join(", ") + "]" : v}`);
+  return ref.block.replaceAll("_", " ") + (params.length ? ` (${params.join(", ")})` : "");
+}
+
+function specCard(spec, combos, msgDiv) {
+  const box = document.createElement("div");
+  box.className = "spec";
+  const exits = ["stop", "target", "trailing", "time", "opposite"].filter((k) => spec.exit[k]).map((k) => blockText(spec.exit[k]));
+  const rows = [
+    ["Test", `${spec.symbol} ${spec.timeframe}, ${spec.direction}`],
+    ["Entry", blockText(spec.entry)],
+    ["Filters", spec.filters.length ? spec.filters.map(blockText).join("; ") : "none"],
+    ["Exits", exits.join("; ")],
+    ["Grid", `${combos} combination${combos === 1 ? "" : "s"} tried`],
+  ];
+  box.innerHTML = `<b>${esc(spec.name)}</b>` + rows.map(([k, v]) => `<div class="row"><span class="k">${k}</span><span>${esc(v)}</span></div>`).join("");
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const run = document.createElement("button");
+  run.className = "primary"; run.textContent = "Run test";
+  const toggle = document.createElement("button");
+  toggle.textContent = "Edit JSON";
+  const editor = document.createElement("textarea");
+  editor.className = "json"; editor.style.display = "none";
+  editor.value = JSON.stringify(spec, null, 2);
+  toggle.onclick = () => { editor.style.display = editor.style.display === "none" ? "block" : "none"; };
+  run.onclick = async () => {
+    let chosen = spec;
+    if (editor.style.display !== "none") {
+      try { chosen = JSON.parse(editor.value); } catch (e) { addMsg("err", "That JSON doesn't parse: " + e.message); return; }
+    }
+    run.disabled = true; run.innerHTML = '<span class="spin"></span> Testing on real data…';
+    try {
+      const result = await api("/api/trial", { method: "POST", body: JSON.stringify({ idea: lastIdea, spec: chosen }) });
+      showResult(result);
+      loadHistory();
+      history.push({ role: "user", content: resultNote(result) });
+      addMsg("ai", `Tested: ${result.label}. ${result.metrics.trades} trades, net ${fmt(result.metrics.net_r, 1)} R, profit factor ${fmt(result.metrics.profit_factor)}. Tell me what to change, or describe a new idea.`);
+    } catch (e) { addMsg("err", e.message); }
+    run.disabled = false; run.textContent = "Run test";
+  };
+  actions.append(run, toggle);
+  box.append(actions, editor);
+  msgDiv.appendChild(box);
+}
+
+async function send() {
+  const text = $("input").value.trim();
+  if (!text) return;
+  $("input").value = "";
+  lastIdea = history.length ? lastIdea + " / " + text : text;
+  addMsg("user", text);
+  const wait = addMsg("ai", "");
+  wait.innerHTML = '<span class="spin"></span> Writing the strategy…';
+  $("send").disabled = true;
+  try {
+    const draft = await api("/api/draft", { method: "POST", body: JSON.stringify({ message: text, history }) });
+    history.push({ role: "user", content: text });
+    history.push({ role: "assistant", content: draft.explanation + "\n```json\n" + JSON.stringify(draft.spec) + "\n```" });
+    wait.textContent = draft.explanation || "Here's the strategy.";
+    specCard(draft.spec, draft.combinations, wait);
+  } catch (e) {
+    wait.className = "msg err";
+    wait.textContent = e.message;
+  }
+  $("send").disabled = false;
+  $("chat").scrollTop = $("chat").scrollHeight;
+}
+
+const statusOf = (c) => ({ pass: "PASS", fail: "FAIL" }[String(c.status).toLowerCase()] || "NA");
+
+function showResult(r) {
+  const good = r.verdict === "CANDIDATE";
+  const m = r.metrics, s = r.stress;
+  let why = good ? "It passed every check on years it never trained on. Still not a promise: next, try it on 2025–today and on demo."
+    : m.trades === 0 ? "It never traded: no setting made 30 trades in its 3 training years, so nothing was traded blind. Loosen the idea, add directions, or try a lower timeframe."
+    : r.closest_miss ? `Closest miss: ${CHECK_NAMES[r.closest_miss.check] || r.closest_miss.check} was ${fmt(r.closest_miss.value)} (needs ${fmt(r.closest_miss.threshold)}).` : "";
+  const failed = r.checks.filter((c) => statusOf(c) === "FAIL").length;
+  $("result").innerHTML = `
+    <div class="verdict ${good ? "good" : "bad"}"><b>${esc(r.label)}</b><span>${esc(r.spec.name)} · ${r.spec.symbol} ${r.spec.timeframe} · ${failed} of ${r.checks.length} checks failed. ${esc(why)}</span></div>
+    <div class="kpis">
+      ${kpi("Trades", m.trades, 0)}${kpi("Net R", m.net_r)}${kpi("Profit factor", m.profit_factor)}
+      ${kpi("Win rate", m.win_rate * 100, 0, "%")}${kpi("Avg trade", m.expectancy_r, 3, " R")}
+      ${kpi("Max drawdown", m.max_drawdown_r, 1, " R")}${kpi("PF at 2× spread", s.profit_factor)}
+    </div>
+    <div class="charts">
+      <div class="chart"><canvas id="equity"></canvas></div>
+      <div class="chart"><canvas id="years"></canvas></div>
+    </div>
+    <div class="table-wrap"><table>
+      <tr><th>Check</th><th>Value</th><th>Needs</th><th></th><th>Note</th></tr>
+      ${r.checks.map((c) => `<tr><td>${esc(CHECK_NAMES[c.name] || c.name.replaceAll("_", " "))}</td>
+        <td class="num">${fmt(c.value)}</td><td class="num">${c.at_most ? "≤" : "≥"} ${fmt(c.threshold)}</td>
+        <td><span class="tag ${statusOf(c)}">${statusOf(c) === "NA" ? "n/a" : statusOf(c)}</span></td><td class="muted">${esc(c.note || "")}</td></tr>`).join("")}
+    </table></div>
+    <p class="muted" style="font-size:13px">Blind years ${r.years[0]}–${r.years[r.years.length - 1]}, each traded with settings picked on the 3 years before.
+      Costs: spread floor ${fmt(r.cost.spread_floor_points, 0)} points + ${fmt(r.cost.slippage_points, 0)} slippage per fill, swaps as measured ${esc(r.cost.as_of)}.
+      R = profit in units of the stop distance. Test #${r.id}.</p>`;
+  drawCharts(r);
+}
+function resultNote(r) {
+  const m = r.metrics;
+  const failed = r.checks.filter((c) => statusOf(c) === "FAIL").map((c) => `${c.name} ${fmt(c.value)} (needs ${c.at_most ? "<=" : ">="} ${fmt(c.threshold)})`);
+  return `Test result of "${r.spec.name}": ${r.verdict}. Blind years ${r.years[0]}-${r.years[r.years.length - 1]}: ` +
+    `${m.trades} trades, net ${fmt(m.net_r, 1)} R, profit factor ${fmt(m.profit_factor)}, win rate ${fmt(m.win_rate * 100, 0)}%, ` +
+    `max drawdown ${fmt(m.max_drawdown_r, 1)} R. Net R per year: ${r.years.map((y, i) => `${y} ${fmt(r.year_net_r[i], 1)}`).join(", ")}. ` +
+    `Failed checks: ${failed.join("; ") || "none"}. If I ask for changes, build on this Spec.`;
+}
+const kpi = (label, v, d = 2, unit = "") => `<div class="kpi"><small>${label}</small><div>${fmt(v, d)}${unit}</div></div>`;
+
+function drawCharts(r) {
+  const css = getComputedStyle(document.documentElement);
+  const ink = css.getPropertyValue("--muted").trim(), line = css.getPropertyValue("--line").trim();
+  const accent = css.getPropertyValue("--accent").trim(), good = css.getPropertyValue("--good").trim(), bad = css.getPropertyValue("--bad").trim();
+  Chart.defaults.color = ink; Chart.defaults.borderColor = line;
+  equityChart?.destroy(); yearChart?.destroy();
+  equityChart = new Chart($("equity"), {
+    type: "line",
+    data: { datasets: [{ label: "Cumulative R", data: r.equity.map(([t, v]) => ({ x: t * 1000, y: v })),
+      borderColor: accent, pointRadius: 0, borderWidth: 1.6, tension: 0 }] },
+    options: { maintainAspectRatio: false, animation: false, plugins: { legend: { display: false },
+      title: { display: true, text: "Cumulative R, blind years" } },
+      scales: { x: { type: "linear", ticks: { callback: (v) => new Date(v).getUTCFullYear(), maxTicksLimit: 9 } } } },
+  });
+  yearChart = new Chart($("years"), {
+    type: "bar",
+    data: { labels: r.years, datasets: [{ data: r.year_net_r, backgroundColor: r.year_net_r.map((v) => v >= 0 ? good : bad) }] },
+    options: { maintainAspectRatio: false, animation: false, plugins: { legend: { display: false },
+      title: { display: true, text: "Net R per year" } } },
+  });
+}
+
+async function loadHistory() {
+  const rows = await api("/api/trials");
+  if (!rows.length) { $("history").innerHTML = '<div class="empty">None yet.</div>'; return; }
+  $("history").innerHTML = rows.map((r) => `<div class="item" data-id="${r.id}">
+    <span class="tag ${r.verdict === "CANDIDATE" ? "PASS" : "FAIL"}">${esc(r.label)}</span>
+    <span class="name" title="${esc(r.idea)}">${esc(r.name)}</span>
+    <span class="muted">${r.symbol} ${r.timeframe}</span>
+    <span class="muted">${r.when.slice(0, 16).replace("T", " ")}</span></div>`).join("");
+  document.querySelectorAll("#history .item").forEach((el) => {
+    el.onclick = async () => showResult(await api("/api/trials/" + el.dataset.id));
+  });
+}
+
+async function loadStatus() {
+  const st = await api("/api/status");
+  const ready = st.data.filter((d) => d.imported && d.spread_floor !== null);
+  const latest = st.data.map((d) => d.judged_through).filter(Boolean).sort().pop();
+  $("dataPill").textContent = `data: ${ready.length}/${st.data.length} symbols ready` + (latest ? `, through ${latest}` : "");
+  $("dataPill").className = "pill " + (ready.length ? "ok" : "warn");
+  $("dataPill").title = st.data.map((d) => `${d.symbol}: ${d.imported ? "from " + d.first_usable_month + " to " + d.judged_through : "not imported"}${d.spread_floor !== null ? ", spread " + d.spread_floor + " pts" : ", no spread yet"}`).join("\n");
+  const s = st.settings;
+  $("aiPill").textContent = s.llm_key_set ? `AI: ${s.llm_model || "OmniRoute (first model)"}` : "AI: add your OmniRoute key";
+  $("aiPill").className = "pill " + (s.llm_key_set ? "ok" : "warn");
+  $("llmUrl").value = s.llm_url;
+  $("keyState").textContent = s.llm_key_set ? "(saved)" : "(not set)";
+  $("llmModel").dataset.current = s.llm_model;
+  const up = st.update;
+  $("updateBtn").disabled = up.running;
+  $("updateBtn").innerHTML = up.running ? '<span class="spin"></span> Updating…' : "Update data";
+  if (up.log.length) { $("updateLog").style.display = "block"; $("updateLog").textContent = up.log.join("\n"); $("updateLog").scrollTop = 1e9; }
+  if (up.running) setTimeout(loadStatus, 2000);
+  return st;
+}
+
+async function openSettings() {
+  $("settings").showModal();
+  $("modelsNote").textContent = "Loading models…";
+  const { models, error } = await api("/api/models");
+  const current = $("llmModel").dataset.current || "";
+  const options = [...new Set([current, ...models].filter(Boolean))];
+  $("llmModel").innerHTML = '<option value="">(first model OmniRoute lists)</option>' + options.map((m) => `<option ${m === current ? "selected" : ""}>${esc(m)}</option>`).join("");
+  $("modelsNote").textContent = error ? error : `${models.length} models available.`;
+}
+
+$("send").onclick = send;
+$("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send(); });
+$("settingsBtn").onclick = openSettings;
+$("saveSettings").onclick = async (e) => {
+  e.preventDefault();
+  const body = { llm_url: $("llmUrl").value, llm_model: $("llmModel").value };
+  if ($("llmKey").value) body.llm_key = $("llmKey").value;
+  await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
+  $("llmKey").value = "";
+  $("settings").close();
+  loadStatus();
+};
+$("updateBtn").onclick = async () => { await api("/api/data/update", { method: "POST" }); loadStatus(); };
+EXAMPLES.forEach((text) => {
+  const b = document.createElement("button");
+  b.className = "chip"; b.textContent = text;
+  b.onclick = () => { $("input").value = text; $("input").focus(); };
+  $("examples").appendChild(b);
+});
+loadStatus().then((st) => { if (!st.settings.llm_key_set) openSettings(); });
+loadHistory();
+</script>
+</body>
+</html>
