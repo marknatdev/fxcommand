@@ -43,7 +43,7 @@ The machinery behind the old rules still runs and the existing tests keep it wor
 
 ## Working here
 
-- Commit as you go, without asking; commit messages end with the `Co-Authored-By` line. Don't push.
+- Commit as you go, without asking; commit messages end with the `Co-Authored-By` line. Push (`origin` = github.com/marknatdev/fxcommand, `main`, public) only when the owner asks.
 - Plans and results go in `tasks/`.
 - **Keep the Vibe Kanban board in step (owner's rule).** Whenever a task, checkpoint, decision or issue starts, finishes or changes, or a new one is planned, update the Fxcommand board through the `vibe_kanban` MCP in the same turn, after `tasks/` is updated:
   - **Where:** project "Fxcommand" (`0f530a08-1bad-4dbd-ad53-b2452e8c7e07`). Find an issue by its title prefix: `Roadmap · Layer A · M4 …` for epics, `M3 · T5 …` for tasks, `Issue · …`, `Decision · …`, `Chore · …`.
