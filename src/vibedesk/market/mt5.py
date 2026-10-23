@@ -10,12 +10,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-import numpy as np
-
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.grant import RESEARCH_START
 from vibedesk.market.mt5_api import TIMEFRAME_CONSTANTS, Mt5Api
-from vibedesk.market.server_time import DAY, server_offset, server_to_utc
+from vibedesk.market.server_time import DAY, server_bound, server_to_utc
 
 
 class Mt5Error(RuntimeError):
@@ -66,8 +64,8 @@ class Mt5BarSource:
         rates = self._api.copy_rates_range(
             symbol,
             getattr(self._api, TIMEFRAME_CONSTANTS[timeframe]),
-            _server_bound(lo - DAY),
-            _server_bound(hi + DAY),
+            server_bound(lo - DAY),
+            server_bound(hi + DAY),
         )
         if rates is None:
             raise Mt5Error(
@@ -96,8 +94,3 @@ class Mt5BarSource:
                 raise Mt5Error(f"symbol_info failed for {symbol}: {self._api.last_error()}")
             self._symbols[symbol] = (float(info.point), int(info.digits))
         return self._symbols[symbol]
-
-
-def _server_bound(utc: int) -> datetime:
-    """A UTC instant as MT5 reads a bound: its server wall time, written as UTC."""
-    return datetime.fromtimestamp(utc + int(server_offset(np.array([utc]))[0]), UTC)

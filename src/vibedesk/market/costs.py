@@ -17,7 +17,7 @@ import numpy as np
 
 from vibedesk.engine.costs import CostSnapshot
 from vibedesk.market.mt5_api import SWAP_IN_POINTS, Mt5Api, SymbolInfo
-from vibedesk.market.server_time import server_offset
+from vibedesk.market.server_time import server_bound
 from vibedesk.market.universe import SYMBOLS
 
 FLOOR_WINDOW = timedelta(days=14)
@@ -121,7 +121,8 @@ def current_cost(root: Path | str, symbol: str) -> CostSnapshot:
 
 
 def _floor(api: Mt5Api, symbol: str, now: datetime, point: float) -> SpreadFloor:
-    date_from, date_to = _server_bound(now - FLOOR_WINDOW), _server_bound(now)
+    date_from = server_bound(int((now - FLOOR_WINDOW).timestamp()))
+    date_to = server_bound(int(now.timestamp()))
     ticks = api.copy_ticks_range(symbol, date_from, date_to, api.COPY_TICKS_INFO)
     if ticks is None:
         raise CostError(f"{symbol}: copy_ticks_range failed: {api.last_error()}")
@@ -143,12 +144,6 @@ def _symbol_info(api: Mt5Api, symbol: str) -> SymbolInfo:
     if info is None:
         raise CostError(f"{symbol}: symbol_info failed: {api.last_error()}")
     return info
-
-
-def _server_bound(utc: datetime) -> datetime:
-    """A UTC time as MT5 reads a range bound: the server's wall time, written as UTC."""
-    epoch = int(utc.timestamp())
-    return datetime.fromtimestamp(epoch + int(server_offset(np.array([epoch]))[0]), UTC)
 
 
 def _utc(now: datetime) -> datetime:

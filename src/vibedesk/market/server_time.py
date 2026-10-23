@@ -59,6 +59,11 @@ def server_hours(time: np.ndarray) -> np.ndarray:
     return ((time + server_offset(time)) // HOUR) % 24
 
 
+def server_bound(utc: int) -> datetime:
+    """A UTC instant as MT5 reads a range bound: its server wall time, written as UTC."""
+    return datetime.fromtimestamp(utc + int(server_offset(np.array([utc]))[0]), UTC)
+
+
 def server_to_utc(server: np.ndarray) -> np.ndarray:
     """UTC epoch seconds for server wall-clock seconds, as MT5 returns them.
 
