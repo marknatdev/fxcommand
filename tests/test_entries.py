@@ -17,8 +17,8 @@ from vibedesk.blocks.entries import (
     range_breakout,
     rsi_threshold,
 )
-from vibedesk.blocks.sessions import session_opens
 from vibedesk.market.bars import Bars, Timeframe
+from vibedesk.market.sessions import session_opens
 
 
 def series(closes, lows=None, timeframe=Timeframe.M15, start=1704067200):

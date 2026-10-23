@@ -25,13 +25,13 @@ import numpy as np
 import pytest
 
 from vibedesk.blocks.compile import compile_signals
-from vibedesk.blocks.sessions import local_minute_of_day
 from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.engine.costs import CostSnapshot
 from vibedesk.engine.metrics import metrics
 from vibedesk.engine.simulate import Signals, simulate
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.server_time import DAY, server_offset
+from vibedesk.market.sessions import local_minute_of_day
 from vibedesk.market.synthetic import (
     EDGE_BLOCK_DAYS,
     PLANTED_EDGE,

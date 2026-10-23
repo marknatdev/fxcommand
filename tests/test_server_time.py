@@ -6,8 +6,17 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pytest
 
+from vibedesk.market import server_time
 from vibedesk.market.bars import Timeframe
-from vibedesk.market.server_time import DAY, check_clock, server_offset, server_to_utc
+from vibedesk.market.server_time import (
+    DAY,
+    check_clock,
+    server_days,
+    server_hours,
+    server_offset,
+    server_to_utc,
+    server_weekdays,
+)
 from vibedesk.market.synthetic import SyntheticBarSource
 
 HOUR = 3600
@@ -73,6 +82,79 @@ def test_server_clock_is_new_york_plus_seven(utc, hours):
 
 def test_server_offset_handles_empty_input():
     assert server_offset(np.array([], dtype=np.int64)).shape == (0,)
+
+
+# The server calendar
+
+# Each helper with the expression it replaced, as metrics, walk-forward, the quality mask, the
+# day_of_week filter, swap nights and the Coin-Flip Baseline wrote it out. They must agree to
+# the bit.
+HELPERS = {
+    "days": (server_days, lambda utc: (utc + server_offset(utc)) // DAY),
+    "weekdays": (server_weekdays, server_weekday),
+    "hours": (server_hours, lambda utc: ((utc + server_offset(utc)) // HOUR) % 24),
+}
+
+
+def switch_weekend(switch: date) -> np.ndarray:
+    """Sorted UTC times from the Friday before a switch to the Monday after: every minute, and
+    random seconds between them, a hundred of them twice."""
+    friday = midnight(switch) - 2 * DAY
+    minutes = np.arange(friday, friday + 4 * DAY, 60, dtype=np.int64)
+    seconds = np.random.default_rng(switch.toordinal()).integers(friday, friday + 4 * DAY, 2000)
+    return np.sort(np.concatenate([minutes, seconds, seconds[:100]]))
+
+
+@pytest.mark.parametrize("switch", SWITCHES, ids=str)
+@pytest.mark.parametrize("name", HELPERS)
+def test_each_helper_is_the_expression_it_replaced(name, switch):
+    """On sorted times, as bars come, and on the same times shuffled: same values, same dtype."""
+    helper, written_out = HELPERS[name]
+    utc = switch_weekend(switch)
+    for times in (utc, np.random.default_rng(0).permutation(utc)):
+        got, expected = helper(times), written_out(times)
+        assert got.dtype == expected.dtype
+        assert np.array_equal(got, expected)
+
+
+@pytest.mark.parametrize("name", HELPERS)
+def test_the_sorted_fast_path_agrees_with_the_general_one(name):
+    """Every switch weekend of 2014-2026 in one sorted array; reversed, it takes the general
+    path, one offset lookup per time."""
+    helper, _ = HELPERS[name]
+    utc = np.concatenate([switch_weekend(switch) for switch in SWITCHES])
+    assert np.array_equal(helper(utc[::-1])[::-1], helper(utc))
+
+
+def test_sorted_times_look_up_one_offset_per_utc_day(monkeypatch):
+    """The fast path really runs: Friday to Monday takes four lookups, unsorted one per time."""
+    lookups = []
+
+    def counted(utc):
+        lookups.append(len(utc))
+        return server_offset(utc)
+
+    monkeypatch.setattr(server_time, "server_offset", counted)
+    utc = switch_weekend(date(2026, 3, 8))
+    server_days(utc)
+    server_days(utc[::-1])
+    assert lookups == [4, len(utc)]
+
+
+@pytest.mark.parametrize("name", HELPERS)
+def test_each_helper_keeps_the_shape(name):
+    """Like server_offset: no times, one time, a single number and a sorted grid."""
+    helper, written_out = HELPERS[name]
+    friday, sunday_open = epoch(2026, 3, 6, 20), epoch(2026, 3, 8, 21)
+    for utc in (
+        np.array([], dtype=np.int64),
+        np.array([sunday_open]),
+        sunday_open,
+        np.array([[friday, friday + HOUR], [sunday_open, sunday_open + HOUR]]),
+    ):
+        got, expected = helper(utc), written_out(utc)
+        assert np.shape(got) == np.shape(expected)
+        assert np.array_equal(got, expected)
 
 
 # Server clock to UTC

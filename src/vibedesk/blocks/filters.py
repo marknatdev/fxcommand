@@ -14,9 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from vibedesk.blocks.indicators import adx, atr, sma, trailing_percentile
 from vibedesk.blocks.registry import LIBRARY, Kind
-from vibedesk.blocks.sessions import local_minute_of_day
 from vibedesk.market.bars import Bars
-from vibedesk.market.server_time import DAY, server_offset
+from vibedesk.market.server_time import server_weekdays
+from vibedesk.market.sessions import local_minute_of_day
 
 SLOPE_BARS = 10  # ma_slope measures the moving average's change over this many bars
 
@@ -158,7 +158,6 @@ def day_of_week(bars: Bars, p: DayOfWeekParams) -> tuple[np.ndarray, np.ndarray]
     """Trade only when the trade's entry bar opens on one of the chosen server-clock weekdays
     (the broker's trading days)."""
     time = entry_times(bars)
-    weekday = ((time + server_offset(time)) // DAY + 3) % 7  # 1970-01-01: Thursday
     days = np.array([p.mon, p.tue, p.wed, p.thu, p.fri, False, False])
-    allowed = days[weekday]
+    allowed = days[server_weekdays(time)]
     return allowed, allowed.copy()

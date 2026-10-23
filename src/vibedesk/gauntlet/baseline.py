@@ -32,10 +32,9 @@ import numpy as np
 from vibedesk.engine.prepared import PreparedMarket
 from vibedesk.engine.simulate import TRADE_DTYPE, Signals, simulate_prepared
 from vibedesk.gauntlet.walkforward import WalkForward, Window
-from vibedesk.market.server_time import server_offset
+from vibedesk.market.server_time import server_hours
 
 RUNS = 1000
-HOUR = 3600
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -69,7 +68,7 @@ class Baseline:
 def fold_plans(wf: WalkForward) -> list[FoldPlan]:
     """One plan per blind year in which the strategy traded."""
     market = wf.market
-    hour = _server_hours(market.time)
+    hour = server_hours(market.time)
     stitched = wf.trades.records
     plans = []
     for fold, chosen in enumerate(wf.choices):
@@ -120,7 +119,7 @@ def draw_year(plan: FoldPlan, rng: np.random.Generator) -> np.ndarray:
 def coin_flip_baseline(wf: WalkForward, seed: int, runs: int = RUNS) -> Baseline:
     rng = np.random.default_rng(seed)
     plans = fold_plans(wf)
-    hour = _server_hours(wf.market.time)
+    hour = server_hours(wf.market.time)
     net_r = np.zeros(runs)
     run_fold_trades = np.zeros((runs, len(wf.years)), dtype=np.int64)
     hour_counts = np.zeros(24, dtype=np.int64)
@@ -175,5 +174,4 @@ def _every_trade(signals: Signals, candidates: np.ndarray, market: PreparedMarke
     return table
 
 
-def _server_hours(time: np.ndarray) -> np.ndarray:
-    return ((time + server_offset(time)) // HOUR) % 24
+_server_hours = server_hours  # the name tests/test_baseline.py imports

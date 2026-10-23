@@ -12,7 +12,7 @@ import numpy as np
 
 from vibedesk.engine.simulate import Trades
 from vibedesk.market.bars import Bars
-from vibedesk.market.server_time import DAY, server_offset
+from vibedesk.market.server_time import DAY, server_days, server_offset
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -78,11 +78,10 @@ def _daily_r(trades: Trades, bars: Bars) -> tuple[np.ndarray, np.ndarray]:
 
     A trade's R counts on the server day of its exit bar.
     """
-    bar_days = (bars.time + server_offset(bars.time)) // DAY
-    days, first = np.unique(bar_days, return_index=True)
+    days, first = np.unique(server_days(bars.time), return_index=True)
     day_start = days * DAY - server_offset(bars.time[first])
     daily = np.zeros(len(days))
     if len(trades):
-        exit_days = (trades["exit_time"] + server_offset(trades["exit_time"])) // DAY
+        exit_days = server_days(trades["exit_time"])
         np.add.at(daily, np.searchsorted(days, exit_days), trades["r"])
     return day_start.astype(np.int64), daily

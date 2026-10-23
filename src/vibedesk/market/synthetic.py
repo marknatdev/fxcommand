@@ -18,9 +18,9 @@ from datetime import UTC, date, datetime
 
 import numpy as np
 
-from vibedesk.blocks.sessions import local_minute_of_day
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.server_time import DAY, server_offset
+from vibedesk.market.sessions import local_minute_of_day
 
 
 @dataclass(frozen=True)
