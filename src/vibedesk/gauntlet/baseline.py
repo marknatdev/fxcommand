@@ -172,6 +172,3 @@ def _every_trade(signals: Signals, candidates: np.ndarray, market: PreparedMarke
             table[row, np.searchsorted(candidates, records["entry_idx"])] = records
             remaining = remaining[~np.isin(remaining, records["entry_idx"])]
     return table
-
-
-_server_hours = server_hours  # the name tests/test_baseline.py imports

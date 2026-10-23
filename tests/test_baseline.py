@@ -11,7 +11,6 @@ import test_walkforward as twf
 from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.engine.simulate import simulate_prepared
 from vibedesk.gauntlet.baseline import (
-    _server_hours,
     coin_flip_baseline,
     draw_year,
     entry_signals,
@@ -19,6 +18,7 @@ from vibedesk.gauntlet.baseline import (
 )
 from vibedesk.gauntlet.walkforward import walk_forward
 from vibedesk.market.bars import Timeframe
+from vibedesk.market.server_time import server_hours
 from vibedesk.market.synthetic import SyntheticBarSource
 
 # A long-holding Spec: on synthetic H1 it is in the market about 95% of the time.
@@ -62,7 +62,7 @@ def test_every_run_draws_exactly_the_strategys_count_each_year(wf):
 
 def test_hours_and_sides_match_the_strategy_exactly(wf):
     runs = 1000
-    hours = _server_hours(wf.market.time)[wf.trades["entry_idx"]]
+    hours = server_hours(wf.market.time)[wf.trades["entry_idx"]]
 
     baseline = coin_flip_baseline(wf, seed=1, runs=runs)
 
@@ -74,7 +74,7 @@ def test_hours_and_sides_match_the_strategy_exactly(wf):
 
 def test_a_year_draws_distinct_bars_of_the_right_hours(wf):
     rng = np.random.default_rng(0)
-    hour = _server_hours(wf.market.time)
+    hour = server_hours(wf.market.time)
 
     for plan in fold_plans(wf):
         records = draw_year(plan, rng)
