@@ -19,12 +19,12 @@ from vibedesk.blocks.filters import (
     session_window,
 )
 from vibedesk.blocks.indicators import trailing_percentile
-from vibedesk.blocks.sessions import local_minute_of_day
 from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.engine.costs import CostSnapshot
 from vibedesk.engine.simulate import simulate
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.server_time import DAY, server_offset
+from vibedesk.market.sessions import local_minute_of_day
 from vibedesk.market.synthetic import SyntheticBarSource
 
 

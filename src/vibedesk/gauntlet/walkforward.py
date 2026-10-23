@@ -37,7 +37,7 @@ from vibedesk.engine.prepared import PreparedMarket, prepare
 from vibedesk.engine.simulate import TRADE_DTYPE, ExitReason, Signals, Trades, simulate_prepared
 from vibedesk.gauntlet.stats import sharpe
 from vibedesk.market.bars import Bars
-from vibedesk.market.server_time import DAY, server_offset
+from vibedesk.market.server_time import DAY, server_days, server_offset
 
 BLIND_YEARS = tuple(range(2017, 2025))
 TRAIN_YEARS = 3
@@ -261,7 +261,7 @@ def _blind_days(bars: Bars, lo: int) -> tuple[np.ndarray, np.ndarray]:
 
     Bars before `lo` get -1; no blind trade exits on them.
     """
-    server_day = (bars.time + server_offset(bars.time)) // DAY
+    server_day = server_days(bars.time)
     days, first = np.unique(server_day[lo:], return_index=True)
     day_start = (days * DAY - server_offset(bars.time[lo + first])).astype(np.int64)
     bar_day = np.full(len(bars), -1, dtype=np.int64)

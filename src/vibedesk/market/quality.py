@@ -23,7 +23,7 @@ import numpy as np
 
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.grant import HOLDOUT_START, RESEARCH_START
-from vibedesk.market.server_time import DAY, server_offset
+from vibedesk.market.server_time import server_days
 
 THIN_FRACTION = 0.5  # of the Research Window's median M15 bars per server day
 
@@ -66,21 +66,6 @@ class Mask:
             judged_through=date.fromisoformat(data["judged_through"]),
             masked_days=tuple(date.fromisoformat(day) for day in data["masked_days"]),
         )
-
-
-def server_days(time: np.ndarray) -> np.ndarray:
-    """The server day of each UTC epoch time, as days since 1970-01-01 on the server clock."""
-    time = np.asarray(time, dtype=np.int64)
-    utc_days = time // DAY
-    if len(time) > 1 and np.all(utc_days[1:] >= utc_days[:-1]):
-        # Bar times are sorted, so one offset lookup per run of a UTC day is enough; a year of
-        # M1 bars would otherwise sort half a million times just to find its days.
-        starts = np.flatnonzero(np.r_[True, utc_days[1:] != utc_days[:-1]])
-        lengths = np.diff(np.r_[starts, len(time)])
-        offsets = np.repeat(server_offset(time[starts]), lengths)
-    else:
-        offsets = server_offset(time)
-    return (time + offsets) // DAY
 
 
 def build_mask(m15: Bars, cutoff: datetime) -> Mask:

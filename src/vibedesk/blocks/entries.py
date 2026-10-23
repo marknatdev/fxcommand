@@ -21,8 +21,8 @@ from vibedesk.blocks.indicators import (
     sma,
 )
 from vibedesk.blocks.registry import LIBRARY, Kind
-from vibedesk.blocks.sessions import session_opens
 from vibedesk.market.bars import Bars
+from vibedesk.market.sessions import session_opens
 
 
 class _Params(BaseModel):

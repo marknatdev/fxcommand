@@ -2,7 +2,8 @@
 
 MT5 writes every time as server wall-clock seconds; `server_to_utc` turns them into UTC, and
 `check_clock` runs the structural checks that real bars must pass year by year (tasks/plan.md,
-"Server clock to UTC").
+"Server clock to UTC"). `server_days`, `server_weekdays` and `server_hours` read UTC times on
+the server calendar.
 """
 
 from collections.abc import Mapping
@@ -30,6 +31,32 @@ def server_offset(utc: np.ndarray) -> np.ndarray:
     days, inverse = np.unique(utc // DAY, return_inverse=True)
     offsets = np.array([_offset_at(int(day) * DAY + DAY // 2) for day in days], dtype=np.int64)
     return offsets[inverse].reshape(utc.shape)
+
+
+def server_days(time: np.ndarray) -> np.ndarray:
+    """The server day of each UTC epoch time, as days since 1970-01-01 on the server clock."""
+    time = np.asarray(time, dtype=np.int64)
+    utc_days = time // DAY
+    if time.ndim == 1 and len(time) > 1 and np.all(utc_days[1:] >= utc_days[:-1]):
+        # Bar times are sorted, so one offset lookup per run of a UTC day is enough; a year of
+        # M1 bars would otherwise sort half a million times just to find its days.
+        starts = np.flatnonzero(np.r_[True, utc_days[1:] != utc_days[:-1]])
+        lengths = np.diff(np.r_[starts, len(time)])
+        offsets = np.repeat(server_offset(time[starts]), lengths)
+    else:
+        offsets = server_offset(time)
+    return (time + offsets) // DAY
+
+
+def server_weekdays(time: np.ndarray) -> np.ndarray:
+    """The server-clock weekday of each UTC epoch time, Monday 0 to Sunday 6."""
+    return (server_days(time) + 3) % 7  # 1970-01-01 was a Thursday
+
+
+def server_hours(time: np.ndarray) -> np.ndarray:
+    """The server-clock hour of each UTC epoch time, 0 to 23."""
+    time = np.asarray(time, dtype=np.int64)
+    return ((time + server_offset(time)) // HOUR) % 24
 
 
 def server_to_utc(server: np.ndarray) -> np.ndarray:

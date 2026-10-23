@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, replace
 
 import numpy as np
 
-from vibedesk.market.server_time import DAY, server_offset
+from vibedesk.market.server_time import server_days
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +60,7 @@ def swap_nights(entry_utc: np.ndarray, exit_utc: np.ndarray, triple_day: int) ->
 
     def rollovers_up_to(utc: np.ndarray) -> np.ndarray:
         # 1970-01-01 (server day 0) was a Thursday, so weekday = (day + 3) % 7.
-        shifted = (utc + server_offset(utc)) // DAY + 3
+        shifted = server_days(utc) + 3
         return (shifted // 7) * weights.sum() + cumulative[shifted % 7]
 
     entry_utc = np.asarray(entry_utc, dtype=np.int64)
