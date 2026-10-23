@@ -159,14 +159,14 @@
 **From T1 and T2:** read with `Mt5BarSource` (it includes the forming bar; the cutoff drops it), write with `write_chunk`, and call `record_import(root, symbol, cutoff)` once, after every chunk of the import has settled. `CachedBarSource` withholds server days not yet judged, so a read-back ends at the last server day closed by the cutoff. The Parquet guard forbids naming Parquet files in `src/` outside `cache.py`; tests that hash files compute the paths themselves.
 
 **Acceptance criteria:**
-- [ ] A full import from `FakeMt5` into a temporary cache, read back through `MarketData`, equals the synthetic bars after the mask.
-- [ ] A chunk that comes back short on the first read is re-read until two reads agree; a chunk that never settles fails the import with its symbol, timeframe and range.
-- [ ] With a fake whose current chunk gains a new bar between reads (a live market), the chunk still settles, because only bars closed by the cutoff are compared.
-- [ ] The bar still forming at the cutoff never reaches the cache, and the next refresh caches it once it has closed.
-- [ ] A chunk that returns exactly the fake's cap is flagged in the report.
-- [ ] A refresh rewrites only the current and the previous chunk's files (the other files' hashes are unchanged); a refresh just after New Year completes the old year's last day.
-- [ ] A second importer started while one holds the lock is refused.
-- [ ] Peak memory for a 12-year M1 import of one symbol stays under 1 GB (measured on the fake).
+- [x] A full import from `FakeMt5` into a temporary cache, read back through `MarketData`, equals the synthetic bars after the mask.
+- [x] A chunk that comes back short on the first read is re-read until two reads agree; a chunk that never settles fails the import with its symbol, timeframe and range.
+- [x] With a fake whose current chunk gains a new bar between reads (a live market), the chunk still settles, because only bars closed by the cutoff are compared.
+- [x] The bar still forming at the cutoff never reaches the cache, and the next refresh caches it once it has closed.
+- [x] A chunk that returns exactly the fake's cap is flagged in the report.
+- [x] A refresh rewrites only the current and the previous chunk's files (the other files' hashes are unchanged); a refresh just after New Year completes the old year's last day.
+- [x] A second importer started while one holds the lock is refused.
+- [x] Peak memory for a 12-year M1 import of one symbol stays under 1 GB (measured on the fake).
 
 **Verification:** `uv run pytest tests/test_importer.py`
 
@@ -175,6 +175,28 @@
 **Files (owned):** `src/vibedesk/market/importer.py`, `tests/test_importer.py`
 
 **Scope:** M
+
+**Result (built here, 2026-10-23; awaiting review):**
+- **API:** `import_history(api, root, *, symbols=UNIVERSE, timeframes=TIMEFRAMES, start=RESEARCH_START, clock)` and `refresh(api, root, *, symbols, timeframes, clock)` return an `ImportReport`: the clock's cutoff; per chunk bars, reads and flag; per symbol its own cutoff, `judged_through` and whether this run judged days. Counts only. `import_lock(root)` holds `bars/import.lock`. Failures raise `ImportFailed` (`ImportLocked` for the lock). The importer owns `initialize` and `shutdown`.
+- **How it works:** the cutoff is fixed at the start and every read is cut to the bars closed by it; a chunk is accepted when two reads in a row are identical (every column, not just count and last time), and fails after `MAX_READS` = 6. `record_import` runs per symbol only after all its chunks settled, so a failed import serves nothing new. An empty chunk is written only to clear bars the cache held there.
+- **Evidence (`tests/test_importer.py`, 17 tests; default suite 1061 passed, slow suite 7 passed in 219 s):**
+  - a full import of four months of GOLD on all 5 timeframes reads back through `MarketData` exactly as the synthetic bars after the mask, closed by the cutoff; 12 chunks, all settled in 2 reads, nothing flagged;
+  - a downloading terminal takes 3 reads per chunk and caches the same bars as a clean one; one that never settles fails as "GOLD M1 2023-11 (2023-11-01 to …) did not settle", with no mask, nothing served and the lock released;
+  - a live terminal clock 15 minutes on at every call: the raw reads differ, the chunk still settles in 2 reads, and the 10:00 bar forming at the 10:07 cutoff is not cached; a refresh at 10:20 caches it (M1 through 10:19);
+  - a 20,000-bar cap flags exactly the M1 months after the first ("starts late: a capped read or a gap");
+  - a refresh at 2 January 12:00 after an import at 31 December 12:00 writes exactly M1 2024-12 and 2025-01 and the 2024 and 2025 years of the others (no D1 bar of 2025 had closed yet, so none is written), leaves the 2023 files' bytes and modification times unchanged, completes 31 December's M15 bars, and judges days through 1 January;
+  - a second importer is refused while the lock is held, and runs once it is released;
+  - refusals before any read: a refresh before any import, a first import without M15, a failed `initialize`, a naive clock;
+  - **memory (slow test):** a 12-year M1 import of one symbol (4.8 million bars, with M15) peaks at 399 MiB traced.
+  - the three guards below, each with a test; breaking each guard in turn (no tick cap, no judged-day check, judging without M15, ignoring a short M15) fails its test.
+- **Deviations from the plan, for review:**
+  - **Refresh range:** from the earlier of the chunk before the cutoff's and the chunk of the last import, through the cutoff's chunk. This is the plan's "current and previous" when refreshes run often, and also fills the gap after a refresh missed for months.
+  - **Capped reads are flagged by shape, not by count:** `Mt5BarSource` trims what MT5 returns, so a cap can't be seen as an exact bar count. A chunk after earlier data that is empty or starts more than 4 days late is flagged.
+  - **New: a stalled terminal.** Testing found that a terminal stuck half way through a download returns the same short read twice, which two agreeing reads accept. The importer now also flags a finished chunk whose last bar closes more than 4 days before its end ("a read cut short or a gap"), and `FakeMt5`'s settling reads now grow on every read, as a downloading terminal's do. A test with a stalled fake shows every short chunk flagged. Flags are warnings in the report; T5's import command should print them, and T6 must explain any it sees.
+  - **Three guards keep a bad read out of what Trials see** (added after review of the first draft, 2026-10-23):
+    1. **A symbol's cutoff is the earlier of the clock and its last tick** (`symbol_info_tick`, converted with `server_to_utc`). A terminal that stopped receiving quotes would otherwise have its silent hours judged: a partial day masked for good, an empty day never judged and later served unjudged. Test: a terminal stuck at Tuesday 17:00 with the clock at Wednesday noon judges through Monday and leaves Tuesday unmasked. On a weekend the last tick is Friday's close, so Friday is judged at the next import. A symbol with no tick fails. Chunks that start after the last tick are skipped, not read: the slow memory test caught them being flagged as short and blocking the symbol, and a fast test now covers it.
+    2. **Days are judged only when the run imported M15, and never after a short M15 chunk.** A refresh of H1 alone reports `judged=False` and leaves `judged_through` where it was; a flagged M15 chunk fails the symbol, naming the chunk, before any day is judged (a stalled first import leaves no mask, so nothing is served).
+    3. **No chunk may change bars on a server day already judged.** Before writing, the chunk's bars on judged days are compared with the cache's; any difference fails the import, naming the chunk and the first changed day, and nothing is written for it. A refresh through a stalled terminal fails as "GOLD M1 2024-01 would change bars on 2024-01-1…", with every 2023 and 2024 file's bytes and modification time unchanged. This also stops a genuine MT5 history revision from silently changing a Trial's bars; the owner hears about it instead.
 
 ---
 

@@ -4,8 +4,8 @@ It serves a BarSource's bars (a SyntheticBarSource, in tests) the way MT5 does: 
 wall-clock seconds written as UTC, bounds read the same way, None plus `last_error()` on
 failure. It can also misbehave the ways a real terminal does, so the importer can be tested
 against them:
-- `settling_reads`: the first reads of each range return only part of it, as while the terminal
-  is still downloading history;
+- `settling_reads`: the first reads of each range return only a growing part of it, as while
+  the terminal is still downloading history;
 - `max_bars`: a read returns at most this many bars (the latest), as with a low "Max bars in
   chart" setting;
 - `now`: a clock. Bars that open after it don't exist yet, and the bar open at `now` is still
@@ -237,10 +237,13 @@ class FakeMt5:
         return bars.between(-(2**62), now + 1), server[:n]
 
     def _settle(self, key: tuple, out: np.ndarray) -> np.ndarray:
-        """While the terminal 'downloads', a read returns only the first half of the range."""
+        """While the terminal 'downloads', each read returns a longer start of the range: half
+        of it first when one read settles it, then more on every read until it is whole."""
         reads = self._reads.get(key, 0)
         self._reads[key] = reads + 1
-        return out[: len(out) // 2] if reads < self._settling_reads else out
+        if reads >= self._settling_reads:
+            return out
+        return out[: len(out) * (reads + 1) // (self._settling_reads + 1)]
 
 
 def _wall_seconds(bound: datetime) -> int:
