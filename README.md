@@ -48,7 +48,7 @@ your idea ──► AI (OpenAI-compatible API) ──► Strategy Spec (blocks +
 
 - Windows (the MetaTrader 5 Python package is Windows-only)
 - Python 3.12 and [uv](https://docs.astral.sh/uv/)
-- MetaTrader 5, logged in to your broker and receiving quotes, to import history. Access is read-only. Built against XM, whose server clock is New York + 7 h.
+- MetaTrader 5, logged in to your broker and receiving quotes, to import history. Access is read-only. Built against XM, whose server clock runs on European EET/EEST (Europe/Athens) with the New York trading week.
 - An OpenAI-compatible chat API for the AI: OmniRoute, OpenAI, OpenRouter or any server with `/v1/models` and `/v1/chat/completions`.
 
 ## Quick start

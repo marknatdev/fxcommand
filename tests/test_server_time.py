@@ -204,18 +204,6 @@ def test_the_session_clock_follows_new_york():
     assert session_offset(noon).tolist() == expected
 
 
-def mismatch_days() -> list[date]:
-    """The days the server clock runs an hour behind the session clock: New York on summer time,
-    Europe not (yet, or any more)."""
-    days = []
-    for us_spring, eu_spring, eu_autumn, us_autumn in zip(
-        US_SPRING, SPRING, AUTUMN, US_AUTUMN, strict=True
-    ):
-        days += [us_spring + timedelta(days=i) for i in range((eu_spring - us_spring).days)]
-        days += [eu_autumn + timedelta(days=i) for i in range((us_autumn - eu_autumn).days)]
-    return days
-
-
 def test_the_clocks_part_only_between_the_us_and_european_switches():
     """Server and session clock agree on every day of 2014-2026 but 3 to 4 weeks a year, and
     there the server runs one hour behind."""
@@ -224,7 +212,15 @@ def test_the_clocks_part_only_between_the_us_and_european_switches():
     gap = session_offset(noon) - server_offset(noon)
     parted = [date(1970, 1, 1) + timedelta(days=int(t // DAY)) for t in noon[gap != 0]]
     assert set(gap.tolist()) == {0, HOUR}
-    assert parted == mismatch_days()
+
+    # Expected mismatch days: New York on summer time, Europe not (yet, or any more).
+    expected = [
+        span[0] + timedelta(days=i)
+        for us_s, eu_s, eu_a, us_a in zip(US_SPRING, SPRING, AUTUMN, US_AUTUMN, strict=True)
+        for span in ((us_s, eu_s), (eu_a, us_a))
+        for i in range((span[1] - span[0]).days)
+    ]
+    assert parted == expected
     per_year = {year: sum(day.year == year for day in parted) // 7 for year in range(2014, 2027)}
     assert set(per_year.values()) <= {3, 4}
 

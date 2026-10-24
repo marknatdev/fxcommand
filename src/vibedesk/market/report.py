@@ -1,10 +1,10 @@
 """The data report (M3 plan, "The desk CLI"): structural facts about a cached symbol, per year.
 
 Two kinds of clock check answer different questions, and the report keeps them apart:
-- **Our conversion** (`server_time.check_clock`): D1 bars open at 17:00 New York, H4 bars on server
-  hours divisible by 4, M15 bars on the 15-minute grid. These catch our own bugs, times shifted
-  between MT5 and the cache. MT5 builds its bars on its own clock, so they pass whatever whole-hour
-  offset XM's clock had.
+- **Our conversion** (`server_time.check_clock`): D1 bars open at server midnight (00:00),
+  H4 bars on server hours divisible by 4, M15 bars on the 15-minute grid. These catch our own bugs,
+  times shifted between MT5 and the cache. MT5 builds its bars on its own clock, so they pass
+  whatever whole-hour offset XM's clock had.
 - **XM's clock** (`xm_clock_checks`): XM's server runs on European time (EET/EEST) while the
   market week runs on New York time (market/server_time.py). If our model of either clock were
   wrong in some year, bars would land outside the New York trading week or GOLD's daily break

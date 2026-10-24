@@ -22,8 +22,8 @@ Layer A never trades. It has no live-feed runtime, no virtual accounts and no or
 |---|---|
 | Account | XMGlobal-MT5 7, demo, USD, hedging. The terminal is running. |
 | Python | The MetaTrader5 wheel 5.0.6231 works on **Python 3.12** (checked with uv). The system Python is 3.10. |
-| Server clock | Epoch values returned by MT5 are **server-local time**. Today they run UTC+3.00. XM's server time is New York time + 7 h, so DST follows the US. |
-| Bar boundaries | D1 opens at server 00:00, which is 17:00 New York. H4 opens at 00, 04 … 20 server time. |
+| Server clock | Epoch values returned by MT5 are **server-local time**. Today they run UTC+3.00. XM's server runs on European EET/EEST (`Europe/Athens`), while the market trading week runs on New York time. |
+| Bar boundaries | D1 opens at server 00:00 (17:00 New York outside mismatch weeks, 18:00 New York during mismatch weeks). H4 opens at 00, 04 … 20 server time. |
 | GOLD history | Real M1/M15 data starts **mid-2014**. Earlier years hold one bar per day, which is unusable. |
 | FX majors history | Real M15 data from 1999, M1 from 2010 or earlier. |
 | Bar spread | Each bar stores the minimum spread inside it. GOLD bars show 30–40 points; ticks over the last 14 days show 55 (p50), 57 (p90). EURUSD bars show 16; ticks show 20. |

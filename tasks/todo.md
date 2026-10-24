@@ -365,7 +365,7 @@
   - `src/vibedesk/market/synthetic.py`: trading schedule aligned with market week (`session_weekdays < 5`), with GOLD opening Monday server time.
   - Test suite updated: `test_server_time.py`, `test_report.py`, `test_mt5_source.py`, `test_fake_mt5.py`, `test_market_costs.py`, `test_synthetic.py`, `reference_engine.py`.
   - Full default suite (1,349 passed, 1 skipped) and ruff clean.
-  - Rules fingerprint pins in `tests/test_rules_version.py` updated for new synthetic bars (`inputs:bars`); `RULES_VERSION` remains 2.
+  - `RULES_VERSION` bumped to 3 in `src/vibedesk/rules.py` and `PINNED_FOR = 3` in `tests/test_rules_version.py`: server day and hour shifts in mismatch weeks alter `day_of_week` filters, swap nights, walk-forward/metrics daily boundaries and baseline hours on unchanged UTC bars, keeping old-clock Trials in the Ledger distinguishable.
 - **Re-import results on all 8 symbols (read-only from XM MT5, ~41 million bars):**
   - **Before:** 104 out of 104 symbol-years failed clock checks (100% fail rate).
   - **After:** 103 out of 104 symbol-years passed all checks (99% pass rate).

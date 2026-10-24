@@ -88,15 +88,6 @@ def xm_year(year: int, **kwargs) -> tuple[np.ndarray, np.ndarray]:
     return m15, as_stored(d1_on_server_days(m15, xm_stamps))
 
 
-def other_year(stamp_offset, year: int, **kwargs) -> tuple[np.ndarray, np.ndarray]:
-    """A broker stamping by `stamp_offset`, stored as if its stamps were XM's."""
-    m15 = gold_m15(year, **kwargs)
-    return (
-        as_stored(m15 + stamp_offset(m15)),
-        as_stored(d1_on_server_days(m15, stamp_offset)),
-    )
-
-
 @pytest.mark.parametrize("fx", [False, True])
 def test_an_xm_year_with_holidays_passes(fx):
     m15, d1 = xm_year(2024, fx=fx)
@@ -151,18 +142,22 @@ def test_a_week_with_a_holiday_has_four_d1_bars_and_passes():
 def test_a_new_york_plus_7_broker_fails_between_the_switches(fx):
     """The clock the importer used to assume: in the weeks between the switches its stamps are
     stored an hour late, so the week's last hour lands in New York's weekend."""
-    m15, d1 = other_year(ny7_stamps, 2024, fx=fx)
+    m15 = gold_m15(2024, fx=fx)
+    stored_m15 = as_stored(m15 + ny7_stamps(m15))
+    stored_d1 = as_stored(d1_on_server_days(m15, ny7_stamps))
 
-    xm = xm_clock_checks(m15, d1)[2024]
+    xm = xm_clock_checks(stored_m15, stored_d1)[2024]
 
     assert xm.weekend_bars == 4 * 4  # the last hour of each of the four weeks
     assert not xm.passed
 
 
 def test_a_fixed_gmt2_year_moves_golds_break():
-    m15, d1 = other_year(gmt2_stamps, 2024)
+    m15 = gold_m15(2024)
+    stored_m15 = as_stored(m15 + gmt2_stamps(m15))
+    stored_d1 = as_stored(d1_on_server_days(m15, gmt2_stamps))
 
-    xm = xm_clock_checks(m15, d1)[2024]
+    xm = xm_clock_checks(stored_m15, stored_d1)[2024]
 
     # Stored as EEST in European summer, a GMT+2 stamp reads an hour early: the break moves.
     assert xm.winter_break == (0,)
@@ -170,9 +165,11 @@ def test_a_fixed_gmt2_year_moves_golds_break():
 
 
 def test_a_fixed_gmt2_year_opens_the_fx_week_in_new_yorks_weekend():
-    m15, d1 = other_year(gmt2_stamps, 2024, fx=True)
+    m15 = gold_m15(2024, fx=True)
+    stored_m15 = as_stored(m15 + gmt2_stamps(m15))
+    stored_d1 = as_stored(d1_on_server_days(m15, gmt2_stamps))
 
-    xm = xm_clock_checks(m15, d1)[2024]
+    xm = xm_clock_checks(stored_m15, stored_d1)[2024]
 
     # 17:00 New York on a summer Sunday reads as 16:00: still New York's weekend.
     assert xm.weekend_bars > 0
@@ -243,7 +240,10 @@ def test_a_weekday_without_bars_is_reported_as_empty_not_thin(tmp_path):
 
 
 def test_the_data_report_fails_a_fixed_gmt2_year_on_xms_clock_alone(tmp_path):
-    write_cache(tmp_path, *other_year(gmt2_stamps, 2024))
+    m15 = gold_m15(2024)
+    stored_m15 = as_stored(m15 + gmt2_stamps(m15))
+    stored_d1 = as_stored(d1_on_server_days(m15, gmt2_stamps))
+    write_cache(tmp_path, stored_m15, stored_d1)
 
     [year] = data_report(tmp_path, "GOLD").years
 

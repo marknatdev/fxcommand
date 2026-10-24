@@ -21,6 +21,10 @@ Versions:
 2. 2026-10-23: the Coin-Flip Baseline's seed comes from what a Trial judges (its Combinations,
    its bars and M1 bars, and this version), not from the Trial's number, so re-running an
    unchanged Spec on unchanged data draws the same runs instead of re-rolling its luck.
+3. 2026-10-24: XM server clock switched to European EET/EEST (Europe/Athens, CCC-85). In the
+   weeks between the US and European daylight-saving switches, server days and hours shift,
+   altering day_of_week filters, swap nights, daily returns and baseline hours on unchanged
+   bars. Old-clock Trials in the Ledger stay distinguishable.
 """
 
-RULES_VERSION = 2
+RULES_VERSION = 3
