@@ -388,3 +388,50 @@
 **Result (2026-10-24, commits `a982f5a`, `8201c5e`, and follow-up review fixes):**
 - **Files:** `src/vibedesk/app/llm.py` (`ToolCall`, `Turn`, `ScriptedLLM`, `OmniRoute.complete`), `src/vibedesk/desk/loop.py` and `src/vibedesk/desk/__init__.py` (`MAX_TOOL_CALLS = 12`, `EVENT_TYPES`, `Event`, `Tool`, `ToolRegistry`, `starter_tools`, `desk_loop`, `DeskLoop`, `sse_stream`, `parse_sse`), `src/vibedesk/app/server.py` (SSE `POST /api/chat`; family chat route from spec §8 deferred until CCC-44), `tests/test_desk_loop.py` (12 tests).
 - **Suites:** `uv run pytest` passes 1,361 tests (1 skipped without the mt5 extra); `uv run ruff check src tests` and `uv run ruff format --check src tests` clean.
+
+---
+
+## Issue CCC-90: OmniRoute 503 `resource_pressure` investigation and UI message (2026-10-24)
+
+**Read-only server check (`ubuntu@54.254.218.196`):**
+- **Host memory (`free -m`):** 3,832 MB total, 2,586 MB used, 541 MB free, 1,039 MB buff/cache, **1,246 MB available**; swap 1,302 / 2,047 MB used (745 MB free). Host `/proc/pressure/memory` is `avg10=0.00` (`avg60=0.05`, `avg300=0.09`).
+- **Top processes by RSS:**
+  - 2 `hermes` Python processes (PIDs 1265857 ~379 MB, 1267697 ~360 MB) + 1 `hermes` Node process (PID 1268082 ~102 MB) ≈ 841 MB total (down from 6+ processes / ~1.7 GB on 2026-10-23).
+  - `omniroute (v16.3.5)` child server (PID 1032776, ~329 MB RSS, ~222 MB VmSwap) + supervisor (PID 595186, ~15 MB RSS); cgroup `memory.current` = 359.5 MiB (`376,963,072` bytes), cgroup `memory.pressure` = `avg10=0.00`.
+  - `open_webui` uvicorn (PID 1038908, ~211 MB).
+  - 2 `opencode` processes (PIDs 1037826 ~172 MB, 932379 ~154 MB) ≈ 326 MB.
+  - `chromium` for `aipass` (~304 MB across 4 processes).
+- **Live OmniRoute check via `llm.py`:** `POST /v1/chat/completions` (`OmniRoute.chat`) still fails with `503 resource_pressure` after all 4 tries (initial + 2 s, 5 s, 10 s retries), so a real chat end to end cannot complete until `omniroute.service` is reconfigured and restarted by the owner.
+
+**Root cause (from `~/.omniroute/logs/application/app.log`, `~/.config/systemd/user/omniroute.service`, and `open-sse/utils/resourcePressurePolicy.ts`):**
+1. **`cgroup_high` trips during startup warm-up:** `omniroute.service` sets `Environment=OMNIROUTE_MEMORY_MB=384`, `MemoryHigh=512M`, `MemoryMax=640M`. In `resourcePressurePolicy.ts`, `DEFAULT_RESOURCE_PRESSURE_THRESHOLDS` has `criticalRatio = 0.92`, `highRatio = 0.85`, `recoveryRatio = 0.75`. For `cgroup_high`, OmniRoute compares raw `memory.current` (including page cache) against `MemoryHigh` (`0.92 × 512 MiB = 471 MiB`). 72 s after PID 1032776 started (`2026-10-23T07:57:05Z`), `cgroupCurrentMb` hit `494 MiB` (`416 MiB` working set + `78 MiB` file cache) with `psiSomeAvg10=0.36`, tripping `reason=cgroup_high` into `critical`.
+2. **Permanent latch in `critical` (`recoveryStreak=0`):** Once in `critical`, `isRecovered()` requires **all three** ratios (`v8.heapUsedBytes / v8.heapLimitBytes`, `cgroupWorkingSetBytes / cgroup.maxBytes`, `cgroup.currentBytes / cgroup.highBytes`) to drop to `≤ recoveryRatio` (`0.75`). Even though `cgroupCurrentMb` later fell to `361 MiB` (`361 / 512 = 0.705 ≤ 0.75`) and PSI dropped to `0.00`, `OMNIROUTE_MEMORY_MB=384` pins `--max-old-space-size=384` (`v8.heapLimitBytes ≈ 392 MiB`, so `0.75 × 392 MiB = 294 MiB`). OmniRoute's normal idle V8 heap is ~300–325 MiB (`heapUsed / heapLimit ≈ 0.78–0.83`), which is below `highRatio` (`0.85`) so it never causes pressure on its own, **but above `recoveryRatio` (`0.75`) so `isRecovered()` never returns `true`**. Because `OMNIROUTE_PRESSURE_SELF_RESTART` is also unset, the process stays wedged in `critical` (`503 resource_pressure`) until restarted, and re-wedges ~70 s after every restart under the current 384M/512M limits.
+
+**Recommended commands for the owner (on `ubuntu@54.254.218.196`):**
+1. Raise OmniRoute's V8 heap ceiling (`OMNIROUTE_MEMORY_MB=640`, so `0.75 × 640 = 480 MB` clears the ~315 MB idle heap with recovery headroom) and cgroup limits (`MemoryHigh=768M`, `MemoryMax=896M`), opt out of noisy-neighbor host PSI (`OMNIROUTE_PRESSURE_PSI_DISABLED=1`), and enable self-restart (`OMNIROUTE_PRESSURE_SELF_RESTART=1`):
+   ```bash
+   ssh -i "D:\millmaker\ssh-key.pem" ubuntu@54.254.218.196
+   ```
+   ```bash
+   cat <<'EOF' > ~/.config/systemd/user/omniroute.service.d/override.conf
+   [Service]
+   Environment=NODE_OPTIONS=--max-semi-space-size=4
+   Environment=OMNIROUTE_SERVER_HOST=127.0.0.1
+   Environment=OMNIROUTE_MEMORY_MB=640
+   Environment=OMNIROUTE_PRESSURE_SELF_RESTART=1
+   Environment=OMNIROUTE_PRESSURE_PSI_DISABLED=1
+   MemoryHigh=768M
+   MemoryMax=896M
+   EOF
+   systemctl --user daemon-reload
+   systemctl --user restart omniroute.service
+   systemctl --user status omniroute.service
+   ```
+2. Optional host cleanup if extra RAM headroom is wanted (frees ~326 MB from idle `opencode` processes):
+   ```bash
+   kill 1037826 932379
+   ```
+
+**App change:**
+- `src/vibedesk/app/llm.py`: when OmniRoute answers `resource_pressure` (or `heap_pressure`) after retries run out, raise a plain message (`"OmniRoute is out of memory on the shared server (503 resource_pressure, even after retrying). Free memory or restart OmniRoute on the server, then try again."`) instead of the raw JSON error body.
+- `tests/test_app.py`: added `test_resource_pressure_after_retries_shows_a_plain_message_in_the_chat`.

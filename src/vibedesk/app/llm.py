@@ -139,9 +139,20 @@ class OmniRoute:
                 time.sleep(wait)  # the shared server is busy: try again shortly
                 continue
             if response.status_code >= 400:
-                raise LlmError(f"OmniRoute said {response.status_code}: {response.text[:300]}")
+                raise LlmError(_explain_error(response))
             return response.json()
         raise AssertionError("unreachable")
+
+
+def _explain_error(response: httpx.Response) -> str:
+    text = response.text[:300]
+    low = text.lower()
+    if "resource_pressure" in low or "resource pressure" in low or "heap_pressure" in low:
+        return (
+            "OmniRoute is out of memory on the shared server (503 resource_pressure, even after "
+            "retrying). Free memory or restart OmniRoute on the server, then try again."
+        )
+    return f"OmniRoute said {response.status_code}: {text}"
 
 
 class ScriptedLLM:
