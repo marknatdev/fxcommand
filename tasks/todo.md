@@ -372,3 +372,19 @@
   - Only GOLD 2014 flagged a known single-day US holiday anomaly (July 4, 2014, 2 weekend bars / 1 D1 bar).
   - Daily break on GOLD is 00h in both summer and winter across all years (2016–2026).
   - Re-measured Spread Floors and swaps with `desk floors` across all 8 symbols.
+
+---
+
+## M4 · CCC-43: Desk loop with `ScriptedLLM` (tool calls, SSE events, ≤ 12 tool calls per message)
+
+**Description:** Spec §7.1 and §3.3. A Research Desk loop that takes an owner message, calls the LLM with tool definitions, executes the tool calls it returns, feeds results back, and repeats until the LLM answers in prose, capped at 12 tool calls per message. Streams Server-Sent Events (`message`, `tool_started`, `trial_progress`, `verdict`).
+
+**Acceptance criteria:**
+- [x] Desk loop executes tool calls, feeds results back into the conversation, and repeats until the LLM answers in prose, capped at `MAX_TOOL_CALLS = 12` per owner message (telling the owner plainly when the cap is hit).
+- [x] Streams Server-Sent Events: `message`, `tool_started`, `trial_progress`, `verdict` (`Event.to_sse`, `sse_stream`, `parse_sse`, and FastAPI `POST /api/chat` / `POST /api/families/{id}/chat`).
+- [x] Deterministic `ScriptedLLM` fake behind the same `complete(messages, tools)` / `chat(messages)` seam as `OmniRoute` (`src/vibedesk/app/llm.py`) drives all tests: normal run, the 12-call cap (single-call and multi-call turns), tool error recovery, and SSE event order.
+- [x] Minimal `ToolRegistry` (`starter_tools`: `list_blocks`, `draft_spec`) ready for CCC-44's full tool set.
+
+**Result (2026-10-24, commit `7caae77`):**
+- **Files:** `src/vibedesk/app/llm.py` (`ToolCall`, `Turn`, `ScriptedLLM`, `OmniRoute.complete`), `src/vibedesk/desk/loop.py` and `src/vibedesk/desk/__init__.py` (`MAX_TOOL_CALLS = 12`, `EVENT_TYPES`, `Event`, `Tool`, `ToolRegistry`, `starter_tools`, `desk_loop`, `DeskLoop`, `sse_stream`, `parse_sse`), `src/vibedesk/app/server.py` (SSE `/api/chat` and `/api/families/{family_id}/chat`), `tests/test_desk_loop.py` (9 tests).
+- **Suites:** `uv run pytest` passes 1,252 tests (1 skipped without the mt5 extra); `uv run ruff check src tests` and `uv run ruff format --check src tests` clean.
