@@ -5,11 +5,14 @@ Two kinds of clock check answer different questions, and the report keeps them a
   hours divisible by 4, M15 bars on the 15-minute grid. These catch our own bugs, times shifted
   between MT5 and the cache. MT5 builds its bars on its own clock, so they pass whatever whole-hour
   offset XM's clock had.
-- **XM's clock** (`xm_clock_checks`): if XM's server ran on another clock in some year, say a fixed
-  GMT+2 with no US daylight saving, the week would open on a server Sunday in US summer and GOLD's
-  daily break would sit an hour away from its winter hour. So: no bar opens on a server Saturday or
-  Sunday; no server week has more than 5 D1 bars (a holiday makes a 4-bar week, a shifted clock a
-  sixth, Sunday bar); and the daily break sits at the same server hours in US summer and winter.
+- **XM's clock** (`xm_clock_checks`): XM's server runs on European time (EET/EEST) while the
+  market week runs on New York time (market/server_time.py). If our model of either clock were
+  wrong in some year, bars would land outside the New York trading week or GOLD's daily break
+  would move between US summer and winter. So: no M15 bar opens between Friday 17:00 and Sunday
+  17:00 New York; no D1 bar covers a server day wholly outside that week (a server Sunday bar is
+  right only in the weeks between the US and European switches, when the week opens at server
+  Sunday 23:00); no server week has more than 5 D1 bars besides such a Sunday bar; and the daily
+  break sits at the same New York hours in US summer and winter.
 
 Everything here comes from bar times, spreads and the data-quality mask, never from prices, and it
 is the same for Holdout years as for any other: the report is no side door into the Holdout
@@ -26,27 +29,31 @@ import numpy as np
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.cache import read_meta, read_unmasked, summarize
 from vibedesk.market.server_time import (
+    DAY,
     HOUR,
     check_clock,
     server_days,
-    server_hours,
-    server_offset,
+    server_to_utc,
     server_weekdays,
+    session_hours,
+    session_offset,
+    session_weekdays,
 )
 
-BREAK_SHARE = 0.10  # a server hour with M15 bars on fewer days than this is a break hour
+BREAK_SHARE = 0.10  # a session hour with M15 bars on fewer days than this is a break hour
 MIN_SEASON_DAYS = 20  # Tuesdays to Thursdays a season needs before its break hours are judged
-_SUMMER_OFFSET = 3 * HOUR  # the server clock's UTC offset in US daylight saving (New York + 7 h)
+_US_SUMMER = 3 * HOUR  # the session clock's UTC offset in US daylight saving (New York + 7 h)
 _EPOCH = date(1970, 1, 1)
 
 
 @dataclass(frozen=True)
 class XmClock:
-    """One year of XM's clock: what was found, and whether it fits a New York + 7 h server."""
+    """One year of XM's clock: what was found, and whether it fits a European server clock with
+    a New York market week."""
 
-    weekend_bars: int  # M15 and D1 bars that open on a server Saturday or Sunday
-    long_weeks: int  # server weeks with more than 5 D1 bars
-    summer_break: tuple[int, ...] | None  # server hours of the daily break; None: too few days
+    weekend_bars: int  # M15 bars in the New York weekend, D1 bars on a server day outside the week
+    long_weeks: int  # server weeks with more than 5 D1 bars, besides a Sunday bar the week opens in
+    summer_break: tuple[int, ...] | None  # session hours of the daily break; None: too few days
     winter_break: tuple[int, ...] | None
 
     @property
@@ -66,7 +73,8 @@ def xm_clock_checks(m15: np.ndarray, d1: np.ndarray, *, break_m15: np.ndarray | 
 
     `break_m15` is the M15 bars to find the daily break in (by default all of `m15`); the data
     report passes only the days the mask serves, so a sparse start or a thin day can't fake one.
-    The break is read on Tuesdays to Thursdays only, away from the week's open and close.
+    The break is read on the session clock (00h is 17:00 New York), on Tuesdays to Thursdays
+    only, away from the week's open and close.
     """
     m15 = np.asarray(m15, dtype=np.int64)
     d1 = np.asarray(d1, dtype=np.int64)
@@ -74,12 +82,14 @@ def xm_clock_checks(m15: np.ndarray, d1: np.ndarray, *, break_m15: np.ndarray | 
     report: dict[int, XmClock] = {}
     for year in sorted(set(_years(m15).tolist()) | set(_years(d1).tolist())):
         in_m15, in_d1 = m15[_years(m15) == year], d1[_years(d1) == year]
-        weekend = int((server_weekdays(in_m15) >= 5).sum() + (server_weekdays(in_d1) >= 5).sum())
+        outside = _outside_week(in_d1)
+        weekend = int((session_weekdays(in_m15) >= 5).sum() + outside.sum())
         breaks = break_m15[_years(break_m15) == year]
-        summer = server_offset(breaks) == _SUMMER_OFFSET
+        summer = session_offset(breaks) == _US_SUMMER
+        opening_sundays = (server_weekdays(in_d1) == 6) & ~outside
         report[year] = XmClock(
             weekend_bars=weekend,
-            long_weeks=_long_weeks(in_d1),
+            long_weeks=_long_weeks(in_d1[~opening_sundays]),
             summer_break=_break_hours(breaks[summer]),
             winter_break=_break_hours(breaks[~summer]),
         )
@@ -166,6 +176,16 @@ def _years(utc: np.ndarray) -> np.ndarray:
     return utc.astype("datetime64[s]").astype("datetime64[Y]").astype(np.int64) + 1970
 
 
+def _outside_week(d1: np.ndarray) -> np.ndarray:
+    """True for each D1 bar whose server day lies wholly in the New York weekend (Friday 17:00 to
+    Sunday 17:00). The weekend is 48 hours and a server day at most 25, so a day overlaps the
+    week exactly when its first or last second does."""
+    if not len(d1):
+        return np.zeros(0, dtype=bool)
+    end = server_to_utc((server_days(d1) + 1) * DAY) - 1
+    return (session_weekdays(d1) >= 5) & (session_weekdays(end) >= 5)
+
+
 def _long_weeks(d1: np.ndarray) -> int:
     """Server weeks (Monday to Sunday) with more than 5 D1 bars."""
     if not len(d1):
@@ -175,14 +195,14 @@ def _long_weeks(d1: np.ndarray) -> int:
 
 
 def _break_hours(m15: np.ndarray) -> tuple[int, ...] | None:
-    """Server hours with M15 bars on fewer than BREAK_SHARE of the Tuesdays to Thursdays that
+    """Session hours with M15 bars on fewer than BREAK_SHARE of the Tuesdays to Thursdays that
     have any bars; None with fewer than MIN_SEASON_DAYS such days."""
-    weekday = server_weekdays(m15)
+    weekday = session_weekdays(m15)
     m15 = m15[(weekday >= 1) & (weekday <= 3)]
-    days = server_days(m15)
+    days = (m15 + session_offset(m15)) // DAY
     n_days = len(np.unique(days))
     if n_days < MIN_SEASON_DAYS:
         return None
-    day_hours = np.unique(days * 24 + server_hours(m15))
+    day_hours = np.unique(days * 24 + session_hours(m15))
     per_hour = np.bincount(day_hours % 24, minlength=24)
     return tuple(int(h) for h in np.flatnonzero(per_hour < BREAK_SHARE * n_days))

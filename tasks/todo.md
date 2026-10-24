@@ -348,4 +348,27 @@
 
 **Not verified:** the AI path against the real OmniRoute, which needs the owner's key.
 
-**Known issue (not fixed):** XM's clock checks fail in most years: EURUSD shows 15-20 weekend M15 bars and 3-4 weeks with 6 D1 bars a year, and GOLD's daily break differs between summer and winter in 2014, 2019, 2020, 2024 and 2025. About 4 weeks a year fits XM switching its clock on European daylight-saving dates while `server_time` assumes New York's; in those weeks bar times would be an hour off (mostly matters for session filters).
+**Issue fixed (2026-10-24, CCC-85): XM's clock follows European daylight saving (EET/EEST, Europe/Athens)**
+
+- **Investigation & Confirmation from real cached bars:**
+  - Real XM MT5 bars switch UTC offset on European DST dates (last Sundays of March and October at 01:00 UTC), not New York's (second Sunday of March, first Sunday of November).
+  - The market trading week operates on New York time: FX opens Sunday 17:00 NY and closes Friday 17:00 NY; GOLD opens Sunday 18:00 NY with daily break 17:00–18:00 NY.
+  - In the 3–4 mismatch weeks each year (between US switch and European switch):
+    - 17:00 New York EDT is 21:00 UTC = 23:00 server time (EET, UTC+2).
+    - FX opens Sunday 23:00 server time (4 M15 bars + 1 Sunday D1 bar).
+    - GOLD opens Sunday 18:00 EDT = 22:00 UTC = Monday 00:00 server time (0 Sunday bars).
+    - Friday closes at 17:00 EDT = 21:00 UTC = 23:00 server time (last M15 bar opens 22:45 server time).
+    - Under the old code assuming New York + 7h all year, `server_to_utc` subtracted 3h instead of 2h during those weeks, skewing bar open times in UTC by 1 hour.
+- **Fixes implemented:**
+  - `src/vibedesk/market/server_time.py`: XM server clock switched to `Europe/Athens` (UTC+2 winter, UTC+3 summer). Added session clock utilities (`session_offset`, `session_weekdays`, `session_hours`) for New York session alignment.
+  - `src/vibedesk/market/report.py`: `xm_clock_checks` now validates breaks against session hours (00h = 17:00 NY), verifies weekend bars against New York market hours, and permits the expected opening Sunday D1 bars in mismatch weeks without counting them as long weeks.
+  - `src/vibedesk/market/synthetic.py`: trading schedule aligned with market week (`session_weekdays < 5`), with GOLD opening Monday server time.
+  - Test suite updated: `test_server_time.py`, `test_report.py`, `test_mt5_source.py`, `test_fake_mt5.py`, `test_market_costs.py`, `test_synthetic.py`, `reference_engine.py`.
+  - Full default suite (1,349 passed, 1 skipped) and ruff clean.
+  - Rules fingerprint pins in `tests/test_rules_version.py` updated for new synthetic bars (`inputs:bars`); `RULES_VERSION` remains 2.
+- **Re-import results on all 8 symbols (read-only from XM MT5, ~41 million bars):**
+  - **Before:** 104 out of 104 symbol-years failed clock checks (100% fail rate).
+  - **After:** 103 out of 104 symbol-years passed all checks (99% pass rate).
+  - Only GOLD 2014 flagged a known single-day US holiday anomaly (July 4, 2014, 2 weekend bars / 1 D1 bar).
+  - Daily break on GOLD is 00h in both summer and winter across all years (2016–2026).
+  - Re-measured Spread Floors and swaps with `desk floors` across all 8 symbols.

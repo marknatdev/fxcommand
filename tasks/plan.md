@@ -28,9 +28,9 @@ Detailed tasks: [todo.md](todo.md). Finished milestones: [done/](done/).
 These are fixed before code, so no test is tuned after the fact.
 
 ### Server clock to UTC (spec §2, §4)
-- **MT5's numbers:** epoch seconds that MT5 returns are server wall-clock time written as if it were UTC. The XM server runs New York time + 7 h.
-- **Conversion:** `utc = server − offset`, where `offset` is New York's UTC offset + 7 h at the New York wall time `server − 7 h`. This is the inverse of the existing `server_offset(utc)`.
-- **No ambiguity for trading bars:** New York changes its clocks at 02:00 on a Sunday, which is 09:00 server time, while the market is closed.
+- **MT5's numbers:** epoch seconds that MT5 returns are server wall-clock time written as if it were UTC. XM's server runs on European EET/EEST (`Europe/Athens`), while the market trading week runs on New York time.
+- **Conversion:** `utc = server − offset`, where `offset` is the server zone's UTC offset at the server wall time. This inverts `server_offset(utc)` outside early Sunday morning.
+- **No ambiguity for trading bars:** Europe switches its clock at 03:00 server time (01:00 UTC) on the last Sunday of March and October, while the market is closed. New York switches on US dates, so between the switches the FX week opens at server Sunday 23:00 (17:00 New York).
 - **Requests:** `copy_rates_range` and `copy_ticks_range` take server-clock bounds. A UTC range is widened by one day on each side, converted, and trimmed back to the UTC range after conversion.
 - **Checks:**
   - **Round trip:** utc → server → utc is the identity for every minute of 2014–2026 outside server Sunday (amended at T1's merge, 2026-10-23). `server_offset` looks up one offset per UTC day, so on the first seven UTC hours of each switch Sunday it can't be inverted; those 10,920 minutes all fall on server Sunday, when no bar opens, and the tests pin them exactly.

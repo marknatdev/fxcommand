@@ -20,10 +20,11 @@ from vibedesk.market.costs import (
 from vibedesk.market.fake_mt5 import FakeMt5
 from vibedesk.market.synthetic import SyntheticBarSource, SyntheticConfig
 
-# Saturday to Saturday: two whole trading weeks, across the US switch to daylight saving
-# (Sunday 8 March 2026), so the server clock is UTC+2 at the start and UTC+3 at the end.
-NOW = datetime(2026, 3, 21, 12, 0, tzinfo=UTC)
-TICKS = 10 * 1440 * 2  # 10 server days, every minute (no missing bars), FakeMt5's 2 ticks each
+# Saturday to Saturday: two whole trading weeks, across the European switch to daylight saving
+# (Sunday 29 March 2026), so the server clock is UTC+2 at the start and UTC+3 at the end.
+# In the mismatch week before the switch, Friday closes at 23:00 server time (1,380 minutes).
+NOW = datetime(2026, 4, 4, 12, 0, tzinfo=UTC)
+TICKS = (9 * 1440 + 1380) * 2  # 9 full days + 1 mismatch Friday, FakeMt5's 2 ticks each: 28,680
 
 WINTER = 2 * 3600  # January: server clock = UTC + 2 h
 
@@ -31,7 +32,7 @@ WINTER = 2 * 3600  # January: server clock = UTC + 2 h
 @pytest.fixture(scope="module")
 def source():
     no_gaps = SyntheticConfig(missing_bar_prob=0.0)
-    return SyntheticBarSource(7, date(2026, 3, 2), date(2026, 3, 23), no_gaps)
+    return SyntheticBarSource(7, date(2026, 3, 16), date(2026, 4, 6), no_gaps)
 
 
 def connected(api):
@@ -88,7 +89,7 @@ def test_the_floor_is_the_median_of_whole_ticks_and_the_p90_is_kept(source):
     # The median sits at 12,959.5, inside the 55s; the 90th percentile at 0.9 × 25,919 = 23,327.1,
     # inside the 70s. Counting the ask-less ticks would give 28,800 ticks, a median of 52.5 and
     # a p90 of 61.
-    assert floor.ticks == TICKS - TICKS // 10 == 25_920
+    assert floor.ticks == TICKS - TICKS // 10 == 25_812
     assert (floor.median_points, floor.p90_points) == (55.0, 70.0)
 
 
@@ -96,7 +97,7 @@ def test_a_tick_missing_its_bid_is_not_counted_either(source):
     # Spreads 50, 55, 55, 60 in turn: the ticks without a bid are exactly the 60s.
     floor = measure_floor(connected(BidsMissing(source)), "GOLD", NOW)
 
-    assert floor.ticks == TICKS * 3 // 4 == 21_600
+    assert floor.ticks == TICKS * 3 // 4 == 21_510
     assert (floor.median_points, floor.p90_points) == (55.0, 55.0)
 
 
@@ -108,9 +109,9 @@ def test_the_window_is_the_14_days_before_now_in_server_wall_time(source):
 
     name, symbol, date_from, date_to, flags = api.calls[-1]
     assert (name, symbol, flags) == ("copy_ticks_range", "GOLD", api.COPY_TICKS_INFO)
-    # New York + 7 h: UTC+2 on 7 March, UTC+3 on 21 March.
-    assert date_from == datetime(2026, 3, 7, 14, tzinfo=UTC)
-    assert date_to == datetime(2026, 3, 21, 15, tzinfo=UTC)
+    # European time: UTC+2 on 21 March, UTC+3 on 4 April.
+    assert date_from == datetime(2026, 3, 21, 14, tzinfo=UTC)
+    assert date_to == datetime(2026, 4, 4, 15, tzinfo=UTC)
     assert api.calls[-1] == api.calls[-3] and bangkok.ticks == TICKS
     with pytest.raises(ValueError, match="timezone-aware"):
         measure_floor(api, "GOLD", NOW.replace(tzinfo=None))
@@ -179,7 +180,7 @@ def test_current_cost_is_the_latest_line_and_older_lines_stay(source, tmp_path):
         swap_long_points=-83.83,
         swap_short_points=0.0,  # XM pays +20.64 on shorts today; no credit is counted
         triple_swap_day=3,
-        as_of="2026-03-22",
+        as_of="2026-04-05",
     )
     assert current_cost(tmp_path, "GOLD") != first.snapshot()
     assert json.loads(after.splitlines()[-1])["swap_short_points"] == 20.64  # the log keeps it
@@ -193,7 +194,7 @@ def test_the_snapshot_round_trips_as_the_ledger_stores_it(source, tmp_path):
 
     assert CostSnapshot.from_json(snapshot.to_json()) == snapshot
     assert (snapshot.spread_floor_points, snapshot.slippage_points) == (55.0, 1.0)
-    assert snapshot.as_of == "2026-03-21"
+    assert snapshot.as_of == "2026-04-04"
 
 
 def test_a_line_keeps_spreads_and_swaps_and_never_a_price(source, tmp_path):

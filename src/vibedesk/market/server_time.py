@@ -1,9 +1,20 @@
-"""The XM server clock: New York time plus seven hours, so server midnight is the 17:00 NY close.
+"""The XM server clock, and the New York session clock the market week runs on.
+
+XM's MT5 server runs on European time, UTC+2 in winter and UTC+3 in summer (EET/EEST, zoneinfo
+"Europe/Athens"), switching on the last Sundays of March and October at 01:00 UTC. The market
+week runs on New York time, though: FX opens Sunday 17:00 and closes Friday 17:00 New York, GOLD
+opens Sunday 18:00 and breaks daily 17:00-18:00 New York. Most of the year server midnight is
+the 17:00 New York close. In the weeks between the US and the European switches (second to last
+Sunday of March, last Sunday of October to first Sunday of November) it is 18:00 New York: the
+week opens on a server Sunday at 23:00 and closes on a server Friday at 23:00 (tasks/todo.md,
+CCC-85, has the evidence from the bars).
 
 MT5 writes every time as server wall-clock seconds; `server_to_utc` turns them into UTC, and
 `check_clock` runs the structural checks that real bars must pass year by year (tasks/plan.md,
 "Server clock to UTC"). `server_days`, `server_weekdays` and `server_hours` read UTC times on
-the server calendar.
+the server calendar, the one MT5 builds D1 and H4 bars and charges swaps on. `session_offset`,
+`session_weekdays` and `session_hours` read them on the New York session clock (New York + 7 h,
+so 00:00 is the 17:00 New York close all year).
 """
 
 from collections.abc import Mapping
@@ -16,21 +27,41 @@ from vibedesk.market.bars import Timeframe
 
 DAY = 86400
 HOUR = 3600
+_SERVER = ZoneInfo("Europe/Athens")  # XM's server clock: EET/EEST
 _NEW_YORK = ZoneInfo("America/New_York")
-_SERVER_SHIFT = timedelta(hours=7)
+_SESSION_SHIFT = timedelta(hours=7)  # the session clock: New York + 7 h
 
 
 def server_offset(utc: np.ndarray) -> np.ndarray:
     """Seconds to add to UTC epoch times to get server-clock times.
 
-    The offset is looked up once per UTC day, at 12:00. US daylight-saving switches happen early
-    on a Sunday (06:00-07:00 UTC) while the market is closed, so every trading minute gets the
+    The offset is looked up once per UTC day, at 12:00. European daylight-saving switches happen
+    early on a Sunday (01:00 UTC) while the market is closed, so every trading minute gets the
     exact offset.
     """
-    utc = np.asarray(utc, dtype=np.int64)
-    days, inverse = np.unique(utc // DAY, return_inverse=True)
-    offsets = np.array([_offset_at(int(day) * DAY + DAY // 2) for day in days], dtype=np.int64)
-    return offsets[inverse].reshape(utc.shape)
+    return _per_utc_day(utc, _offset_at)
+
+
+def session_offset(utc: np.ndarray) -> np.ndarray:
+    """Seconds to add to UTC epoch times to get the New York session clock (New York + 7 h).
+
+    Looked up once per UTC day, at 12:00: New York switches at 06:00 or 07:00 UTC on a Sunday,
+    while the market is closed.
+    """
+    return _per_utc_day(utc, _session_offset_at)
+
+
+def session_weekdays(time: np.ndarray) -> np.ndarray:
+    """The weekday of each UTC epoch time on the session clock, Monday 0 to Sunday 6. The
+    market's weekend, Friday 17:00 to Sunday 17:00 New York, is 5 and 6."""
+    time = np.asarray(time, dtype=np.int64)
+    return ((time + session_offset(time)) // DAY + 3) % 7  # 1970-01-01 was a Thursday
+
+
+def session_hours(time: np.ndarray) -> np.ndarray:
+    """The hour of each UTC epoch time on the session clock, 0 (17:00 New York) to 23."""
+    time = np.asarray(time, dtype=np.int64)
+    return ((time + session_offset(time)) // HOUR) % 24
 
 
 def server_days(time: np.ndarray) -> np.ndarray:
@@ -67,17 +98,18 @@ def server_bound(utc: int) -> datetime:
 def server_to_utc(server: np.ndarray) -> np.ndarray:
     """UTC epoch seconds for server wall-clock seconds, as MT5 returns them.
 
-    `utc = server - offset`, where the offset is New York's UTC offset plus 7 h at the New York
-    wall time `server - 7 h`. New York switches at 02:00 on a Sunday (server 09:00, market
-    closed): the skipped server hour reads as before the switch and the repeated one as its
-    first pass (zoneinfo's fold=0). Both lie on server Sunday, where no bar opens.
+    `utc = server - offset`, where the offset is the server zone's UTC offset at the server wall
+    time. The server switches at 03:00 (spring) or 04:00 (autumn) server time on a Sunday, while
+    the market is closed: the skipped server hour reads as before the switch and the repeated
+    one as its first pass (zoneinfo's fold=0). Both lie on a server Sunday morning, where no bar
+    opens.
 
-    It agrees with `server_offset` on every minute outside server Sunday. Over the first seven
-    UTC hours of each switch Sunday, `server_offset` already uses the new offset while the real
-    clock still runs on the old one; this follows the real clock (tests/test_server_time.py).
+    It agrees with `server_offset` on every minute outside server Sunday. Over the first UTC hour
+    of each switch Sunday, `server_offset` already uses the new offset while the real clock
+    still runs on the old one; this follows the real clock (tests/test_server_time.py).
     """
     server = np.asarray(server, dtype=np.int64)
-    # New York switches on a whole hour, so one lookup per server hour is exact.
+    # The server switches on a whole hour, so one lookup per server hour is exact.
     hours, inverse = np.unique(server // HOUR, return_inverse=True)
     offsets = np.array([_offset_at_wall(int(hour) * HOUR) for hour in hours], dtype=np.int64)
     return server - offsets[inverse].reshape(server.shape)
@@ -87,7 +119,7 @@ def server_to_utc(server: np.ndarray) -> np.ndarray:
 # breaks one. They catch times that went wrong between MT5 and the cache. MT5 builds D1 and H4
 # bars on its own server clock, though, so a whole-hour difference in XM's clock passes them.
 CLOCK_RULES = {
-    Timeframe.D1: "every D1 bar opens at 17:00 New York",
+    Timeframe.D1: "every D1 bar opens at server midnight",
     Timeframe.H4: "every H4 bar opens at a server hour divisible by 4",
     Timeframe.M15: "every M15 bar sits on the 15-minute UTC grid",
 }
@@ -107,7 +139,7 @@ def check_clock(utc_times: Mapping[Timeframe, np.ndarray]) -> dict[int, dict[Tim
             raise ValueError(f"no clock rule for {timeframe}; there are rules for {checked}")
         utc = np.asarray(utc, dtype=np.int64)
         if timeframe is Timeframe.D1:
-            ok = _real_server_times(utc) % DAY == 0  # server midnight is 17:00 New York
+            ok = _real_server_times(utc) % DAY == 0
         elif timeframe is Timeframe.H4:
             ok = _real_server_times(utc) % (4 * HOUR) == 0
         else:
@@ -120,19 +152,32 @@ def check_clock(utc_times: Mapping[Timeframe, np.ndarray]) -> dict[int, dict[Tim
     return dict(sorted(report.items()))
 
 
+def _per_utc_day(utc: np.ndarray, offset_at) -> np.ndarray:
+    """`offset_at` looked up at 12:00 UTC of each time's UTC day."""
+    utc = np.asarray(utc, dtype=np.int64)
+    days, inverse = np.unique(utc // DAY, return_inverse=True)
+    offsets = np.array([offset_at(int(day) * DAY + DAY // 2) for day in days], dtype=np.int64)
+    return offsets[inverse].reshape(utc.shape)
+
+
 def _offset_at(epoch: int) -> int:
+    server = datetime.fromtimestamp(epoch, UTC).astimezone(_SERVER)
+    return int(server.utcoffset().total_seconds())
+
+
+def _session_offset_at(epoch: int) -> int:
     new_york = datetime.fromtimestamp(epoch, UTC).astimezone(_NEW_YORK)
-    return int((new_york.utcoffset() + _SERVER_SHIFT).total_seconds())
+    return int((new_york.utcoffset() + _SESSION_SHIFT).total_seconds())
 
 
 def _offset_at_wall(server: int) -> int:
-    """The server clock's UTC offset at a server wall time (New York wall time + 7 h)."""
-    new_york = (datetime.fromtimestamp(server, UTC) - _SERVER_SHIFT).replace(tzinfo=_NEW_YORK)
-    return int((new_york.utcoffset() + _SERVER_SHIFT).total_seconds())
+    """The server clock's UTC offset at a server wall time."""
+    wall = datetime.fromtimestamp(server, UTC).replace(tzinfo=_SERVER)
+    return int(wall.utcoffset().total_seconds())
 
 
 def _real_server_times(utc: np.ndarray) -> np.ndarray:
-    """The server clock at each UTC instant. New York switches on a whole UTC hour, so one
+    """The server clock at each UTC instant. The server switches on a whole UTC hour, so one
     lookup per hour is exact."""
     hours, inverse = np.unique(utc // HOUR, return_inverse=True)
     offsets = np.array([_offset_at(int(hour) * HOUR) for hour in hours], dtype=np.int64)

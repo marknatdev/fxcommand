@@ -50,4 +50,4 @@ The machinery behind the old rules still runs and the existing tests keep it wor
   - **What:** set its status (Backlog, To do, In progress, In review, Done, Cancelled); tick its acceptance checklist in the description and add the result commit; add new tasks as sub-issues of their milestone epic with the same title style and tags (feature, enhancement, documentation, bug); link blockers with a `blocking` relationship.
   - `tasks/` stays the source of truth; the board follows it. If the MCP is unreachable, say so and catch the board up next turn.
 - Parallel work runs in worktrees with explicit file ownership; the shared contract is committed first.
-- Times are UTC epoch seconds; the XM server clock is New York + 7 h (`market/server_time.py`).
+- Times are UTC epoch seconds; XM's server clock is European EET/EEST (`Europe/Athens`), while the market trading week runs on New York time (`market/server_time.py`).

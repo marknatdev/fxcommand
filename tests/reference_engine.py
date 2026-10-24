@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from vibedesk.engine.simulate import ExitReason
 
-NEW_YORK = ZoneInfo("America/New_York")
+SERVER = ZoneInfo("Europe/Athens")  # XM's server clock
 
 
 @dataclass
@@ -228,9 +228,8 @@ def _close(position: _Position, t: int, fill: float, reason, exit_cost: float, b
 
 
 def _server_clock(epoch: int) -> datetime:
-    """Naive server-clock datetime: New York wall time plus seven hours."""
-    new_york = datetime.fromtimestamp(epoch, UTC).astimezone(NEW_YORK)
-    return new_york.replace(tzinfo=None) + timedelta(hours=7)
+    """Naive server-clock datetime: Athens wall time (XM's EET/EEST)."""
+    return datetime.fromtimestamp(epoch, UTC).astimezone(SERVER).replace(tzinfo=None)
 
 
 def _nights_held(entry_epoch: int, exit_epoch: int, cost) -> int:

@@ -265,8 +265,8 @@ def _print_report(result: DataReport) -> None:
             moved = {None: "n/a", True: "MOVED", False: "same"}[xm.break_moved]
             print(
                 f"        XM's clock: {'ok' if xm.passed else 'FAIL'}  weekend bars "
-                f"{xm.weekend_bars}, weeks over 5 D1 bars {xm.long_weeks}, daily break summer "
-                f"{_hours(xm.summer_break)} winter {_hours(xm.winter_break)} ({moved})"
+                f"{xm.weekend_bars}, weeks over 5 D1 bars {xm.long_weeks}, daily break (NY+7) "
+                f"US summer {_hours(xm.summer_break)} winter {_hours(xm.winter_break)} ({moved})"
             )
 
 

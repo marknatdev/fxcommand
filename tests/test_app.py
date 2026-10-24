@@ -151,7 +151,7 @@ def test_a_bad_spec_is_refused(client):
 
 def synthetic_cache(root):
     """Eleven years of synthetic GOLD M15 and H1 bars, judged, with a measured cost."""
-    source = SyntheticBarSource(3, date(2013, 12, 1), date(2025, 1, 1))
+    source = SyntheticBarSource(1, date(2013, 12, 1), date(2025, 1, 1))
     for timeframe in (Timeframe.M15, Timeframe.H1):
         bars = source.fetch("GOLD", timeframe)
         for year in range(2013, 2025):

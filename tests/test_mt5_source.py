@@ -19,9 +19,9 @@ from vibedesk.market.server_time import DAY, check_clock, server_offset
 from vibedesk.market.source import BarSource
 from vibedesk.market.synthetic import SyntheticBarSource
 
-# Five months over the US switch back (2 November 2025), New Year and the switch to daylight
-# saving (8 March 2026).
-START, END = date(2025, 10, 13), date(2026, 3, 23)
+# Five months over the European switch back (26 October 2025), New Year and the switch to daylight
+# saving (29 March 2026).
+START, END = date(2025, 10, 13), date(2026, 4, 6)
 META = ("symbol", "timeframe", "point", "digits")
 ARRAYS = ("time", "open", "high", "low", "close", "spread")
 HOUR = 3600
@@ -75,7 +75,7 @@ def test_bars_read_through_mt5_equal_the_synthetic_bars(source, symbol, timefram
     day early, as the first D1 and H4 bars open on Sunday evening, before the source's start."""
     mt5 = Mt5BarSource(connected(source))
 
-    bars = mt5.fetch(symbol, timeframe, utc(2025, 10, 12), utc(2026, 3, 23))
+    bars = mt5.fetch(symbol, timeframe, utc(2025, 10, 12), utc(2026, 4, 6))
 
     expected = source.fetch(symbol, timeframe)
     assert len(bars) > 0
@@ -101,16 +101,16 @@ def test_a_read_selects_the_symbol_then_asks_for_a_wider_range_on_the_server_clo
     api = connected(source)
     mt5 = Mt5BarSource(api)
 
-    mt5.fetch("GOLD", Timeframe.M15, utc(2026, 3, 2), utc(2026, 3, 10))
-    mt5.fetch("GOLD", Timeframe.H1, utc(2026, 3, 2), utc(2026, 3, 10))
+    mt5.fetch("GOLD", Timeframe.M15, utc(2026, 3, 23), utc(2026, 3, 31))
+    mt5.fetch("GOLD", Timeframe.H1, utc(2026, 3, 23), utc(2026, 3, 31))
 
-    # A day wider each side, as server wall time written as UTC: UTC+2 on 1 March, UTC+3 on
-    # 11 March, after the switch.
+    # A day wider each side, as server wall time written as UTC: UTC+2 on 22 March, UTC+3 on
+    # 1 April, after the switch.
     assert api.calls[1:] == [
         ("symbol_select", "GOLD", True),
         ("symbol_info", "GOLD"),
-        ("copy_rates_range", "GOLD", api.TIMEFRAME_M15, utc(2026, 3, 1, 2), utc(2026, 3, 11, 3)),
-        ("copy_rates_range", "GOLD", api.TIMEFRAME_H1, utc(2026, 3, 1, 2), utc(2026, 3, 11, 3)),
+        ("copy_rates_range", "GOLD", api.TIMEFRAME_M15, utc(2026, 3, 22, 2), utc(2026, 4, 1, 3)),
+        ("copy_rates_range", "GOLD", api.TIMEFRAME_H1, utc(2026, 3, 22, 2), utc(2026, 4, 1, 3)),
     ]
     assert api.selected == {"GOLD"}
 
@@ -148,10 +148,10 @@ def test_a_week_of_d1_bars_from_monday_midnight_utc(source):
     [
         # Ends on Saturday: Friday's last M15 bar opens at 21:45 UTC in winter.
         (utc(2026, 3, 6, 21), utc(2026, 3, 7, 12), (3, 6, 21, 0), (3, 6, 21, 45)),
-        # Ends on the spring switch Sunday, as the week opens at 21:00 UTC (17:00 EDT).
-        (utc(2026, 3, 6, 21), utc(2026, 3, 8, 21), (3, 6, 21, 0), (3, 6, 21, 45)),
-        (utc(2026, 3, 7), utc(2026, 3, 8, 21, 15), (3, 8, 21, 0), (3, 8, 21, 0)),
-        # The autumn switch Sunday: summer's Friday closes at 21:00 UTC, the week opens at 22:00.
+        # Ends on Sunday, as the week opens at 22:00 UTC (server Monday 00:00 in winter).
+        (utc(2026, 3, 6, 21), utc(2026, 3, 8, 22), (3, 6, 21, 0), (3, 6, 21, 45)),
+        (utc(2026, 3, 7), utc(2026, 3, 8, 22, 15), (3, 8, 22, 0), (3, 8, 22, 0)),
+        # Between switches: Friday closes at 17:00 EDT (21:00 UTC, 23:00 server), last bar 20:45.
         (utc(2025, 10, 31, 20), utc(2025, 11, 2, 22), (10, 31, 20, 0), (10, 31, 20, 45)),
         (utc(2025, 11, 1), utc(2025, 11, 2, 22, 15), (11, 2, 22, 0), (11, 2, 22, 0)),
     ],
