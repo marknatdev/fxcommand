@@ -35,7 +35,13 @@ These are fixed before code, so no test is tuned after the fact.
 - **Checks:**
   - **Round trip:** utc → server → utc is the identity for every minute of 2014–2026 outside early Sunday morning (amended for CCC-85). With the server on `Europe/Athens`, switching at 01:00 UTC, the minutes that cannot be inverted are the first 1 h (spring) or 2 h (autumn) UTC of each switch Sunday: 13 × 60 + 13 × 120 = 2,340 minutes over 2014–2026; those fall on early Sunday morning, when the market is closed, and the tests pin them exactly.
   - **Structure (`check_clock`), on real data, per year:** every D1 bar opens at server midnight (17:00 New York outside mismatch weeks, 18:00 New York during mismatch weeks); every H4 bar opens at a server hour divisible by 4; every M15 bar sits on the 15-minute UTC grid. These catch our own bugs (times shifted between MT5 and the cache).
-  - **XM's clock (amended for CCC-85), on real data, per year:** XM's server clock runs on `Europe/Athens` (EET/EEST) while the market trading week runs on New York time. Between the US and European daylight-saving switches, the FX market opens at server Sunday 23:00 (17:00 New York), creating a 1-hour Sunday bar and a 6-bar D1 week (5.2% of symbol-weeks). GOLD opens at Sunday 18:00 New York, which is Monday 00:00 server time during mismatch weeks, so it has no Sunday bar. Outside mismatch weeks, the trading week opens Monday 00:00 server time. GOLD's daily break remains at server 00:00 year-round. A year that fails one of these blocks the checkpoint until it is explained and handled.
+  - **XM's clock (amended for CCC-85), on real data, per year:** XM's server clock runs on `Europe/Athens` (EET/EEST) while the market trading week runs on New York time. Between the US and European daylight-saving switches, the FX market opens at server Sunday 23:00 (17:00 New York), creating a 1-hour Sunday bar and a 6-bar D1 week. GOLD opens at Sunday 18:00 New York (Monday 00:00 server time in mismatch weeks), so it has no Sunday bar. Checks a year must pass (matching `report.py`):
+    - no M15 bar opens between Friday 17:00 and Sunday 17:00 New York;
+    - no D1 bar covers a server day wholly in that weekend (a server Sunday bar is valid only in the weeks between the switches);
+    - no server week has more than 5 D1 bars besides an opening Sunday bar;
+    - GOLD's daily break sits at the same session hours in US summer and winter (session 00h, 17:00 New York; in mismatch weeks this is server 23:00 EET rather than server 00:00).
+
+    A year that fails one of these blocks the checkpoint until it is explained and handled.
   - **Live tick (`desk smoke`):** while the market is open, the converted `symbol_info_tick` time is within 120 s of the system's UTC clock. At the weekend this check is skipped with a message, and the structural checks still run.
 
 ### Import and cache (spec §4)
