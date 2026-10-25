@@ -1,13 +1,15 @@
 """The data report's clock checks, on years built from first principles.
 
 Schedules are written in New York time. GOLD: open from Sunday 18:00 to Friday 17:00, with a break
-from 17:00 to 18:00 every weekday. FX: open from Sunday 17:00 to Friday 17:00, round the clock. A
-broker on XM's clock (New York + 7 h) stamps GOLD's break at server 00:00 all year, and the FX
-week opens at server Monday 00:00. A broker on a fixed GMT+2 clock, with no US daylight saving,
-stamps bars at UTC + 2 h; the importer, assuming New York + 7 h, stores `server_to_utc(stamp)`.
-In US summer that clock moves GOLD's break to server 23:00 and opens the FX week at server Sunday
-23:00. Built here without SyntheticBarSource, which aggregates on New York + 7 h and would partly
-assume the answer.
+from 17:00 to 18:00 every weekday. FX: open from Sunday 17:00 to Friday 17:00, round the clock.
+XM's server runs on European time (EET/EEST, UTC+2 in winter, UTC+3 in summer) and builds D1 bars
+at its own midnight. Most of the year that midnight is 17:00 New York; in the weeks between the
+US and the European daylight-saving switches it is 18:00, so the FX week opens at server Sunday
+23:00 and MT5 builds a one-hour Sunday D1 bar. The importer stores `server_to_utc(stamp)`.
+
+A broker on another clock is stamped here by its own rule and stored as if it were XM's: the old
+assumption (New York + 7 h) or a fixed GMT+2. Built without SyntheticBarSource, which aggregates
+on the server clock and would partly assume the answer.
 """
 
 from datetime import UTC, date, datetime
@@ -18,9 +20,19 @@ import pytest
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.cache import record_import, write_chunk
 from vibedesk.market.report import data_report, xm_clock_checks
-from vibedesk.market.server_time import DAY, server_days, server_offset, server_to_utc
+from vibedesk.market.server_time import (
+    DAY,
+    server_days,
+    server_offset,
+    server_to_utc,
+    server_weekdays,
+    session_offset,
+)
 
 HOLIDAYS_2024 = (date(2024, 1, 1), date(2024, 12, 25))  # New York dates GOLD doesn't trade
+# The weeks between the switches in 2024 open on these server Sundays (US 03-10, EU 03-31 and
+# 10-27, US 11-03).
+OPENING_SUNDAYS_2024 = [date(2024, 3, 10), date(2024, 3, 17), date(2024, 3, 24), date(2024, 10, 27)]
 
 
 def utc(*args) -> int:
@@ -31,7 +43,7 @@ def gold_m15(year: int, holidays=HOLIDAYS_2024, months=range(1, 13), *, fx=False
     """True UTC open times of GOLD's (or, with `fx`, an FX pair's) M15 bars in `year`, from the
     New York schedule."""
     t = np.arange(utc(year, 1, 1), utc(year + 1, 1, 1), 900, dtype=np.int64)
-    ny = t + server_offset(t) - 7 * 3600  # New York wall time (the server clock less 7 h)
+    ny = t + session_offset(t) - 7 * 3600  # New York wall time (the session clock less 7 h)
     weekday = ((ny // DAY) + 3) % 7  # Monday 0
     minute = (ny % DAY) // 60
     reopen = 17 * 60 if fx else 18 * 60
@@ -58,12 +70,16 @@ def xm_stamps(m15: np.ndarray) -> np.ndarray:
     return server_offset(m15)
 
 
+def ny7_stamps(m15: np.ndarray) -> np.ndarray:
+    return session_offset(m15)
+
+
 def gmt2_stamps(m15: np.ndarray) -> np.ndarray:
     return np.full(len(m15), 7200, dtype=np.int64)
 
 
 def as_stored(stamps: np.ndarray) -> np.ndarray:
-    """What the importer stores for server stamps: their UTC under New York + 7 h."""
+    """What the importer stores for server stamps: their UTC on XM's clock."""
     return np.sort(server_to_utc(stamps))
 
 
@@ -72,13 +88,8 @@ def xm_year(year: int, **kwargs) -> tuple[np.ndarray, np.ndarray]:
     return m15, as_stored(d1_on_server_days(m15, xm_stamps))
 
 
-def gmt2_year(year: int, **kwargs) -> tuple[np.ndarray, np.ndarray]:
-    m15 = gold_m15(year, **kwargs)
-    return as_stored(m15 + 7200), as_stored(d1_on_server_days(m15, gmt2_stamps))
-
-
 @pytest.mark.parametrize("fx", [False, True])
-def test_a_new_york_plus_7_year_with_holidays_passes(fx):
+def test_an_xm_year_with_holidays_passes(fx):
     m15, d1 = xm_year(2024, fx=fx)
 
     checks = xm_clock_checks(m15, d1)
@@ -87,9 +98,32 @@ def test_a_new_york_plus_7_year_with_holidays_passes(fx):
     # Server 1 January 2024 opens at 22:00 UTC on 31 December, so 2023 holds that one D1 bar.
     assert set(checks) == {2023, 2024} and checks[2023].passed
     assert (xm.weekend_bars, xm.long_weeks) == (0, 0)
-    # 17:00 New York is server 00:00, summer and winter; FX has no break.
+    # 17:00 New York is session 00:00, summer and winter; FX has no break.
     assert xm.summer_break == xm.winter_break == (() if fx else (0,))
     assert xm.passed
+
+
+def test_fx_weeks_between_the_switches_open_on_a_server_sunday_and_pass():
+    """XM's real bars (CCC-85): the FX week opens at server Sunday 23:00 in those weeks, so MT5
+    builds a sixth, Sunday D1 bar. The New York week explains it; it is no failure."""
+    m15, d1 = xm_year(2024, fx=True)
+
+    sundays = d1[server_weekdays(d1) == 6]
+    assert [datetime.fromtimestamp(int(t) + DAY, UTC).date() for t in sundays] == [
+        date(2024, 3, 10), date(2024, 3, 17), date(2024, 3, 24), date(2024, 10, 27)
+    ]  # fmt: skip
+    assert (server_weekdays(m15) == 6).sum() == 4 * len(OPENING_SUNDAYS_2024)
+    xm = xm_clock_checks(m15, d1)[2024]
+    assert (xm.weekend_bars, xm.long_weeks) == (0, 0) and xm.passed
+
+
+def test_a_server_sunday_bar_outside_those_weeks_fails():
+    m15, d1 = xm_year(2024, fx=True)
+    stray = utc(2024, 6, 15, 21)  # server Sunday 16 June 00:00: New York's weekend all day
+
+    xm = xm_clock_checks(m15, np.sort(np.r_[d1, stray]))[2024]
+
+    assert (xm.weekend_bars, xm.long_weeks) == (1, 1) and not xm.passed
 
 
 def test_a_week_with_a_holiday_has_four_d1_bars_and_passes():
@@ -104,24 +138,41 @@ def test_a_week_with_a_holiday_has_four_d1_bars_and_passes():
     assert xm.long_weeks == 0 and xm.passed
 
 
+@pytest.mark.parametrize("fx", [False, True])
+def test_a_new_york_plus_7_broker_fails_between_the_switches(fx):
+    """The clock the importer used to assume: in the weeks between the switches its stamps are
+    stored an hour late, so the week's last hour lands in New York's weekend."""
+    m15 = gold_m15(2024, fx=fx)
+    stored_m15 = as_stored(m15 + ny7_stamps(m15))
+    stored_d1 = as_stored(d1_on_server_days(m15, ny7_stamps))
+
+    xm = xm_clock_checks(stored_m15, stored_d1)[2024]
+
+    assert xm.weekend_bars == 4 * 4  # the last hour of each of the four weeks
+    assert not xm.passed
+
+
 def test_a_fixed_gmt2_year_moves_golds_break():
-    m15, d1 = gmt2_year(2024)
+    m15 = gold_m15(2024)
+    stored_m15 = as_stored(m15 + gmt2_stamps(m15))
+    stored_d1 = as_stored(d1_on_server_days(m15, gmt2_stamps))
 
-    xm = xm_clock_checks(m15, d1)[2024]
+    xm = xm_clock_checks(stored_m15, stored_d1)[2024]
 
-    # 17:00 New York is 22:00 UTC in winter and 21:00 in summer: server 00:00 and 23:00 on GMT+2.
-    assert (xm.summer_break, xm.winter_break) == ((23,), (0,))
+    # Stored as EEST in European summer, a GMT+2 stamp reads an hour early: the break moves.
+    assert xm.winter_break == (0,)
     assert xm.break_moved and not xm.passed
 
 
-def test_a_fixed_gmt2_year_opens_the_fx_week_on_a_server_sunday():
-    m15, d1 = gmt2_year(2024, fx=True)
+def test_a_fixed_gmt2_year_opens_the_fx_week_in_new_yorks_weekend():
+    m15 = gold_m15(2024, fx=True)
+    stored_m15 = as_stored(m15 + gmt2_stamps(m15))
+    stored_d1 = as_stored(d1_on_server_days(m15, gmt2_stamps))
 
-    xm = xm_clock_checks(m15, d1)[2024]
+    xm = xm_clock_checks(stored_m15, stored_d1)[2024]
 
-    # 17:00 New York on a summer Sunday is 21:00 UTC: server Sunday 23:00 on GMT+2.
+    # 17:00 New York on a summer Sunday reads as 16:00: still New York's weekend.
     assert xm.weekend_bars > 0
-    assert xm.long_weeks > 0  # a sixth, Sunday D1 bar
     assert not xm.passed
 
 
@@ -134,10 +185,9 @@ def test_a_season_with_too_few_days_leaves_the_break_unjudged():
 
 
 def test_a_symbol_trading_round_the_clock_has_no_break_to_move():
-    t = np.arange(utc(2024, 1, 1), utc(2025, 1, 1), 900, dtype=np.int64)
-    m15 = t[((server_days(t) + 3) % 7) < 5]  # every minute of every server weekday
+    m15, d1 = xm_year(2024, holidays=(), fx=True)
 
-    xm = xm_clock_checks(m15, np.unique(server_days(m15)) * DAY - 7200)[2024]
+    xm = xm_clock_checks(m15, d1)[2024]
 
     assert xm.summer_break == xm.winter_break == ()
     assert xm.passed
@@ -153,7 +203,7 @@ def write_cache(root, m15, d1, *, year=2024, spread=30):
     record_import(root, "GOLD", datetime(year + 1, 1, 6, tzinfo=UTC))
 
 
-def test_the_data_report_of_a_new_york_plus_7_year(tmp_path):
+def test_the_data_report_of_an_xm_year(tmp_path):
     write_cache(tmp_path, *xm_year(2024))
 
     report = data_report(tmp_path, "GOLD")
@@ -164,6 +214,17 @@ def test_the_data_report_of_a_new_york_plus_7_year(tmp_path):
     # Christmas in New York leaves server 25 December six hours of bars: a thin day.
     assert date(2024, 12, 25) in year.thin_days
     assert year.bars[Timeframe.M15] > 20_000 and year.bars[Timeframe.D1] > 250
+
+
+def test_the_hour_fx_trades_on_a_server_sunday_is_a_thin_day(tmp_path):
+    """The mask judges server days: an FX opening Sunday holds one hour of bars, so it is thin
+    and masked, with its D1 bar; the year still passes."""
+    write_cache(tmp_path, *xm_year(2024, fx=True))
+
+    [year] = data_report(tmp_path, "GOLD").years
+
+    assert [day for day in year.thin_days if day.weekday() == 6] == OPENING_SUNDAYS_2024
+    assert year.passed
 
 
 def test_a_weekday_without_bars_is_reported_as_empty_not_thin(tmp_path):
@@ -179,7 +240,10 @@ def test_a_weekday_without_bars_is_reported_as_empty_not_thin(tmp_path):
 
 
 def test_the_data_report_fails_a_fixed_gmt2_year_on_xms_clock_alone(tmp_path):
-    write_cache(tmp_path, *gmt2_year(2024))
+    m15 = gold_m15(2024)
+    stored_m15 = as_stored(m15 + gmt2_stamps(m15))
+    stored_d1 = as_stored(d1_on_server_days(m15, gmt2_stamps))
+    write_cache(tmp_path, stored_m15, stored_d1)
 
     [year] = data_report(tmp_path, "GOLD").years
 

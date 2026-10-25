@@ -19,7 +19,12 @@ from datetime import UTC, date, datetime
 import numpy as np
 
 from vibedesk.market.bars import Bars, Timeframe
-from vibedesk.market.server_time import DAY, server_offset
+from vibedesk.market.server_time import (
+    DAY,
+    server_offset,
+    server_to_utc,
+    session_weekdays,
+)
 from vibedesk.market.sessions import local_minute_of_day
 
 
@@ -113,8 +118,11 @@ class SyntheticBarSource:
 
         minutes = np.arange(self._start, self._end, 60, dtype=np.int64)
         server = minutes + server_offset(minutes)
-        # Server Monday to Friday only; 1970-01-01 was a Thursday.
-        trading = ((server // DAY) + 3) % 7 < 5
+        # Market trading week: FX pairs open Sunday 17:00 New York; GOLD opens Sunday 18:00
+        # (Monday on the server clock, so it has no Sunday bars). Both close Friday 17:00 New York.
+        trading = session_weekdays(minutes) < 5
+        if symbol == "GOLD":
+            trading &= ((server // DAY) + 3) % 7 < 5
         minutes, server = minutes[trading], server[trading]
         n = len(minutes)
 
@@ -215,7 +223,7 @@ def _aggregate(m1: Bars, timeframe: Timeframe) -> Bars:
         timeframe=timeframe,
         point=m1.point,
         digits=m1.digits,
-        time=bucket[starts] * timeframe.seconds - offset[starts],
+        time=server_to_utc(bucket[starts] * timeframe.seconds),
         open=m1.open[starts],
         high=np.maximum.reduceat(m1.high, starts),
         low=np.minimum.reduceat(m1.low, starts),

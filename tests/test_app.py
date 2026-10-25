@@ -151,7 +151,12 @@ def test_a_bad_spec_is_refused(client):
 
 def synthetic_cache(root):
     """Eleven years of synthetic GOLD M15 and H1 bars, judged, with a measured cost."""
-    source = SyntheticBarSource(3, date(2013, 12, 1), date(2025, 1, 1))
+    # Seed 1 is used because under the market-week schedule (Sunday 17:00 NY to Friday 17:00 NY)
+    # and Athens server clock, seed 3's random walk generated at most 24 training trades in any
+    # 3-year window for donchian_breakout (period 20), falling below MIN_TRAIN_TRADES (30) so
+    # all walk-forward folds chose None and traded 0 blind trades. Seed 1 yields 36-74 training
+    # trades across folds, producing blind trades > 0.
+    source = SyntheticBarSource(1, date(2013, 12, 1), date(2025, 1, 1))
     for timeframe in (Timeframe.M15, Timeframe.H1):
         bars = source.fetch("GOLD", timeframe)
         for year in range(2013, 2025):

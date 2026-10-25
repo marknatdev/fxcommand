@@ -39,7 +39,7 @@ _EPOCH = date(1970, 1, 1)
 
 @dataclass(frozen=True)
 class Mask:
-    """A symbol's frozen mask. Every day in it is a server day (New York + 7 h)."""
+    """A symbol's frozen mask. Every day in it is a server day (XM's EET/EEST clock)."""
 
     median: float  # M15 bars per server day over the Research Window
     first_usable_month: date  # the first day of that month

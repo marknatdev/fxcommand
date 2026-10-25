@@ -8,7 +8,7 @@ make the wrapper airtight against one written on purpose; the scan is the guard.
 
 MT5's quirks, which this contract keeps in view (probed read-only, 2026-10-23):
 - Every time it returns (a bar's `time`, a tick's `time` and `time_msc`) is server wall-clock time
-  written as if it were UTC. The XM server runs New York time + 7 h (market/server_time.py).
+  written as if it were UTC. The XM server runs European time, EET/EEST (market/server_time.py).
 - The range calls read their bounds the same way: a datetime whose UTC wall time is the server
   wall time wanted. A UTC 00:00 bound returns bars from server 00:00.
 - A call that fails returns None; `last_error()` says why.

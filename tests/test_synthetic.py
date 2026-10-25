@@ -15,8 +15,8 @@ NEW_YORK = ZoneInfo("America/New_York")
 
 # sha256 over every M1 array for seed 7 from START to END, taken before the planted edge existed.
 PRE_EDGE_DIGESTS = {
-    "GOLD": "2a8da17a9b8bc7b77d1acc6b8ee075a13003cd9f74d284e267d34bdbb30ec70e",
-    "EURUSD": "75facd9929eb89945e8b8caedb682d66beb3390668da661e5fea855bda291fef",
+    "GOLD": "298c0710010947c7c9f36632fe2f10ccdf469d3b81a5c5da55e26c467591448a",
+    "EURUSD": "a7a247adf904a9018b3e75a64afa7cfc7dd152662d017c84f1c746a2c01160c5",
 }
 
 
@@ -94,7 +94,8 @@ def test_bar_boundaries_follow_the_server_clock(source):
     ny_opens = {
         datetime.fromtimestamp(t, UTC).astimezone(NEW_YORK).strftime("%H:%M") for t in d1.time
     }
-    assert ny_opens == {"17:00"}  # both sides of the DST switch
+    # 17:00 New York outside the mismatch weeks, 18:00 between the US and European switches.
+    assert ny_opens == {"17:00", "18:00"}
 
 
 def test_market_is_closed_at_weekends(source):

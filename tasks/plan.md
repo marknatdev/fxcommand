@@ -28,17 +28,18 @@ Detailed tasks: [todo.md](todo.md). Finished milestones: [done/](done/).
 These are fixed before code, so no test is tuned after the fact.
 
 ### Server clock to UTC (spec §2, §4)
-- **MT5's numbers:** epoch seconds that MT5 returns are server wall-clock time written as if it were UTC. The XM server runs New York time + 7 h.
-- **Conversion:** `utc = server − offset`, where `offset` is New York's UTC offset + 7 h at the New York wall time `server − 7 h`. This is the inverse of the existing `server_offset(utc)`.
-- **No ambiguity for trading bars:** New York changes its clocks at 02:00 on a Sunday, which is 09:00 server time, while the market is closed.
+- **MT5's numbers:** epoch seconds that MT5 returns are server wall-clock time written as if it were UTC. XM's server runs on European EET/EEST (`Europe/Athens`), while the market trading week runs on New York time.
+- **Conversion:** `utc = server − offset`, where `offset` is the server zone's UTC offset at the server wall time. This inverts `server_offset(utc)` outside early Sunday morning.
+- **No ambiguity for trading bars:** Europe switches its clock at 03:00 server time (01:00 UTC) on the last Sunday of March and October, while the market is closed. New York switches on US dates, so between the switches the FX week opens at server Sunday 23:00 (17:00 New York).
 - **Requests:** `copy_rates_range` and `copy_ticks_range` take server-clock bounds. A UTC range is widened by one day on each side, converted, and trimmed back to the UTC range after conversion.
 - **Checks:**
-  - **Round trip:** utc → server → utc is the identity for every minute of 2014–2026 outside server Sunday (amended at T1's merge, 2026-10-23). `server_offset` looks up one offset per UTC day, so on the first seven UTC hours of each switch Sunday it can't be inverted; those 10,920 minutes all fall on server Sunday, when no bar opens, and the tests pin them exactly.
-  - **Structure (`check_clock`), on real data, per year:** every D1 bar opens at 17:00 New York; every H4 bar opens at a server hour divisible by 4; every M15 bar sits on the 15-minute UTC grid. These catch our own bugs (times shifted between MT5 and the cache). They can't catch XM's clock having been set differently: MT5 builds D1 and H4 bars on its own server clock, and the conversion maps server midnight to 17:00 New York by construction.
-  - **XM's clock (added at T1's merge), on real data, per year:** a different past clock would show as:
-    - a bar opening on a server Saturday or Sunday (on a fixed GMT+2 clock, the FX week, which opens at 17:00 New York, would open at server Sunday 23:00 in US summer);
-    - a server week with more than 5 D1 bars (that Sunday bar; amended at T5: a holiday makes a 4-bar week, so "exactly 5" would fail every real year);
-    - GOLD's daily break (the server hour with no M15 bars on a normal weekday) moving between US summer and winter.
+  - **Round trip:** utc → server → utc is the identity for every minute of 2014–2026 outside early Sunday morning (amended for CCC-85). With the server on `Europe/Athens`, switching at 01:00 UTC, the minutes that cannot be inverted are the first 1 h (spring) or 2 h (autumn) UTC of each switch Sunday: 13 × 60 + 13 × 120 = 2,340 minutes over 2014–2026; those fall on early Sunday morning, when the market is closed, and the tests pin them exactly.
+  - **Structure (`check_clock`), on real data, per year:** every D1 bar opens at server midnight (17:00 New York outside mismatch weeks, 18:00 New York during mismatch weeks); every H4 bar opens at a server hour divisible by 4; every M15 bar sits on the 15-minute UTC grid. These catch our own bugs (times shifted between MT5 and the cache).
+  - **XM's clock (amended for CCC-85), on real data, per year:** XM's server clock runs on `Europe/Athens` (EET/EEST) while the market trading week runs on New York time. Between the US and European daylight-saving switches, the FX market opens at server Sunday 23:00 (17:00 New York), creating a 1-hour Sunday bar and a 6-bar D1 week. GOLD opens at Sunday 18:00 New York (Monday 00:00 server time in mismatch weeks), so it has no Sunday bar. Checks a year must pass (matching `report.py`):
+    - no M15 bar opens between Friday 17:00 and Sunday 17:00 New York;
+    - no D1 bar covers a server day wholly in that weekend (a server Sunday bar is valid only in the weeks between the switches);
+    - no server week has more than 5 D1 bars besides an opening Sunday bar;
+    - GOLD's daily break sits at the same session hours in US summer and winter (session 00h, 17:00 New York; in mismatch weeks this is server 23:00 EET rather than server 00:00).
 
     A year that fails one of these blocks the checkpoint until it is explained and handled.
   - **Live tick (`desk smoke`):** while the market is open, the converted `symbol_info_tick` time is within 120 s of the system's UTC clock. At the weekend this check is skipped with a message, and the structural checks still run.

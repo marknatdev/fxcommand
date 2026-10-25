@@ -19,8 +19,8 @@ from vibedesk.market.mt5_api import (
 from vibedesk.market.server_time import server_offset
 from vibedesk.market.synthetic import SyntheticBarSource
 
-# Three weeks over the US switch to daylight saving (Sunday 8 March 2026).
-START, END = date(2026, 2, 23), date(2026, 3, 16)
+# Five weeks over March, through the European switch on 29 March 2026.
+START, END = date(2026, 3, 2), date(2026, 4, 6)
 REAL_CONSTANTS = {
     "TIMEFRAME_M1": 1, "TIMEFRAME_M15": 15, "TIMEFRAME_H1": 16385, "TIMEFRAME_H4": 16388,
     "TIMEFRAME_D1": 16408, "COPY_TICKS_ALL": -1, "COPY_TICKS_INFO": 1,
@@ -70,16 +70,16 @@ def test_nothing_is_served_before_initialize(source):
 def test_bars_come_in_server_wall_time_with_the_real_dtype(source):
     api = connected(source)
 
-    rates = api.copy_rates_range("GOLD", api.TIMEFRAME_M15, wall(2026, 3, 2), wall(2026, 3, 13))
+    rates = api.copy_rates_range("GOLD", api.TIMEFRAME_M15, wall(2026, 3, 23), wall(2026, 4, 3))
 
     bars = source.fetch("GOLD", Timeframe.M15)
     server = server_times(bars)
-    expected = (server >= wall(2026, 3, 2).timestamp()) & (server <= wall(2026, 3, 13).timestamp())
+    expected = (server >= wall(2026, 3, 23).timestamp()) & (server <= wall(2026, 4, 3).timestamp())
     assert rates.dtype == RATE_DTYPE
     assert np.array_equal(rates["time"], server[expected])
     assert np.array_equal(rates["close"], bars.close[expected])
     assert np.array_equal(rates["spread"], bars.spread[expected])
-    # The server runs New York + 7 h: UTC+2 before the US switch, UTC+3 after it.
+    # The server runs European time: UTC+2 before the European switch, UTC+3 after it.
     offsets = set((rates["time"] - bars.time[expected]).tolist())
     assert offsets == {2 * 3600, 3 * 3600}
 
@@ -87,7 +87,7 @@ def test_bars_come_in_server_wall_time_with_the_real_dtype(source):
 def test_d1_bars_open_at_server_midnight(source):
     api = connected(source)
 
-    rates = api.copy_rates_range("GOLD", api.TIMEFRAME_D1, wall(2026, 3, 2), wall(2026, 3, 13))
+    rates = api.copy_rates_range("GOLD", api.TIMEFRAME_D1, wall(2026, 3, 16), wall(2026, 3, 27))
 
     assert len(rates) == 10
     assert set((rates["time"] % 86400).tolist()) == {0}
