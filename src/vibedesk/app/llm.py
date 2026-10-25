@@ -148,9 +148,11 @@ def _explain_error(response: httpx.Response) -> str:
     text = response.text[:300]
     low = text.lower()
     if "resource_pressure" in low or "resource pressure" in low or "heap_pressure" in low:
+        retried = ", even after retrying" if response.status_code in BUSY else ""
         return (
-            "OmniRoute is out of memory on the shared server (503 resource_pressure, even after "
-            "retrying). Free memory or restart OmniRoute on the server, then try again."
+            f"OmniRoute is stuck under memory pressure on the server ({response.status_code} "
+            f"resource_pressure{retried}). Restart omniroute.service with the raised limits "
+            "(see tasks/todo.md CCC-90 or AGENTS.md), then try again."
         )
     return f"OmniRoute said {response.status_code}: {text}"
 

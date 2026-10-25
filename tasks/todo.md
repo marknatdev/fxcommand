@@ -433,5 +433,5 @@
    ```
 
 **App change:**
-- `src/vibedesk/app/llm.py`: when OmniRoute answers `resource_pressure` (or `heap_pressure`) after retries run out, raise a plain message (`"OmniRoute is out of memory on the shared server (503 resource_pressure, even after retrying). Free memory or restart OmniRoute on the server, then try again."`) instead of the raw JSON error body.
-- `tests/test_app.py`: added `test_resource_pressure_after_retries_shows_a_plain_message_in_the_chat`.
+- `src/vibedesk/app/llm.py`: when OmniRoute answers `resource_pressure` (or `heap_pressure`), raise a plain message (`"OmniRoute is stuck under memory pressure on the server ({status} resource_pressure{retried}). Restart omniroute.service with the raised limits (see tasks/todo.md CCC-90 or AGENTS.md), then try again."`) using `response.status_code` and only claiming a retry when the status code is in `BUSY`.
+- `tests/test_app.py`: added `test_resource_pressure_after_retries_shows_a_plain_message_in_the_chat` and `test_resource_pressure_without_retry_reports_status_and_no_retry_claim`.
