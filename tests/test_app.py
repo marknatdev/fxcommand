@@ -108,6 +108,74 @@ def test_omniroute_retries_while_busy_then_gives_the_reason(monkeypatch):
         llm.OmniRoute("http://x/v1", "key", "m").chat([])
 
 
+def test_resource_pressure_after_retries_shows_a_plain_message_in_the_chat(tmp_path, monkeypatch):
+    import httpx
+
+    import vibedesk.app.llm as llm
+
+    waits = []
+    pressure_body = {
+        "error": {
+            "message": "Service temporarily unavailable due to resource pressure. Retry shortly.",
+            "type": "server_error",
+            "code": "resource_pressure",
+        }
+    }
+    monkeypatch.setattr(
+        llm.httpx, "request", lambda *a, **k: httpx.Response(503, json=pressure_body)
+    )
+    monkeypatch.setattr(llm.time, "sleep", lambda s: waits.append(s))
+    client = TestClient(create_app(tmp_path / "data", llm=llm.OmniRoute("http://x/v1", "key", "m"),
+                                   settings_root=tmp_path / "s"))  # fmt: skip
+
+    response = client.post("/api/draft", json={"message": "GOLD breakouts"})
+
+    assert response.status_code == 502
+    assert waits == list(llm.RETRY_WAITS)
+    detail = response.json()["detail"]
+    assert "stuck under memory pressure" in detail and "503 resource_pressure" in detail
+    assert "even after retrying" in detail
+    assert "out of memory" not in detail
+    assert '{"error"' not in detail
+    assert "Restart omniroute.service with the raised limits" in detail
+    chat = client.get(f"/api/chats/{response.json()['chat_id']}").json()
+    assert [m["role"] for m in chat["messages"]] == ["user", "error"]
+    assert chat["messages"][1]["text"] == detail
+
+
+def test_resource_pressure_without_retry_reports_status_and_no_retry_claim(tmp_path, monkeypatch):
+    import httpx
+
+    import vibedesk.app.llm as llm
+
+    waits = []
+    pressure_body = {
+        "error": {
+            "message": "Service temporarily unavailable due to resource pressure.",
+            "type": "server_error",
+            "code": "resource_pressure",
+        }
+    }
+    monkeypatch.setattr(
+        llm.httpx, "request", lambda *a, **k: httpx.Response(500, json=pressure_body)
+    )
+    monkeypatch.setattr(llm.time, "sleep", lambda s: waits.append(s))
+    client = TestClient(create_app(tmp_path / "data", llm=llm.OmniRoute("http://x/v1", "key", "m"),
+                                   settings_root=tmp_path / "s"))  # fmt: skip
+
+    response = client.post("/api/draft", json={"message": "GOLD breakouts"})
+
+    assert response.status_code == 502
+    assert waits == []
+    detail = response.json()["detail"]
+    assert "500 resource_pressure" in detail
+    assert "stuck under memory pressure" in detail
+    assert "even after retrying" not in detail
+    assert "out of memory" not in detail
+    chat = client.get(f"/api/chats/{response.json()['chat_id']}").json()
+    assert chat["messages"][1]["text"] == detail
+
+
 @pytest.fixture
 def client(tmp_path):
     return TestClient(create_app(tmp_path / "data", llm=ScriptedLlm(reply(EXAMPLE)),
