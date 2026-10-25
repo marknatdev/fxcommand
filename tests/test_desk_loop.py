@@ -317,7 +317,7 @@ def test_fastapi_chat_endpoint_streams_sse_events(tmp_path):
         )
     )
 
-    response = client.post("/api/families/1/chat", json={"message": "Run the Trial"})
+    response = client.post("/api/chat", json={"message": "Run the Trial"})
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
@@ -333,3 +333,97 @@ def test_fastapi_chat_endpoint_streams_sse_events(tmp_path):
 
     assert client.post("/api/chat", json={"message": "   "}).status_code == 400
     assert list(sse_stream(events)) == [e.to_sse() for e in events]
+
+
+def test_llm_failure_streams_error_message_event_through_chat_endpoints(tmp_path):
+    llm = ScriptedLLM(llm_mod.LlmError("OmniRoute said 503: resource pressure"))
+    client = TestClient(
+        create_app(
+            tmp_path / "data",
+            llm=llm,
+            settings_root=tmp_path / "settings",
+        )
+    )
+
+    # 1. /api/chat initial failure
+    response = client.post("/api/chat", json={"message": "breakout strategy"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = parse_sse(response.text)
+    assert len(events) == 1
+    assert events[0].event == "message"
+    assert events[0].data["role"] == "error"
+    assert events[0].data["capped"] is False
+    assert "OmniRoute said 503: resource pressure" in events[0].data["content"]
+    assert events[0].data["text"] == events[0].data["content"]
+
+    # 2. LLM failure after a tool call has already started
+    registry, _ = make_tools()
+    stepped_llm = ScriptedLLM(
+        ToolCall("run_trial", {"hypothesis_id": 1}),
+        llm_mod.LlmError("unexpected disconnect"),
+    )
+    stepped_client = TestClient(
+        create_app(
+            tmp_path / "data",
+            llm=stepped_llm,
+            settings_root=tmp_path / "settings",
+            tools=registry,
+        )
+    )
+    stepped_response = stepped_client.post("/api/chat", json={"message": "run trial"})
+    assert stepped_response.status_code == 200
+    stepped_events = parse_sse(stepped_response.text)
+    assert [e.event for e in stepped_events] == [
+        "tool_started",
+        "trial_progress",
+        "verdict",
+        "message",
+    ]
+    assert stepped_events[-1].data["role"] == "error"
+    assert "unexpected disconnect" in stepped_events[-1].data["content"]
+
+
+def test_tool_returning_nan_inf_or_non_json_is_sanitized_without_crashing():
+    from pathlib import Path
+
+    registry = ToolRegistry()
+
+    @registry.register("run_trial")
+    def run_trial(hypothesis_id: int) -> dict:
+        return {
+            "hypothesis_id": hypothesis_id,
+            "verdict": "CANDIDATE",
+            "profit_factor": float("nan"),
+            "unbounded": float("inf"),
+            "neg_inf": float("-inf"),
+            "path": Path("bars/GOLD"),
+        }
+
+    llm = ScriptedLLM(
+        ToolCall("run_trial", {"hypothesis_id": 9}),
+        "Trial completed despite special float values.",
+    )
+    loop = DeskLoop(llm, tools=registry)
+
+    frames = list(loop.sse("Run trial with NaN metrics"))
+    events = parse_sse(frames)
+
+    assert [e.event for e in events] == [
+        "tool_started",
+        "trial_progress",
+        "verdict",
+        "message",
+    ]
+    verdict_event = events[2]
+    assert verdict_event.data["profit_factor"] is None  # sanitized from NaN to null
+    assert verdict_event.data["unbounded"] == "inf"
+    assert verdict_event.data["neg_inf"] == "-inf"
+    assert verdict_event.data["path"] == "bars/GOLD"
+
+    # Verify tool result fed back to LLM was valid JSON with null and inf string
+    last_call = llm.calls[-1]
+    tool_msg = [m for m in last_call if m["role"] == "tool"][-1]
+    tool_data = json.loads(tool_msg["content"])
+    assert tool_data["profit_factor"] is None
+    assert tool_data["unbounded"] == "inf"

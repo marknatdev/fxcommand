@@ -8,17 +8,51 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import math
+import os
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from vibedesk.app.llm import Llm, OmniRoute, OmniRouteLLM, ScriptedLLM, ScriptedLlm, ToolCall, Turn
+from vibedesk.app.llm import (
+    Llm,
+    OmniRoute,
+    OmniRouteLLM,
+    ScriptedLLM,
+    ScriptedLlm,
+    ToolCall,
+    Turn,
+)
 from vibedesk.app.research import normalize, system_prompt
 from vibedesk.blocks.registry import LIBRARY
 from vibedesk.blocks.spec import expand_grid, validate
 
 MAX_TOOL_CALLS = 12
 EVENT_TYPES = ("message", "tool_started", "trial_progress", "verdict")
+
+
+def _json_safe(value: Any) -> Any:
+    """Make values JSON-encodable: NaN -> None, inf -> 'inf'/'-inf',
+    numpy/collections/datetimes -> primitives/strings."""
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list | tuple | set | frozenset):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "tolist") and callable(value.tolist):
+        return _json_safe(value.tolist())
+    if hasattr(value, "item") and callable(value.item):
+        return _json_safe(value.item())
+    if isinstance(value, float):
+        if math.isnan(value):
+            return None
+        if math.isinf(value):
+            return "inf" if value > 0 else "-inf"
+        return value
+    if isinstance(value, int | str | bool | type(None)):
+        return value
+    if isinstance(value, os.PathLike) or (hasattr(value, "as_posix") and callable(value.as_posix)):
+        return value.as_posix()
+    return str(value)
 
 
 @dataclass(frozen=True)
@@ -38,14 +72,27 @@ class Event:
 
     def to_sse(self) -> str:
         """Render as a Server-Sent Event wire frame."""
-        payload = json.dumps(self.data, allow_nan=False)
+        payload = json.dumps(_json_safe(self.data), allow_nan=False, default=str)
         return f"event: {self.event}\ndata: {payload}\n\n"
 
 
 def sse_stream(events: Iterable[Event]) -> Iterator[str]:
     """Stream `Event` objects as Server-Sent Event wire frames."""
-    for event in events:
-        yield event.to_sse()
+    try:
+        for event in events:
+            yield event.to_sse()
+    except Exception as error:
+        text = str(error)
+        yield Event(
+            "message",
+            {
+                "role": "error",
+                "content": text,
+                "text": text,
+                "tool_calls": 0,
+                "capped": False,
+            },
+        ).to_sse()
 
 
 def parse_sse(raw: str | Iterable[str]) -> list[Event]:
@@ -195,68 +242,85 @@ def desk_loop(
     schemas = registry.schemas()
     calls_made = 0
 
-    while calls_made < max_tool_calls:
-        turn = _call_llm(llm, messages, schemas)
-        if not turn.tool_calls:
-            messages.append({"role": "assistant", "content": turn.content})
-            if _sink is not None:
-                _sink[:] = messages[1:]
-            yield Event(
-                "message",
-                {
-                    "role": "assistant",
-                    "content": turn.content,
-                    "text": turn.content,
-                    "tool_calls": calls_made,
-                    "capped": False,
-                },
-            )
-            return
+    try:
+        while calls_made < max_tool_calls:
+            turn = _call_llm(llm, messages, schemas)
+            if not turn.tool_calls:
+                messages.append({"role": "assistant", "content": turn.content})
+                if _sink is not None:
+                    _sink[:] = messages[1:]
+                yield Event(
+                    "message",
+                    {
+                        "role": "assistant",
+                        "content": turn.content,
+                        "text": turn.content,
+                        "tool_calls": calls_made,
+                        "capped": False,
+                    },
+                )
+                return
 
-        batch = turn.tool_calls[: max_tool_calls - calls_made]
-        messages.append(turn.to_message(batch))
-        for call in batch:
-            calls_made += 1
-            args = call.arguments if isinstance(call.arguments, dict) else {"raw": call.arguments}
-            yield Event(
-                "tool_started",
-                {
-                    "id": call.id,
-                    "tool": call.name,
-                    "name": call.name,
-                    "arguments": args,
-                    "step": calls_made,
-                },
-            )
-            sub_events, output = _execute_tool(registry, call)
-            yield from sub_events
-            content = output if isinstance(output, str) else json.dumps(output, allow_nan=False)
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "content": content,
-                }
-            )
+            batch = turn.tool_calls[: max_tool_calls - calls_made]
+            messages.append(turn.to_message(batch))
+            for call in batch:
+                calls_made += 1
+                args = (
+                    call.arguments if isinstance(call.arguments, dict) else {"raw": call.arguments}
+                )
+                yield Event(
+                    "tool_started",
+                    {
+                        "id": call.id,
+                        "tool": call.name,
+                        "name": call.name,
+                        "arguments": args,
+                        "step": calls_made,
+                    },
+                )
+                sub_events, content = _execute_tool(registry, call)
+                yield from sub_events
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "name": call.name,
+                        "content": content,
+                    }
+                )
 
-    notice = (
-        f"Stopped after {max_tool_calls} tool calls (the limit per message). "
-        "Tell me how you'd like to carry on."
-    )
-    messages.append({"role": "assistant", "content": notice})
-    if _sink is not None:
-        _sink[:] = messages[1:]
-    yield Event(
-        "message",
-        {
-            "role": "assistant",
-            "content": notice,
-            "text": notice,
-            "tool_calls": calls_made,
-            "capped": True,
-        },
-    )
+        notice = (
+            f"Stopped after {max_tool_calls} tool calls (the limit per message). "
+            "Tell me how you'd like to carry on."
+        )
+        messages.append({"role": "assistant", "content": notice})
+        if _sink is not None:
+            _sink[:] = messages[1:]
+        yield Event(
+            "message",
+            {
+                "role": "assistant",
+                "content": notice,
+                "text": notice,
+                "tool_calls": calls_made,
+                "capped": True,
+            },
+        )
+    except Exception as error:
+        text = str(error)
+        messages.append({"role": "error", "content": text})
+        if _sink is not None:
+            _sink[:] = messages[1:]
+        yield Event(
+            "message",
+            {
+                "role": "error",
+                "content": text,
+                "text": text,
+                "tool_calls": calls_made,
+                "capped": False,
+            },
+        )
 
 
 class DeskLoop:
@@ -315,17 +379,17 @@ def _call_llm(llm: Any, messages: list[dict[str, Any]], schemas: list[dict[str, 
     return Turn(content=str(llm.chat(messages)))
 
 
-def _execute_tool(registry: ToolRegistry, call: ToolCall) -> tuple[list[Event], Any]:
+def _execute_tool(registry: ToolRegistry, call: ToolCall) -> tuple[list[Event], str]:
     tool = registry.get(call.name)
     if tool is None:
-        return [], {"error": f"unknown tool: {call.name}"}
+        return [], json.dumps({"error": f"unknown tool: {call.name}"})
     if not isinstance(call.arguments, dict):
-        return [], {"error": f"invalid arguments for {call.name}: {call.arguments}"}
+        return [], json.dumps({"error": f"invalid arguments for {call.name}: {call.arguments}"})
 
     emitted: list[Event] = []
 
     def emit(event_type: str, data: dict[str, Any]) -> None:
-        emitted.append(Event(event_type, dict(data)))
+        emitted.append(Event(event_type, dict(_json_safe(data))))
 
     kwargs = dict(call.arguments)
     params = inspect.signature(tool.fn).parameters
@@ -334,22 +398,29 @@ def _execute_tool(registry: ToolRegistry, call: ToolCall) -> tuple[list[Event], 
 
     try:
         result = tool.fn(**kwargs)
+        safe_result = _json_safe(result)
+        content = (
+            safe_result
+            if isinstance(safe_result, str)
+            else json.dumps(safe_result, allow_nan=False, default=str)
+        )
     except Exception as error:
-        return [], {"error": f"{error.__class__.__name__}: {error}"}
+        return [], json.dumps({"error": f"{error.__class__.__name__}: {error}"})
 
     has_progress = any(e.event == "trial_progress" for e in emitted)
     has_verdict = any(e.event == "verdict" for e in emitted)
     is_trial = call.name == "run_trial" or (isinstance(result, dict) and "verdict" in result)
 
     if is_trial and not has_progress:
-        progress = {"tool": call.name, **call.arguments, "status": "completed"}
+        progress = _json_safe({"tool": call.name, **call.arguments, "status": "completed"})
         verdict_idx = next((i for i, e in enumerate(emitted) if e.event == "verdict"), len(emitted))
         emitted.insert(verdict_idx, Event("trial_progress", progress))
 
     if isinstance(result, dict) and "verdict" in result and not has_verdict:
-        emitted.append(Event("verdict", dict(result)))
+        emitted.append(Event("verdict", _json_safe(dict(result))))
 
-    return emitted, result
+    safe_emitted = [Event(e.event, _json_safe(e.data)) for e in emitted]
+    return safe_emitted, content
 
 
 def _infer_parameters(fn: Callable[..., Any]) -> dict[str, Any]:

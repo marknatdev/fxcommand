@@ -110,13 +110,6 @@ def create_app(root: Path = config.DATA, llm: Llm | None = None, db: Path | None
         events = desk_loop(current_llm(), body.message, tools=tools)
         return StreamingResponse(sse_stream(events), media_type="text/event-stream")
 
-    @app.post("/api/families/{family_id}/chat")
-    def family_chat_stream(family_id: int, body: DraftIn):
-        if not body.message.strip():
-            raise HTTPException(400, "say what the idea is")
-        events = desk_loop(current_llm(), body.message, tools=tools)
-        return StreamingResponse(sse_stream(events), media_type="text/event-stream")
-
     @app.post("/api/draft")
     def draft(body: DraftIn):
         if not body.message.strip():
