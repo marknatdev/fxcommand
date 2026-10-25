@@ -381,10 +381,10 @@
 
 **Acceptance criteria:**
 - [x] Desk loop executes tool calls, feeds results back into the conversation, and repeats until the LLM answers in prose, capped at `MAX_TOOL_CALLS = 12` per owner message (telling the owner plainly when the cap is hit).
-- [x] Streams Server-Sent Events: `message`, `tool_started`, `trial_progress`, `verdict` (`Event.to_sse`, `sse_stream`, `parse_sse`, and FastAPI `POST /api/chat` / `POST /api/families/{id}/chat`).
+- [x] Streams Server-Sent Events: `message`, `tool_started`, `trial_progress`, `verdict` (`Event.to_sse`, `sse_stream`, `parse_sse`, and FastAPI `POST /api/chat`; family chat route from spec §8 deferred until CCC-44 adds family tools).
 - [x] Deterministic `ScriptedLLM` fake behind the same `complete(messages, tools)` / `chat(messages)` seam as `OmniRoute` (`src/vibedesk/app/llm.py`) drives all tests: normal run, the 12-call cap (single-call and multi-call turns), tool error recovery, and SSE event order.
 - [x] Minimal `ToolRegistry` (`starter_tools`: `list_blocks`, `draft_spec`) ready for CCC-44's full tool set.
 
-**Result (2026-10-24, commit `7caae77`):**
-- **Files:** `src/vibedesk/app/llm.py` (`ToolCall`, `Turn`, `ScriptedLLM`, `OmniRoute.complete`), `src/vibedesk/desk/loop.py` and `src/vibedesk/desk/__init__.py` (`MAX_TOOL_CALLS = 12`, `EVENT_TYPES`, `Event`, `Tool`, `ToolRegistry`, `starter_tools`, `desk_loop`, `DeskLoop`, `sse_stream`, `parse_sse`), `src/vibedesk/app/server.py` (SSE `/api/chat` and `/api/families/{family_id}/chat`), `tests/test_desk_loop.py` (9 tests).
-- **Suites:** `uv run pytest` passes 1,252 tests (1 skipped without the mt5 extra); `uv run ruff check src tests` and `uv run ruff format --check src tests` clean.
+**Result (2026-10-24, commits `a982f5a`, `8201c5e`, and follow-up review fixes):**
+- **Files:** `src/vibedesk/app/llm.py` (`ToolCall`, `Turn`, `ScriptedLLM`, `OmniRoute.complete`), `src/vibedesk/desk/loop.py` and `src/vibedesk/desk/__init__.py` (`MAX_TOOL_CALLS = 12`, `EVENT_TYPES`, `Event`, `Tool`, `ToolRegistry`, `starter_tools`, `desk_loop`, `DeskLoop`, `sse_stream`, `parse_sse`), `src/vibedesk/app/server.py` (SSE `POST /api/chat`; family chat route from spec §8 deferred until CCC-44), `tests/test_desk_loop.py` (12 tests).
+- **Suites:** `uv run pytest` passes 1,361 tests (1 skipped without the mt5 extra); `uv run ruff check src tests` and `uv run ruff format --check src tests` clean.

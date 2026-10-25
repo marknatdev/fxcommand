@@ -308,9 +308,6 @@ def desk_loop(
         )
     except Exception as error:
         text = str(error)
-        messages.append({"role": "error", "content": text})
-        if _sink is not None:
-            _sink[:] = messages[1:]
         yield Event(
             "message",
             {

@@ -427,3 +427,34 @@ def test_tool_returning_nan_inf_or_non_json_is_sanitized_without_crashing():
     tool_data = json.loads(tool_msg["content"])
     assert tool_data["profit_factor"] is None
     assert tool_data["unbounded"] == "inf"
+
+
+def test_desk_loop_recovers_after_llm_error_without_poisoning_history():
+    llm = ScriptedLLM(
+        llm_mod.LlmError("503 Service Unavailable"),
+        "I am ready now.",
+    )
+    loop = DeskLoop(llm)
+
+    # First turn: LLM fails
+    events1 = loop.run("First message that fails")
+    assert len(events1) == 1
+    assert events1[0].event == "message"
+    assert events1[0].data["role"] == "error"
+    assert "503" in events1[0].data["content"]
+
+    # History was not poisoned with role 'error'
+    assert not any(m.get("role") == "error" for m in loop.history)
+
+    # Second turn: LLM succeeds
+    events2 = loop.run("Second message that succeeds")
+    assert len(events2) == 1
+    assert events2[0].event == "message"
+    assert events2[0].data["role"] == "assistant"
+    assert events2[0].data["text"] == "I am ready now."
+
+    # Assert no message with role 'error' reached the LLM in the second call
+    last_call = llm.calls[-1]
+    assert not any(m.get("role") == "error" for m in last_call)
+    roles = [m["role"] for m in last_call]
+    assert "error" not in roles
