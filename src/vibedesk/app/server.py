@@ -8,7 +8,7 @@ import webbrowser
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from vibedesk.app import settings as config
@@ -17,6 +17,7 @@ from vibedesk.app.desk import Desk
 from vibedesk.app.llm import Llm, LlmError, OmniRoute
 from vibedesk.app.research import DraftFailed, draft_spec
 from vibedesk.blocks.spec import SpecInvalid
+from vibedesk.desk.loop import ToolRegistry, desk_loop, sse_stream
 from vibedesk.market.costs import CostError
 
 STATIC = Path(__file__).parent / "static"
@@ -41,7 +42,8 @@ class SettingsIn(BaseModel):
 
 
 def create_app(root: Path = config.DATA, llm: Llm | None = None, db: Path | None = None,
-               settings_root: Path | None = None) -> FastAPI:  # fmt: skip
+               settings_root: Path | None = None,
+               tools: ToolRegistry | None = None) -> FastAPI:  # fmt: skip
     """The app over the bar cache at `root`. Tests pass a fake `llm`, and may keep the Ledger
     (`db`) and settings (`settings_root`) apart from the real ones."""
     app = FastAPI(title="Vibe Desk")
@@ -100,6 +102,13 @@ def create_app(root: Path = config.DATA, llm: Llm | None = None, db: Path | None
     def delete_chat(chat_id: int):
         chats.delete(chat_id)
         return {"deleted": chat_id}
+
+    @app.post("/api/chat")
+    def chat_stream(body: DraftIn):
+        if not body.message.strip():
+            raise HTTPException(400, "say what the idea is")
+        events = desk_loop(current_llm(), body.message, tools=tools)
+        return StreamingResponse(sse_stream(events), media_type="text/event-stream")
 
     @app.post("/api/draft")
     def draft(body: DraftIn):
