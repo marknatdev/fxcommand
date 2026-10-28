@@ -55,8 +55,8 @@ def test_telegram_notifier_stub_and_get_notifier(tmp_path: Path):
         TelegramNotifier("", "")
 
     tn = TelegramNotifier(bot_token="test_token", chat_id="12345")
-    with pytest.raises(NotImplementedError, match="CCC-59"):
-        tn.send(Notice(kind=NoticeKind.CANDIDATE, text="test"))
+    assert tn.bot_token == "test_token"
+    assert tn.chat_id == "12345"
 
     # When no secrets exist, get_notifier falls back to NoOpNotifier
     fallback = get_notifier(root=tmp_path)
