@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from vibedesk.app.desk import Desk
+from vibedesk.app.research import EXAMPLE
 from vibedesk.app.scheduler import BANGKOK_TZ, Scheduler
 from vibedesk.desk.budget import TokenBudget
 from vibedesk.market.costs import current_cost
@@ -251,3 +252,73 @@ def test_daily_digest_explicit_until_and_notify_path(tmp_path: Path):
             vn.compile_daily_digest = orig_compile
         elif hasattr(vn, "compile_daily_digest"):
             delattr(vn, "compile_daily_digest")
+
+
+def test_daily_digest_counts_from_ledger_without_monkeypatch(tmp_path: Path):
+    """Daily digest counts REJECTs and Trials directly from Ledger when
+    compile_daily_digest is not imported (CCC-53, review finding)."""
+    notifier = RecordingNotifier()
+    budget = TokenBudget(daily_cap=100_000)
+    budget.record_usage(12_345)
+    desk = Desk(tmp_path)
+    fam_id = desk.ledger.create_family("Digest Direct Count Family")
+    hyp_id = desk.ledger.register_hypothesis(fam_id, EXAMPLE)
+    with desk.ledger._lock:
+        desk.ledger._db.execute(
+            "INSERT INTO trials (hypothesis_id, verdict, closest_miss_json, cost_json, "
+            "bars_count, bars_first, bars_last, bars_sha256, result_json, rules_version) "
+            "VALUES (?, 'REJECT', '{\"check\": \"pf\"}', '{}', 100, 1000, 2000, 'abc', '{}', 1)",
+            (hyp_id,),
+        )
+        desk.ledger._db.execute(
+            "INSERT INTO trials (hypothesis_id, verdict, closest_miss_json, cost_json, "
+            "bars_count, bars_first, bars_last, bars_sha256, result_json, rules_version) "
+            "VALUES (?, 'CANDIDATE', NULL, '{}', 100, 1000, 2000, 'abc', '{}', 1)",
+            (hyp_id,),
+        )
+
+    scheduler = Scheduler(
+        root=tmp_path,
+        desk=desk,
+        notifier=notifier,
+        budget=budget,
+    )
+    res = scheduler.run_job_now("daily_digest")
+    assert res["status"] == "ok"
+    assert res["trials"] == 2
+    assert res["rejects"] == 1
+    assert res["tokens_used"] == 12_345
+    assert res["sent"] is True
+
+    assert len(notifier) == 1
+    notice = notifier.last
+    assert notice is not None
+    assert notice.kind == NoticeKind.DAILY_DIGEST
+    assert notice.data["trials_run"] == 2
+    assert notice.data["reject_count"] == 1
+    assert notice.data["tokens_used"] == 12_345
+    assert "1 REJECTs, 2 Trials run, 12,345 tokens used" in notice.text
+
+
+def test_weekly_spread_floors_continues_on_symbol_cost_error(tmp_path: Path):
+    """When cost measurement fails for one symbol, scheduler continues measuring
+    remaining symbols."""
+    from vibedesk.market.costs import CostError
+    from vibedesk.market.fake_mt5 import FakeMt5
+
+    class FlakyMt5(FakeMt5):
+        def copy_ticks_range(self, symbol, start, end, flags):
+            if symbol == "EURUSD":
+                raise CostError("EURUSD: no ticks available")
+            return super().copy_ticks_range(symbol, start, end, flags)
+
+    source = SyntheticBarSource(1, date(2013, 12, 1), date(2027, 1, 1))
+    fake_api = FlakyMt5(source)
+    scheduler = Scheduler(
+        root=tmp_path,
+        api=fake_api,
+        symbols=["EURUSD", "GOLD"],
+    )
+    res = scheduler.run_job_now("weekly_spread_floors")
+    assert res["symbols"] == 1  # GOLD was measured despite EURUSD error
+    assert "EURUSD" in res.get("errors", {})

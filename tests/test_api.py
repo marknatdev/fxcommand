@@ -16,10 +16,12 @@ Tests cover:
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from vibedesk.app.api_spec import (
@@ -35,7 +37,7 @@ from vibedesk.app.api_spec import (
     PublicSettingsOut,
     TrialSummaryOut,
 )
-from vibedesk.app.auth import OWNER_COOKIE_NAME, OWNER_COOKIE_VALUE
+from vibedesk.app.auth import OWNER_COOKIE_NAME, OWNER_COOKIE_VALUE, require_owner
 from vibedesk.app.chats import Chats
 from vibedesk.app.desk import Desk
 from vibedesk.app.research import EXAMPLE
@@ -319,40 +321,58 @@ def test_settings_get_and_put(app_env):
     pub_updated = PublicSettingsOut(**res_put.json())
     assert pub_updated.daily_token_cap == 250_000
     assert pub_updated.telegram_enabled is True
+    assert client.app.state.budget.daily_cap == 250_000
 
 
-def test_health_endpoint(app_env):
-    client, _, _, _ = app_env
+def test_health_endpoint(tmp_path: Path):
+    from vibedesk.market.fake_mt5 import FakeMt5
+
+    data_dir = tmp_path / "data"
+    settings_dir = tmp_path / "settings"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    setup_synthetic_gold_cache(data_dir)
+
+    fake_api = FakeMt5(SyntheticBarSource(1, date(2013, 12, 1), date(2027, 1, 1)))
+    app = create_app(
+        root=data_dir,
+        llm=ScriptedLlm(reply(EXAMPLE)),
+        settings_root=settings_dir,
+        mt5_api=fake_api,
+        enable_scheduler=False,
+    )
+    client = TestClient(app)
     res_health = client.get("/api/health")
     assert res_health.status_code == 200
     health = HealthOut(**res_health.json())
     assert health.token_budget_state in ("ok", "warn", "paused")
     assert isinstance(health.tokens_used_today, int)
     assert isinstance(health.active_jobs, int)
-    assert isinstance(health.mt5_connected, bool)
-    assert isinstance(health.omniroute_connected, bool)
+    assert health.mt5_connected is True
+    assert health.omniroute_connected is True
 
 
-def test_all_15_endpoints_in_table_covered():
-    """Verify all 15 endpoints in ENDPOINT_TABLE are present."""
+def test_all_15_endpoints_in_table_covered(app_env):
+    """Build the app and assert every (method, path) in ENDPOINT_TABLE exists in app.routes,
+    and that owner_only routes carry require_owner."""
+    client, _, _, _ = app_env
+    app = client.app
+
+    route_map: dict[tuple[str, str], APIRoute] = {}
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            norm_path = re.sub(r"\{[a-z_]*id\}", "{id}", route.path)
+            for m in route.methods:
+                route_map[(m.upper(), norm_path)] = route
+
     assert len(ENDPOINT_TABLE) >= 15
-    paths = {ep["path"] for ep in ENDPOINT_TABLE}
-    expected = {
-        "/api/families",
-        "/api/families/{id}",
-        "/api/hypotheses/{id}",
-        "/api/families/{id}/chat",
-        "/api/hypotheses/{id}/trials",
-        "/api/trials/{id}",
-        "/api/blocks",
-        "/api/ledger",
-        "/api/hypotheses/{id}/holdout-requests",
-        "/api/holdout-requests/{id}/approve",
-        "/api/families/{id}/budget",
-        "/api/settings",
-        "/api/health",
-    }
-    assert expected.issubset(paths)
+    for ep in ENDPOINT_TABLE:
+        key = (ep["method"].upper(), ep["path"])
+        assert key in route_map, f"Missing route in app: {key}"
+        route = route_map[key]
+        if ep.get("owner_only"):
+            dep_fns = [d.dependency for d in route.dependencies]
+            assert require_owner in dep_fns, f"Route {key} must have require_owner dependency"
 
 
 def test_chat_stream_starter_and_desk_tools_wiring(app_env):

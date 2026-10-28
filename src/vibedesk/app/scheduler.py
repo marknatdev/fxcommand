@@ -157,6 +157,7 @@ class Scheduler:
                 logger.error("Error in scheduler tick: %s", e)
 
     def _run_nightly_refresh(self) -> dict[str, Any]:
+        from vibedesk.app.desk import MT5_LOCK
         from vibedesk.market.cache import CacheError, read_meta
         from vibedesk.market.importer import import_history, refresh
         from vibedesk.market.universe import SYMBOLS
@@ -175,27 +176,31 @@ class Scheduler:
                 }
 
         imported = 0
+        errors: dict[str, str] = {}
         target_symbols = self.symbols or SYMBOLS
-        try:
+        with MT5_LOCK:
             for symbol in target_symbols:
                 try:
-                    known = read_meta(self.root, symbol).last_import is not None
-                except CacheError:
-                    known = False
-                run = refresh if known else import_history
-                run(api, self.root, symbols=(symbol,))
-                imported += 1
-            return {"job": "nightly_refresh", "status": "ok", "symbols": imported}
-        except Exception as e:
-            return {
-                "job": "nightly_refresh",
-                "status": "error",
-                "error": str(e),
-                "symbols": imported,
-            }
+                    try:
+                        known = read_meta(self.root, symbol).last_import is not None
+                    except CacheError:
+                        known = False
+                    run = refresh if known else import_history
+                    run(api, self.root, symbols=(symbol,))
+                    imported += 1
+                except Exception as e:
+                    logger.warning("Nightly refresh failed for %s: %s", symbol, e)
+                    errors[symbol] = str(e)
+
+        status = "ok" if not errors else ("partial" if imported > 0 else "error")
+        res: dict[str, Any] = {"job": "nightly_refresh", "status": status, "symbols": imported}
+        if errors:
+            res["errors"] = errors
+        return res
 
     def _run_weekly_spread_floors(self) -> dict[str, Any]:
-        from vibedesk.market.costs import measure_cost, record_cost
+        from vibedesk.app.desk import MT5_LOCK
+        from vibedesk.market.costs import CostError, measure_cost, record_cost
         from vibedesk.market.universe import SYMBOLS
 
         api = self._api
@@ -218,30 +223,35 @@ class Scheduler:
             now = clock_time.replace(tzinfo=BANGKOK_TZ).astimezone(UTC)
 
         measured = 0
+        errors: dict[str, str] = {}
         target_symbols = self.symbols or SYMBOLS
-        if not api.initialize():
-            err = api.last_error() if hasattr(api, "last_error") else "initialize failed"
-            return {
-                "job": "weekly_spread_floors",
-                "status": "error",
-                "error": f"MT5 initialize failed: {err}",
-            }
-        try:
-            for symbol in target_symbols:
-                api.symbol_select(symbol, True)
-                cost = measure_cost(api, symbol, now)
-                record_cost(self.root, cost)
-                measured += 1
-            return {"job": "weekly_spread_floors", "status": "ok", "symbols": measured}
-        except Exception as e:
-            return {
-                "job": "weekly_spread_floors",
-                "status": "error",
-                "error": str(e),
-                "symbols": measured,
-            }
-        finally:
-            api.shutdown()
+
+        with MT5_LOCK:
+            if not api.initialize():
+                err = api.last_error() if hasattr(api, "last_error") else "initialize failed"
+                return {
+                    "job": "weekly_spread_floors",
+                    "status": "error",
+                    "error": f"MT5 initialize failed: {err}",
+                }
+            try:
+                for symbol in target_symbols:
+                    try:
+                        api.symbol_select(symbol, True)
+                        cost = measure_cost(api, symbol, now)
+                        record_cost(self.root, cost)
+                        measured += 1
+                    except (CostError, Exception) as e:
+                        logger.warning("Spread floor measurement failed for %s: %s", symbol, e)
+                        errors[symbol] = str(e)
+            finally:
+                api.shutdown()
+
+        status = "ok" if not errors else ("partial" if measured > 0 else "error")
+        res: dict[str, Any] = {"job": "weekly_spread_floors", "status": status, "symbols": measured}
+        if errors:
+            res["errors"] = errors
+        return res
 
     def _run_daily_digest(self, scheduled_time: datetime | None = None) -> dict[str, Any]:
         clock_time = self._clock()
@@ -265,36 +275,57 @@ class Scheduler:
 
         try:
             from vibedesk.notify import compile_daily_digest
+        except ImportError:
+            compile_daily_digest = None
 
-            ledger = getattr(self.desk, "ledger", None) if self.desk is not None else None
-            if ledger is not None and hasattr(ledger, "trial_counts"):
-                notice = compile_daily_digest(
-                    ledger=ledger,
-                    budget=self.budget,
-                    until=until_utc,
-                    now=self._clock,
-                )
-            else:
-                tokens_used = self.budget.used if self.budget is not None else 0
-                notice = compile_daily_digest(
-                    budget=self.budget,
-                    tokens_used=tokens_used,
-                    until=until_utc,
-                    now=self._clock,
-                )
-        except (ImportError, AttributeError):
+        ledger = getattr(self.desk, "ledger", None) if self.desk is not None else None
+        if compile_daily_digest is not None:
+            notice = compile_daily_digest(
+                ledger=ledger,
+                budget=self.budget,
+                until=until_utc,
+                now=self._clock,
+            )
+        else:
+            # Count REJECTs and Trials from the Ledger over window (until - 24h, until]
             from vibedesk.notify import Notice, NoticeKind
 
-            tokens_used = self.budget.used if self.budget is not None else 0
-            text = f"Daily digest: 0 REJECTs, 0 Trials run, {tokens_used} tokens used today"
+            since_utc = until_utc - timedelta(hours=24)
+            trials_count = 0
+            rejects = 0
+            if ledger is not None:
+                if hasattr(ledger, "trial_counts"):
+                    trials_count, rejects = ledger.trial_counts(since_utc, until_utc)
+                else:
+                    since_iso = since_utc.isoformat()
+                    until_iso = until_utc.isoformat()
+                    with getattr(ledger, "_lock", threading.Lock()):
+                        db = getattr(ledger, "_db", None)
+                        if db is not None:
+                            row = db.execute(
+                                "SELECT COUNT(*), "
+                                "COALESCE(SUM(CASE WHEN verdict = 'REJECT' THEN 1 ELSE 0 END), 0) "
+                                "FROM trials "
+                                "WHERE datetime(created_at) > datetime(?) "
+                                "AND datetime(created_at) <= datetime(?)",
+                                (since_iso, until_iso),
+                            ).fetchone()
+                            if row:
+                                trials_count, rejects = int(row[0]), int(row[1])
+
+            tokens_used = self.budget.used if self.budget else 0
+            text = (
+                f"Daily Digest: {rejects} REJECTs, {trials_count} Trials run, "
+                f"{tokens_used:,} tokens used today."
+            )
             notice = Notice(
                 kind=NoticeKind.DAILY_DIGEST,
                 text=text,
                 data={
-                    "reject_count": 0,
-                    "trials_run": 0,
+                    "reject_count": rejects,
+                    "trials_run": trials_count,
                     "tokens_used": tokens_used,
-                    "until_utc": until_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "until_utc": until_utc.isoformat(),
                 },
             )
 

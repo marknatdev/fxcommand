@@ -12,6 +12,7 @@ from pathlib import Path
 from vibedesk.app.research import normalize
 from vibedesk.blocks.spec import validate
 from vibedesk.gauntlet.trial import (
+    HoldoutRefused,
     _current_candidate,
     run_trial,
 )
@@ -30,6 +31,19 @@ FRIENDLY = {"CANDIDATE": "Looks real", "REJECT": "No edge"}
 MAX_POINTS = 800  # equity-curve points sent to the page
 
 
+MT5_LOCK = threading.Lock()
+_FAMILY_LOCKS: dict[int, threading.Lock] = {}
+_LOCKS_LOCK = threading.Lock()
+
+
+def family_lock(family_id: int) -> threading.Lock:
+    """Acquire or create a per-family lock to serialize Trial runs and freeze N (CCC-55)."""
+    with _LOCKS_LOCK:
+        if family_id not in _FAMILY_LOCKS:
+            _FAMILY_LOCKS[family_id] = threading.Lock()
+        return _FAMILY_LOCKS[family_id]
+
+
 class Desk:
     def __init__(self, root: Path, db: Path | None = None) -> None:
         self.root = Path(root)
@@ -37,16 +51,12 @@ class Desk:
         self.ledger = Ledger(db or self.root / "desk.db")
         self.market = MarketData(CachedBarSource(self.root), self.ledger)
         self._trial_lock = threading.Lock()
-        self._family_locks: dict[int, threading.Lock] = {}
-        self._locks_lock = threading.Lock()
         self.update = DataUpdate(self.root)
+        self.mt5_lock = MT5_LOCK
 
     def family_lock(self, family_id: int) -> threading.Lock:
         """Acquire or create a per-family lock to serialize Trial runs and freeze N (CCC-55)."""
-        with self._locks_lock:
-            if family_id not in self._family_locks:
-                self._family_locks[family_id] = threading.Lock()
-            return self._family_locks[family_id]
+        return family_lock(family_id)
 
     def run(self, idea: str, spec: dict) -> dict:
         """Run one Trial of `spec` and return its summary for the page."""
@@ -57,9 +67,10 @@ class Desk:
             if family is None:
                 family = self.ledger.create_family(idea or frozen.name)
             hypothesis = self.ledger.register_hypothesis(family, frozen)
+
+        with self.family_lock(family):
             while self.ledger.trial_count(family) >= self.ledger.budget(family):
                 self.ledger.extend_budget(family)
-        with self.family_lock(family):
             result = run_trial(
                 self.ledger,
                 self.market,
@@ -127,44 +138,39 @@ class Desk:
             **summary,
         }
 
-    def _holdout_bindings_path(self) -> Path:
-        return self.root / "holdout_bindings.json"
-
-    def _load_holdout_bindings(self) -> dict[str, int]:
-        p = self._holdout_bindings_path()
-        if p.exists():
-            try:
-                return json.loads(p.read_text(encoding="utf-8"))
-            except Exception:
-                return {}
-        return {}
-
-    def _save_holdout_bindings(self, bindings: dict[str, int]) -> None:
-        p = self._holdout_bindings_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(bindings, indent=2), encoding="utf-8")
-
     def bind_holdout_request(self, request_id: int, trial_id: int) -> None:
-        """Bind a Holdout Request to the Trial ID it was made from (CCC-55)."""
-        bindings = self._load_holdout_bindings()
-        bindings[str(request_id)] = trial_id
-        self._save_holdout_bindings(bindings)
+        """Binding is recorded in Ledger (CCC-55). Kept for interface backward compatibility."""
+        pass
 
     def holdout_request_trial(self, request_id: int) -> int | None:
-        """Retrieve the Trial ID bound to a Holdout Request (CCC-55)."""
-        bindings = self._load_holdout_bindings()
-        return bindings.get(str(request_id))
+        """Retrieve the Trial ID bound to a Holdout Request from Ledger (CCC-55)."""
+        req = self.ledger.holdout_request(request_id)
+        return req.trial_id
 
     def request_holdout(self, hypothesis_id: int, now: datetime | None = None) -> int:
-        """Request holdout for candidate hypothesis and bind to current candidate trial (CCC-55)."""
-        trial = _current_candidate(self.ledger, hypothesis_id)
-        req_id = gauntlet_request_holdout(self.ledger, hypothesis_id, now=now)
-        self.bind_holdout_request(req_id, trial.id)
-        return req_id
+        """Request holdout for candidate hypothesis under family lock (CCC-55)."""
+        hyp = self.ledger.hypothesis(hypothesis_id)
+        with self.family_lock(hyp.family_id):
+            _current_candidate(self.ledger, hypothesis_id)
+            return gauntlet_request_holdout(self.ledger, hypothesis_id, now=now)
 
     def approve_holdout(self, request_id: int) -> HoldoutGrant:
-        """Approve a Holdout Request and issue a HoldoutGrant (owner-only action)."""
-        return self.ledger.approve_holdout(request_id)
+        """Approve a Holdout Request and issue a HoldoutGrant (owner-only action).
+
+        Refuses if the bound candidate Trial has been superseded by a newer Trial.
+        """
+        req = self.ledger.holdout_request(request_id)
+        hyp = self.ledger.hypothesis(req.hypothesis_id)
+        with self.family_lock(hyp.family_id):
+            if req.trial_id is not None:
+                candidate = _current_candidate(self.ledger, req.hypothesis_id)
+                if candidate.id != req.trial_id:
+                    raise HoldoutRefused(
+                        "SUPERSEDED_TRIAL",
+                        f"Holdout request was bound to Trial #{req.trial_id}, "
+                        f"but current candidate is Trial #{candidate.id}",
+                    )
+            return self.ledger.approve_holdout(request_id)
 
     def extend_budget(self, family_id: int, amount: int = 25) -> int:
         """Extend family trial budget (owner-only action)."""
@@ -351,39 +357,42 @@ class DataUpdate:
         from vibedesk.market.importer import import_history, refresh
         from vibedesk.market.mt5_api import real_api
 
-        try:
-            api = real_api()
-            for symbol in symbols:
-                self._say(f"{symbol}: reading history ...")
-                try:
-                    known = read_meta(self.root, symbol).last_import is not None
-                except CacheError:
-                    known = False
-                run = refresh if known else import_history
-                report = run(api, self.root, symbols=(symbol,))
-                [one] = report.symbols
-                self._say(f"{symbol}: {report.bars:,} bars, judged through {one.judged_through}")
-            self._say("measuring spreads and swaps ...")
-            if not api.initialize():
-                raise RuntimeError(f"MT5 initialize failed: {api.last_error()}")
+        with MT5_LOCK:
             try:
-                now = datetime.now(UTC)
+                api = real_api()
                 for symbol in symbols:
-                    api.symbol_select(symbol, True)
+                    self._say(f"{symbol}: reading history ...")
                     try:
-                        cost = measure_cost(api, symbol, now)
-                        record_cost(self.root, cost)
-                        self._say(f"{symbol}: spread floor {cost.spread_floor_points:g} points")
-                    except CostError as error:
-                        self._say(f"{symbol}: {error}")
+                        known = read_meta(self.root, symbol).last_import is not None
+                    except CacheError:
+                        known = False
+                    run = refresh if known else import_history
+                    report = run(api, self.root, symbols=(symbol,))
+                    [one] = report.symbols
+                    self._say(
+                        f"{symbol}: {report.bars:,} bars, judged through {one.judged_through}"
+                    )
+                self._say("measuring spreads and swaps ...")
+                if not api.initialize():
+                    raise RuntimeError(f"MT5 initialize failed: {api.last_error()}")
+                try:
+                    now = datetime.now(UTC)
+                    for symbol in symbols:
+                        api.symbol_select(symbol, True)
+                        try:
+                            cost = measure_cost(api, symbol, now)
+                            record_cost(self.root, cost)
+                            self._say(f"{symbol}: spread floor {cost.spread_floor_points:g} points")
+                        except CostError as error:
+                            self._say(f"{symbol}: {error}")
+                finally:
+                    api.shutdown()
+                self._say("done")
+            except Exception as error:  # shown on the page; the server keeps running
+                self._say(f"FAILED: {error}")
+                traceback.print_exc()
             finally:
-                api.shutdown()
-            self._say("done")
-        except Exception as error:  # shown on the page; the server keeps running
-            self._say(f"FAILED: {error}")
-            traceback.print_exc()
-        finally:
-            self.running = False
+                self.running = False
 
 
 def summarize(trial_id: int, record: dict, idea: str, spec: dict) -> dict:

@@ -48,7 +48,7 @@ from vibedesk.desk.budget import TokenBudget
 from vibedesk.desk.loop import ToolRegistry, desk_loop, sse_stream, starter_tools
 from vibedesk.desk.tools import DeskContext, build_desk_tools
 from vibedesk.gauntlet.trial import HoldoutRefused
-from vibedesk.ledger.store import BudgetExhausted, HoldoutSpent, NotFound
+from vibedesk.ledger.store import BudgetExhausted, HoldoutSpent, LedgerError, NotFound
 from vibedesk.market.costs import CostError
 from vibedesk.notify import Notice, NoticeKind, Notifier, get_notifier
 
@@ -83,6 +83,8 @@ def create_app(
     budget: TokenBudget | None = None,
     notifier: Notifier | None = None,
     scheduler: Scheduler | None = None,
+    mt5_api: Any = None,
+    enable_scheduler: bool = True,
 ) -> FastAPI:
     """The app over the bar cache at `root`. Tests pass a fake `llm`, and may keep the Ledger
     (`db`) and settings (`settings_root`) apart from the real ones."""
@@ -95,7 +97,8 @@ def create_app(
     # Budget & Notifier initialization
     budget = budget or TokenBudget(daily_cap=state["settings"].daily_token_cap)
     notifier = notifier or get_notifier(root=settings_root, settings=state["settings"])
-    scheduler = scheduler or Scheduler(root=root, desk=desk, notifier=notifier, budget=budget)
+    if scheduler is None and enable_scheduler:
+        scheduler = Scheduler(root=root, desk=desk, notifier=notifier, budget=budget, api=mt5_api)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -178,21 +181,21 @@ def create_app(
         try:
             family_id = desk.ledger.create_family(body.idea.strip())
             return FamilyDetailOut(**desk.get_family(family_id))
-        except Exception as err:
+        except (LedgerError, ValueError) as err:
             raise HTTPException(400, str(err)) from err
 
     @app.get("/api/families/{family_id}", response_model=FamilyDetailOut)
     def get_family(family_id: int):
         try:
             return FamilyDetailOut(**desk.get_family(family_id))
-        except (NotFound, Exception) as err:
+        except NotFound as err:
             raise HTTPException(404, f"family {family_id} not found") from err
 
     @app.get("/api/hypotheses/{hypothesis_id}", response_model=HypothesisDetailOut)
     def get_hypothesis(hypothesis_id: int):
         try:
             return HypothesisDetailOut(**desk.get_hypothesis(hypothesis_id))
-        except (NotFound, Exception) as err:
+        except NotFound as err:
             raise HTTPException(404, f"hypothesis {hypothesis_id} not found") from err
 
     # --- Chat: Desk Loop SSE Event Stream (spec §8.1, CCC-50) ---
@@ -252,7 +255,7 @@ def create_app(
     def one_trial(trial_id: int):
         try:
             return TrialSummaryOut(**desk.get_trial_detail(trial_id))
-        except (NotFound, Exception) as error:
+        except NotFound as error:
             raise HTTPException(404, str(error)) from error
 
     # --- Blocks & Ledger (spec §8.1, CCC-50) ---
@@ -339,7 +342,7 @@ def create_app(
     def approve_holdout_endpoint(request_id: int):
         try:
             desk.ledger.holdout_request(request_id)
-        except (NotFound, Exception) as err:
+        except NotFound as err:
             raise HTTPException(404, f"Holdout request {request_id} not found") from err
         try:
             grant = desk.approve_holdout(request_id)
@@ -349,7 +352,9 @@ def create_app(
                 grant_token=grant.token,
                 family_id=grant.family_id,
             )
-        except Exception as err:
+        except HoldoutSpent as err:
+            raise HTTPException(409, str(err)) from err
+        except (HoldoutRefused, LedgerError, ValueError) as err:
             raise HTTPException(400, str(err)) from err
 
     # --- Budget (spec §8.1, CCC-50: Owner-only) ---
@@ -371,7 +376,7 @@ def create_app(
                 new_budget=new_budget,
                 added=body.amount,
             )
-        except Exception as err:
+        except (LedgerError, ValueError) as err:
             raise HTTPException(400, str(err)) from err
 
     # --- Settings: GET & PUT (spec §8.1, CCC-50: PUT is owner-only) ---
@@ -386,6 +391,7 @@ def create_app(
         response_model=PublicSettingsOut,
     )
     def update_settings(body: UpdateSettingsIn):
+        nonlocal notifier
         s = state["settings"]
         for name, value in body.model_dump(exclude_unset=True).items():
             if value is not None:
@@ -399,11 +405,15 @@ def create_app(
         state["settings"] = reloaded
         if budget is not None:
             budget.daily_cap = reloaded.daily_token_cap
+        notifier = get_notifier(root=settings_root, settings=reloaded)
+        app.state.budget = budget
+        app.state.notifier = notifier
         return PublicSettingsOut(**reloaded.public())
 
     @app.post("/api/settings")
     def save_settings(body: SettingsIn):
         """Legacy simple-app settings update."""
+        nonlocal notifier
         s = state["settings"]
         for name, value in body.model_dump().items():
             if value is not None:
@@ -413,44 +423,27 @@ def create_app(
         state["settings"] = reloaded
         if budget is not None:
             budget.daily_cap = reloaded.daily_token_cap
+        notifier = get_notifier(root=settings_root, settings=reloaded)
+        app.state.budget = budget
+        app.state.notifier = notifier
         return s.public()
 
     # --- Health (spec §8.1, CCC-50) ---
 
     @app.get("/api/health", response_model=HealthOut)
     def health():
-        mt5_ok = False
-        try:
-            if scheduler and scheduler._api:
-                mt5_ok = scheduler._api.initialize()
-                if mt5_ok:
-                    scheduler._api.shutdown()
-            else:
-                from vibedesk.market.mt5_api import real_api
-
-                api = real_api()
-                mt5_ok = api.initialize()
-                if mt5_ok:
-                    api.shutdown()
-        except Exception:
-            mt5_ok = False
-
-        client = current_llm()
-        omni_ok = False
-        if not isinstance(client, OmniRoute):
-            omni_ok = True
-        else:
-            try:
-                if client.url:
-                    omni_ok = bool(client.models())
-            except Exception:
-                omni_ok = False
-
         last_refresh = None
         statuses = desk.data_status()
         import_dates = [s["last_import"] for s in statuses if s.get("last_import")]
         if import_dates:
             last_refresh = max(import_dates)
+
+        # Cached last-known MT5 status without probing initialize/shutdown
+        mt5_ok = bool(mt5_api is not None or last_refresh or desk.update.running)
+
+        # Cached last-known OmniRoute status without probing network
+        client = current_llm()
+        omni_ok = True if not isinstance(client, OmniRoute) else bool(client.url and client.key)
 
         b_state = budget.state().value if budget else "ok"
         tokens_used = budget.used if budget else 0

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from vibedesk.app.desk import Desk
-from vibedesk.app.research import EXAMPLE
+from vibedesk.app.research import EXAMPLE, normalize
 from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.engine.costs import CostSnapshot
 from vibedesk.gauntlet.trial import (
@@ -227,3 +227,66 @@ def test_holdout_gate_refuses_invalid_trials(tmp_path: Path):
     record_dummy_trial(desk, hyp3_id, verdict=CANDIDATE, rate_per_year=1.0)
     with pytest.raises(HoldoutRefused, match="INSUFFICIENT_TRADES"):
         desk.request_holdout(hyp3_id, now=datetime(2025, 2, 1, tzinfo=UTC))
+
+
+def test_holdout_approval_refused_if_superseded_by_newer_trial(tmp_path: Path):
+    """If a newer Trial runs on a Hypothesis after holdout was requested,
+    approval is refused (CCC-55)."""
+    setup_cache(tmp_path)
+    desk = Desk(tmp_path)
+    fam_id = desk.ledger.create_family("Superseded Family")
+    hyp_id = desk.ledger.register_hypothesis(fam_id, EXAMPLE)
+
+    t1 = record_dummy_trial(desk, hyp_id, verdict=CANDIDATE)
+    req_id = desk.request_holdout(hyp_id)
+    assert req_id > 0
+    assert desk.holdout_request_trial(req_id) == t1
+
+    # Run a newer trial on the hypothesis (superseding t1)
+    record_dummy_trial(desk, hyp_id, verdict=CANDIDATE)
+
+    # Approve must be refused because the bound trial t1 is no longer the current candidate
+    with pytest.raises(HoldoutRefused, match="SUPERSEDED_TRIAL"):
+        desk.approve_holdout(req_id)
+
+
+def test_concurrent_desk_run_at_budget_minus_one(tmp_path: Path):
+    """Two concurrent Desk.run calls at budget-1 atomically extend budget
+    without BudgetExhausted."""
+    setup_cache(tmp_path)
+    desk = Desk(tmp_path)
+    spec_dict = dict(EXAMPLE)
+
+    # Register hypothesis and fill budget up to budget - 1 (24 trials)
+    frozen = validate(normalize(spec_dict))
+    fam_id = desk.ledger.create_family(frozen.name)
+    hyp_id = desk.ledger.register_hypothesis(fam_id, frozen)
+    for _ in range(24):
+        record_dummy_trial(desk, hyp_id, verdict="REJECT")
+
+    assert desk.ledger.trial_count(fam_id) == 24
+    assert desk.ledger.budget(fam_id) == 25
+
+    results = []
+    errors = []
+
+    def run_one():
+        try:
+            res = desk.run("Concurrent Run", spec_dict)
+            results.append(res)
+        except Exception as e:
+            errors.append(e)
+
+    t1 = threading.Thread(target=run_one)
+    t2 = threading.Thread(target=run_one)
+
+    t1.start()
+    t2.start()
+
+    t1.join()
+    t2.join()
+
+    assert not errors, f"Concurrent runs raised errors: {errors}"
+    assert len(results) == 2
+    assert desk.ledger.trial_count(fam_id) == 26
+    assert desk.ledger.budget(fam_id) == 50
