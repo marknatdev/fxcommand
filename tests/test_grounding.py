@@ -139,7 +139,11 @@ def test_malformed_placeholders_fail_validation():
         ("Missing colon: {{trial}}", "missing ':'"),
         ("Empty braces: {{}}", "missing ':'"),
         ("Whitespace in placeholder: {{trial: 42.pf}}", "expected 'trial:<id>.<field>'"),
+        ("Leading whitespace in kind: {{ trial:42.pf}}", "expected 'trial:<id>.<field>'"),
+        ("Trailing whitespace in kind: {{trial :42.pf}}", "expected 'trial:<id>.<field>'"),
         ("Empty date: {{date:}}", "expected 'date:<iso>'"),
+        ("Non-ISO date figure: {{date:1.85}}", "expected 'date:<iso>'"),
+        ("Non-ISO date integer: {{date:42}}", "expected 'date:<iso>'"),
         ("Unclosed placeholder: {{trial:42.pf", "unclosed '{{'"),
         ("Stray closing brace: stray }} here", "stray '}}'"),
     ]
@@ -234,6 +238,29 @@ def test_render_malformed_placeholder_raises_error():
 
     with pytest.raises(GroundingError):
         render("Value: stray }} here", fake_lookup)
+
+    with pytest.raises(GroundingError) as exc_info:
+        render("Profit factor was {{date:1.85}}", fake_lookup)
+    assert "expected 'date:<iso>'" in str(exc_info.value)
+
+    with pytest.raises(GroundingError) as exc_info:
+        render("Value was {{date:42}}", fake_lookup)
+    assert "expected 'date:<iso>'" in str(exc_info.value)
+
+
+def test_invented_figures_via_date_fail_validation_and_render():
+    """ADR 0005: numbers smuggled via {{date:1.85}} or {{date:42}} must fail validate and render."""
+    for text in ["Profit factor was {{date:1.85}}", "Count was {{date:42}}"]:
+        problems = validate(text)
+        assert len(problems) > 0, f"Expected problems for {text!r}"
+        assert any("expected 'date:<iso>'" in p for p in problems)
+
+        def dummy_lookup(kind: str, id_: str, field: str) -> str | None:
+            return id_
+
+        with pytest.raises(GroundingError) as exc_info:
+            render(text, dummy_lookup)
+        assert "expected 'date:<iso>'" in str(exc_info.value)
 
 
 def test_exported_placeholder_grammar():

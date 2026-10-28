@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import datetime
 
 # Known placeholder kinds
 KIND_TRIAL = "trial"
@@ -29,9 +30,14 @@ KNOWN_PLACEHOLDER_KINDS: frozenset[str] = frozenset({KIND_TRIAL, KIND_SPEC, KIND
 # Grammar for valid placeholders:
 # - {{trial:ID.metric}}, {{spec:ID.param}}, {{hyp:ID.field}}
 # - {{date:ISO}}
+ISO_DATE_PATTERN: str = (
+    r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+)
+ISO_DATE_REGEX: re.Pattern[str] = re.compile(rf"^{ISO_DATE_PATTERN}$")
+
 PLACEHOLDER_PATTERN: str = (
     r"\{\{(?:(?P<kind>trial|spec|hyp):(?P<id>[^\s.:{}]+)\.(?P<field>[^\s.:{}]+)|"
-    r"(?P<date_kind>date):(?P<date_iso>[^\s{}]+))\}\}"
+    r"(?P<date_kind>date):(?P<date_iso>" + ISO_DATE_PATTERN + r"))\}\}"
 )
 PLACEHOLDER_REGEX: re.Pattern[str] = re.compile(PLACEHOLDER_PATTERN)
 
@@ -61,17 +67,27 @@ class Placeholder:
         return cls(kind=kind, id=id_, field=field, raw=m.group(0))
 
 
+_DEFAULT_KNOWN_TOKENS: frozenset[str] | None = None
+
+
+def _get_default_known_tokens() -> frozenset[str]:
+    global _DEFAULT_KNOWN_TOKENS
+    if _DEFAULT_KNOWN_TOKENS is None:
+        import vibedesk.blocks  # noqa: F401 - populate LIBRARY
+        from vibedesk.blocks.registry import LIBRARY
+        from vibedesk.market.bars import Timeframe
+        from vibedesk.market.universe import SYMBOLS
+
+        tokens: set[str] = set(SYMBOLS)
+        tokens.update(tf.value for tf in Timeframe)
+        tokens.update(b.name for b in LIBRARY.all())
+        _DEFAULT_KNOWN_TOKENS = frozenset(tokens)
+    return _DEFAULT_KNOWN_TOKENS
+
+
 def default_known_tokens() -> set[str]:
     """Default tokens allowed to contain digits: universe symbols, timeframes, Block names."""
-    import vibedesk.blocks  # noqa: F401 - populate LIBRARY
-    from vibedesk.blocks.registry import LIBRARY
-    from vibedesk.market.bars import Timeframe
-    from vibedesk.market.universe import SYMBOLS
-
-    tokens: set[str] = set(SYMBOLS)
-    tokens.update(tf.value for tf in Timeframe)
-    tokens.update(b.name for b in LIBRARY.all())
-    return tokens
+    return set(_get_default_known_tokens())
 
 
 def _token_pattern(token: str) -> str:
@@ -80,6 +96,17 @@ def _token_pattern(token: str) -> str:
     prefix = r"(?<!\w)" if re.match(r"^\w", token) else r"(?<!\S)"
     suffix = r"(?!\w)" if re.search(r"\w$", token) else r"(?!\S)"
     return f"{prefix}{escaped}{suffix}"
+
+
+def _is_iso_date(value: str) -> bool:
+    """Validate that value is a well-formed ISO 8601 calendar date or datetime."""
+    if not ISO_DATE_REGEX.match(value):
+        return False
+    try:
+        datetime.fromisoformat(value)
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
 def _inspect_placeholder(raw: str, inner: str) -> tuple[Placeholder | None, str | None]:
@@ -92,23 +119,28 @@ def _inspect_placeholder(raw: str, inner: str) -> tuple[Placeholder | None, str 
         return None, f"malformed placeholder '{raw}': missing ':'"
 
     kind, rest = inner.split(":", 1)
-    kind = kind.strip()
+
+    if any(c.isspace() for c in kind):
+        clean_kind = kind.strip() or "kind"
+        expected = "date:<iso>" if clean_kind == KIND_DATE else f"{clean_kind}:<id>.<field>"
+        return None, f"malformed placeholder '{raw}': expected '{expected}'"
 
     if kind not in KNOWN_PLACEHOLDER_KINDS:
         return None, f"unknown placeholder kind '{kind}' in '{raw}'"
 
     if kind == KIND_DATE:
-        iso = rest.strip()
-        if not iso or any(c.isspace() for c in rest):
+        if not rest or any(c.isspace() for c in rest) or not _is_iso_date(rest):
             return None, f"malformed placeholder '{raw}': expected 'date:<iso>'"
-        return Placeholder(kind=KIND_DATE, id=iso, field="", raw=raw), None
+        if not PLACEHOLDER_REGEX.fullmatch(raw):
+            return None, f"malformed placeholder '{raw}': expected 'date:<iso>'"
+        return Placeholder(kind=KIND_DATE, id=rest, field="", raw=raw), None
 
     if "." not in rest:
         return None, f"malformed placeholder '{raw}': expected '{kind}:<id>.<field>'"
 
     parts = rest.split(".", 1)
-    id_part = parts[0].strip()
-    field_part = parts[1].strip()
+    id_part = parts[0]
+    field_part = parts[1]
 
     if not id_part or not field_part or any(c.isspace() for c in rest):
         return None, f"malformed placeholder '{raw}': expected '{kind}:<id>.<field>'"
@@ -116,6 +148,9 @@ def _inspect_placeholder(raw: str, inner: str) -> tuple[Placeholder | None, str 
         return None, f"malformed placeholder '{raw}': multiple dots in field '{field_part}'"
     if ":" in rest:
         return None, f"malformed placeholder '{raw}': unexpected ':' in '{rest}'"
+
+    if not PLACEHOLDER_REGEX.fullmatch(raw):
+        return None, f"malformed placeholder '{raw}': expected '{kind}:<id>.<field>'"
 
     return Placeholder(kind=kind, id=id_part, field=field_part, raw=raw), None
 
@@ -166,7 +201,7 @@ def validate(prose: str, *, known_tokens: Iterable[str] | None = None) -> list[s
                 allowed_mask[idx] = True
 
     # 3. Match known tokens
-    tokens = default_known_tokens() if known_tokens is None else set(known_tokens)
+    tokens = _get_default_known_tokens() if known_tokens is None else set(known_tokens)
     for token in tokens:
         if not token:
             continue
@@ -228,6 +263,8 @@ __all__ = [
     "CANDIDATE_PLACEHOLDER_PATTERN",
     "CANDIDATE_REGEX",
     "GroundingError",
+    "ISO_DATE_PATTERN",
+    "ISO_DATE_REGEX",
     "KIND_DATE",
     "KIND_HYP",
     "KIND_SPEC",
