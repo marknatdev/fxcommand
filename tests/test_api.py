@@ -322,6 +322,7 @@ def test_settings_get_and_put(app_env):
     assert pub_updated.daily_token_cap == 250_000
     assert pub_updated.telegram_enabled is True
     assert client.app.state.budget.daily_cap == 250_000
+    assert client.app.state.scheduler.notifier is client.app.state.notifier
 
 
 def test_health_endpoint(tmp_path: Path):

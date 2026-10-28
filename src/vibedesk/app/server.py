@@ -408,6 +408,8 @@ def create_app(
         notifier = get_notifier(root=settings_root, settings=reloaded)
         app.state.budget = budget
         app.state.notifier = notifier
+        if scheduler is not None:
+            scheduler.notifier = notifier
         return PublicSettingsOut(**reloaded.public())
 
     @app.post("/api/settings")
@@ -426,6 +428,8 @@ def create_app(
         notifier = get_notifier(root=settings_root, settings=reloaded)
         app.state.budget = budget
         app.state.notifier = notifier
+        if scheduler is not None:
+            scheduler.notifier = notifier
         return s.public()
 
     # --- Health (spec §8.1, CCC-50) ---
