@@ -165,10 +165,10 @@ Wave 0 defines the shared contracts, interfaces, and stubs so Wave 1 and Wave 2 
    - `TelegramNotifier`: push-only stub calling Telegram Bot API over httpx; token stored in git-ignored `data/secrets.json` (or env `VIBEDESK_TELEGRAM_BOT_TOKEN`), never logged.
    - `get_notifier(root, settings)`: factory wiring point.
 2. **`vibedesk.desk.budget`** (spec §7.4, CCC-46):
-   - `TokenBudget`: tracks OmniRoute `usage` against a daily token cap.
+   - `TokenBudget(daily_cap, tz, now)`: tracks OmniRoute `usage` against a daily token cap. The injected `now: Callable[[], datetime]` (defaulting to UTC wall clock) must return a timezone-aware datetime and serves as the deterministic test seam.
    - States: `ok` (<80%), `warn` (>=80% and <100%), `paused` (>=100%).
-   - Daily reset: **00:00 Asia/Bangkok time (UTC+7)**, aligning with local desk operations, the 21:00 Bangkok daily digest, and the 02:00 Bangkok nightly refresh.
-   - Methods: `record_usage(usage, when)`, `state(when)`, `status(when)`, `is_paused`, `remaining`.
+   - Daily reset: **00:00 Asia/Bangkok time (UTC+7)**, aligning with local desk operations, the 21:00 Bangkok daily digest, and the 02:00 Bangkok nightly refresh. Resets only when the Bangkok calendar date moves forward.
+   - API: `record_usage(usage)`, `state()`, `status()`, `used`, `remaining`, `is_paused`, `needs_warning`, and `mark_warned()`.
 3. **`vibedesk.desk.grounding`** (spec §7.3, ADR 0005, CCC-45 — owned in full by separate CCC-45 worker):
    - Grounding Rule interface called by the Desk team:
      - `validate(prose, *, known_tokens=None) -> list[str]`: returns list of problems (empty = ok). Enforces that assistant prose may not contain any digit except inside universe symbols, timeframes (`M1`, `M15`, `H1`, `H4`, `D1`), block names, or placeholders.
