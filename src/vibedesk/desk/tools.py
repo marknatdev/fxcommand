@@ -144,10 +144,11 @@ def _compact_trial_summary(record: dict[str, Any]) -> dict[str, Any]:
     checks = record.get("checks", [])
     compact_checks = [
         {
-            "check": c.get("check"),
-            "passed": c.get("passed"),
+            "name": c.get("name"),
+            "status": c.get("status"),
             "value": c.get("value"),
             "threshold": c.get("threshold"),
+            "at_most": c.get("at_most"),
         }
         for c in checks
     ]

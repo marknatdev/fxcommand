@@ -562,3 +562,52 @@ def test_grounding_rule_renders_placeholders_and_nested_spec_params():
         content = events[0].data["content"]
         assert "Evaluated GOLD with period [20, 55] on 2024-10-24." in content
         assert f"The verdict was {verdict}" in content
+
+
+def test_grounding_rule_refuses_ambiguous_spec_param_and_retries():
+    """If a spec parameter name appears in multiple blocks (e.g. entry and filter),
+
+    lookup returns None, marking the placeholder unresolved so the model retries.
+    """
+    from vibedesk.desk.tools import DeskContext
+    from vibedesk.ledger import Ledger
+
+    with Ledger(":memory:") as ledger:
+        spec_with_duplicate_param = {
+            "name": "Donchian ATR ambiguous test",
+            "symbol": "GOLD",
+            "direction": "both",
+            "timeframe": "H1",
+            "entry": {"block": "donchian_breakout", "params": {"period": [20, 55]}},
+            "filters": [
+                {"block": "atr_regime", "params": {"period": 14, "lookback": 100}},
+            ],
+            "exit": {
+                "stop": {"block": "atr_stop", "params": {"mult": 2.0}},
+            },
+            "sizing": {"block": "fixed_risk", "params": {"risk_pct": 1.0}},
+        }
+        family_id = ledger.create_family("Ambiguous spec test")
+        hyp_id = ledger.register_hypothesis(family_id, spec_with_duplicate_param)
+        ctx = DeskContext(ledger=ledger, market=None, family_id=family_id)
+        from vibedesk.desk.tools import build_desk_tools
+
+        tools = build_desk_tools(ctx)
+
+        # Attempt 1 uses ambiguous {{spec:ID.period}} matching entry and filter (unresolved)
+        # Model receives correction prompt citing unresolved placeholder and fixes on Attempt 2
+        llm = ScriptedLLM(
+            Turn(content=f"Strategy used period {{{{spec:{hyp_id}.period}}}} on GOLD."),
+            Turn(content="The strategy evaluation completed without edge."),
+        )
+
+        events = list(desk_loop(llm, "Check results", tools=tools))
+        assert len(events) == 1
+        assert events[0].event == "message"
+        assert events[0].data["content"] == "The strategy evaluation completed without edge."
+        assert len(llm.calls) == 2
+
+        # Check that correction message warned about unresolved placeholder
+        second_call = llm.calls[1]
+        user_msgs = [m for m in second_call if m["role"] == "user"]
+        assert any("unresolved placeholder" in m["content"] for m in user_msgs)

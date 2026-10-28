@@ -368,6 +368,11 @@ def test_trial_tools_bound_content_size_for_llm_context(ledger, synthetic_market
     assert "trade_list" not in run_json
     assert "daily_r" not in run_json
     assert "summary" in run_res
+    run_checks = run_res["summary"]["checks"]
+    assert len(run_checks) > 0
+    for c in run_checks:
+        assert c["name"] is not None and len(c["name"]) > 0
+        assert c["status"] in ("pass", "fail", "n/a")
 
     get_res = tools.get("get_trial").fn(run_res["trial_id"])
     get_json = json.dumps(get_res)
@@ -375,3 +380,8 @@ def test_trial_tools_bound_content_size_for_llm_context(ledger, synthetic_market
     assert "trade_list" not in get_json
     assert "daily_r" not in get_json
     assert "summary" in get_res
+    get_checks = get_res["summary"]["checks"]
+    assert len(get_checks) > 0
+    for c in get_checks:
+        assert c["name"] is not None and len(c["name"]) > 0
+        assert c["status"] in ("pass", "fail", "n/a")

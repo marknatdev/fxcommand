@@ -299,18 +299,37 @@ def desk_loop(
         def _format_lookup_value(field: str, val: Any) -> str | None:
             if val is None:
                 return None
-            if field in ("pf", "profit_factor", "net_r", "expectancy_r", "max_drawdown_r"):
-                try:
-                    return f"{float(val):.2f}"
-                except (ValueError, TypeError):
-                    return str(val)
+            if isinstance(val, bool):
+                return str(val).lower()
             if field in ("trades", "trade_count"):
                 try:
                     return str(int(val))
                 except (ValueError, TypeError):
                     return str(val)
+            if isinstance(val, float):
+                return f"{val:.2f}"
+            if isinstance(val, int):
+                return str(val)
             if isinstance(val, dict | list):
                 return json.dumps(val)
+            if field in (
+                "pf",
+                "profit_factor",
+                "net_r",
+                "win_rate",
+                "expectancy_r",
+                "max_drawdown_r",
+            ):
+                try:
+                    return f"{float(val):.2f}"
+                except (ValueError, TypeError):
+                    return str(val)
+            try:
+                f_val = float(val)
+                if "." in str(val):
+                    return f"{f_val:.2f}"
+            except (ValueError, TypeError):
+                pass
             res = str(val)
             return None if res == "None" else res
 
@@ -374,49 +393,47 @@ def desk_loop(
                 try:
                     h = ledger.hypothesis(int(id_))
                     s = json.loads(h.spec_json)
-                    if field_name in s:
-                        return _format_lookup_value(field_name, s[field_name])
-                    if "." in field_name:
-                        curr: Any = s
-                        for part in field_name.split("."):
-                            if isinstance(curr, dict) and part in curr:
-                                curr = curr[part]
-                            elif (
-                                isinstance(curr, dict)
-                                and "params" in curr
-                                and part in curr["params"]
-                            ):
-                                curr = curr["params"][part]
-                            else:
-                                curr = None
-                                break
-                        if curr is not None:
-                            return _format_lookup_value(field_name.split(".")[-1], curr)
 
-                    def _find_param(data: Any, key: str) -> Any:
+                    matches: list[Any] = []
+                    # Top-level spec properties
+                    if field_name in s and field_name not in ("entry", "filters", "exit", "sizing"):
+                        matches.append(s[field_name])
+                    elif field_name == "combinations":
+                        try:
+                            from vibedesk.blocks.spec import (
+                                expand_grid,
+                                normalize,
+                            )
+                            from vibedesk.blocks.spec import (
+                                validate as validate_spec,
+                            )
+
+                            matches.append(len(expand_grid(validate_spec(normalize(s)))))
+                        except Exception:
+                            pass
+
+                    # Nested block parameters (collect from entry, filters, exit, sizing)
+                    def _collect_params(data: Any, key: str) -> None:
                         if isinstance(data, dict):
-                            if key in data:
-                                return data[key]
                             if (
                                 "params" in data
                                 and isinstance(data["params"], dict)
                                 and key in data["params"]
                             ):
-                                return data["params"][key]
-                            for v in data.values():
-                                found = _find_param(v, key)
-                                if found is not None:
-                                    return found
+                                matches.append(data["params"][key])
+                            for k, v in data.items():
+                                if k != "params":
+                                    _collect_params(v, key)
                         elif isinstance(data, list):
                             for item in data:
-                                found = _find_param(item, key)
-                                if found is not None:
-                                    return found
-                        return None
+                                _collect_params(item, key)
 
-                    found_val = _find_param(s, field_name)
-                    if found_val is not None:
-                        return _format_lookup_value(field_name, found_val)
+                    _collect_params(s, field_name)
+
+                    # Ambiguity rule: if a bare key matches more than one place, return None
+                    if len(matches) == 1:
+                        return _format_lookup_value(field_name, matches[0])
+                    return None
                 except Exception:
                     return None
             return None
