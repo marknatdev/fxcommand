@@ -18,7 +18,7 @@ from typing import Any
 
 from vibedesk.app.research import normalize
 from vibedesk.blocks.registry import LIBRARY
-from vibedesk.blocks.spec import SpecInvalid, expand_grid, validate
+from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.desk.loop import ToolRegistry
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.universe import SYMBOLS
@@ -164,7 +164,7 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
                 "combinations": combinations,
                 "errors": [],
             }
-        except (ValueError, SpecInvalid) as error:
+        except ValueError as error:
             return {
                 "valid": False,
                 "spec": spec,
