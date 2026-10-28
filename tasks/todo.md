@@ -512,7 +512,9 @@
   - Honest Verdict cost refusal: `run_trial` refuses with clear ValueError when no Spread Floor is measured instead of falling back to 0 spread floor and hard-coded point.
   - Compact tool returns: `run_trial` and `get_trial` return compact summaries with headline metrics and checks, bounded under 4KB, keeping full trade/daily arrays in Ledger.
   - Mid-message budget pause: turns crossing 100% with prose answers finish normally (grounding check, history updated to `_sink`) before reporting pause.
-- **Suites:** 44 desk/budget tests passed. Clean ruff check and format.
+  - Compact check keys: `_compact_trial_summary` extracts `name`, `status`, `value`, `threshold`, and `at_most` matching `Check.to_dict()`.
+  - Ambiguous spec placeholders: bare parameter names matching multiple blocks (e.g. entry and filter `period`) return None to keep placeholders unresolved and trigger grounding retries; dropped dead dotted-path branch; rounded all float lookup values consistently.
+- **Suites:** 45 desk/budget tests passed. Full suite: 1,416 passed, 1 skipped. Clean ruff check and format.
 
 ---
 
