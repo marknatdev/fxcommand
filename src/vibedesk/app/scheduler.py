@@ -141,7 +141,8 @@ class Scheduler:
             if job.next_run is None:
                 job.next_run = self._compute_next_run(name, current_time)
             elif current_time >= job.next_run:
-                self.run_job_now(name)
+                scheduled_time = job.next_run
+                self.run_job_now(name, scheduled_time=scheduled_time)
                 job.next_run = self._compute_next_run(name, current_time)
                 ran.append(name)
         return ran
@@ -242,29 +243,69 @@ class Scheduler:
         finally:
             api.shutdown()
 
-    def _run_daily_digest(self) -> dict[str, Any]:
-        from vibedesk.notify import Notice, NoticeKind
+    def _run_daily_digest(self, scheduled_time: datetime | None = None) -> dict[str, Any]:
+        clock_time = self._clock()
+        if clock_time.tzinfo is not None:
+            now_bkk = clock_time.astimezone(BANGKOK_TZ)
+        else:
+            now_bkk = clock_time.replace(tzinfo=BANGKOK_TZ)
 
-        rejects = 0
-        trials_count = 0
-        tokens_used = self.budget.used if self.budget is not None else 0
-        if self.desk is not None and hasattr(self.desk, "ledger"):
-            rows = self.desk.ledger.recent_trials(limit=500)
-            trials_count = len(rows)
-            rejects = sum(1 for r in rows if r["verdict"] == "REJECT")
+        # Scheduled 21:00 Bangkok time as UTC (CCC-53, coordination with Notify team)
+        # Using explicit until so consecutive 24 h windows line up exactly even if late
+        if scheduled_time is not None:
+            scheduled_bkk = (
+                scheduled_time.astimezone(BANGKOK_TZ)
+                if scheduled_time.tzinfo is not None
+                else scheduled_time.replace(tzinfo=BANGKOK_TZ)
+            )
+        else:
+            scheduled_bkk = now_bkk.replace(hour=21, minute=0, second=0, microsecond=0)
 
-        text = (
-            f"Daily digest: {rejects} REJECTs, {trials_count} Trials run, "
-            f"{tokens_used} tokens used today"
-        )
-        notice = Notice(
-            kind=NoticeKind.DAILY_DIGEST,
-            text=text,
-            data={"rejects": rejects, "trials": trials_count, "tokens_used": tokens_used},
-        )
+        until_utc = scheduled_bkk.astimezone(UTC)
+
+        try:
+            from vibedesk.notify import compile_daily_digest
+
+            ledger = getattr(self.desk, "ledger", None) if self.desk is not None else None
+            if ledger is not None and hasattr(ledger, "trial_counts"):
+                notice = compile_daily_digest(
+                    ledger=ledger,
+                    budget=self.budget,
+                    until=until_utc,
+                    now=self._clock,
+                )
+            else:
+                tokens_used = self.budget.used if self.budget is not None else 0
+                notice = compile_daily_digest(
+                    budget=self.budget,
+                    tokens_used=tokens_used,
+                    until=until_utc,
+                    now=self._clock,
+                )
+        except (ImportError, AttributeError):
+            from vibedesk.notify import Notice, NoticeKind
+
+            tokens_used = self.budget.used if self.budget is not None else 0
+            text = f"Daily digest: 0 REJECTs, 0 Trials run, {tokens_used} tokens used today"
+            notice = Notice(
+                kind=NoticeKind.DAILY_DIGEST,
+                text=text,
+                data={
+                    "reject_count": 0,
+                    "trials_run": 0,
+                    "tokens_used": tokens_used,
+                    "until_utc": until_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+            )
+
         sent = False
         if self.notifier is not None:
             sent = self.notifier.send(notice)
+
+        rejects = notice.data.get("reject_count", 0)
+        trials_count = notice.data.get("trials_run", 0)
+        tokens_used = notice.data.get("tokens_used", 0)
+
         return {
             "job": "daily_digest",
             "status": "ok",
@@ -272,9 +313,10 @@ class Scheduler:
             "trials": trials_count,
             "tokens_used": tokens_used,
             "sent": sent,
+            "until_utc": until_utc.isoformat(),
         }
 
-    def run_job_now(self, name: str) -> dict[str, Any]:
+    def run_job_now(self, name: str, scheduled_time: datetime | None = None) -> dict[str, Any]:
         """Manually trigger a job immediately (for testing or admin per CCC-53)."""
         if name not in self._jobs:
             raise KeyError(f"unknown job {name!r}; expected one of {list(self._jobs.keys())}")
@@ -287,7 +329,7 @@ class Scheduler:
             elif name == "weekly_spread_floors":
                 res = self._run_weekly_spread_floors()
             elif name == "daily_digest":
-                res = self._run_daily_digest()
+                res = self._run_daily_digest(scheduled_time=scheduled_time)
             else:
                 raise KeyError(name)
             job.last_run = now

@@ -22,7 +22,7 @@ from vibedesk.desk.budget import TokenBudget
 from vibedesk.market.costs import current_cost
 from vibedesk.market.fake_mt5 import FakeMt5
 from vibedesk.market.synthetic import SyntheticBarSource
-from vibedesk.notify import NoticeKind, RecordingNotifier
+from vibedesk.notify import Notice, NoticeKind, RecordingNotifier
 
 
 def make_fake_mt5(now: datetime | None = None) -> FakeMt5:
@@ -184,3 +184,70 @@ def test_run_job_now_unknown_job_raises_keyerror(tmp_path: Path):
     scheduler = Scheduler(root=tmp_path)
     with pytest.raises(KeyError, match="unknown job"):
         scheduler.run_job_now("nonexistent_job")
+
+
+def test_daily_digest_explicit_until_and_notify_path(tmp_path: Path):
+    """Daily digest calls notify's compile_daily_digest with explicit until = 21:00 Bangkok."""
+    captured_calls = []
+
+    def mock_compile_daily_digest(*, ledger=None, budget=None, until=None, now=None, **kwargs):
+        captured_calls.append({"ledger": ledger, "budget": budget, "until": until, "now": now})
+        return Notice(
+            kind=NoticeKind.DAILY_DIGEST,
+            text="Mock digest",
+            data={
+                "reject_count": 3,
+                "trials_run": 7,
+                "tokens_used": 15000,
+                "until_utc": str(until),
+            },
+        )
+
+    notifier = RecordingNotifier()
+    budget = TokenBudget(daily_cap=100_000)
+    budget.record_usage(15_000)
+    desk = Desk(tmp_path)
+
+    # Virtual clock: fires late at 21:07:30 Bangkok time
+    clock_time = datetime(2026, 10, 28, 21, 7, 30, tzinfo=BANGKOK_TZ)
+    scheduled_2100 = datetime(2026, 10, 28, 21, 0, 0, tzinfo=BANGKOK_TZ)
+    expected_until_utc = scheduled_2100.astimezone(UTC)
+
+    scheduler = Scheduler(
+        root=tmp_path,
+        desk=desk,
+        notifier=notifier,
+        budget=budget,
+        clock=lambda: clock_time,
+    )
+
+    import vibedesk.notify as vn
+
+    orig_compile = getattr(vn, "compile_daily_digest", None)
+    vn.compile_daily_digest = mock_compile_daily_digest
+    try:
+        # Tick the scheduler so daily_digest executes with scheduled_time = 21:00 Bangkok
+        job = scheduler.job("daily_digest")
+        assert job is not None
+        job.next_run = scheduled_2100
+
+        ran = scheduler.tick()
+        assert "daily_digest" in ran
+
+        # Verify notify was called with explicit scheduled 21:00 Bangkok (as UTC)
+        assert len(captured_calls) == 1
+        call = captured_calls[0]
+        assert call["until"] == expected_until_utc
+        assert call["budget"] is budget
+        assert call["now"] == scheduler._clock
+
+        # Notice delivered to notifier
+        assert len(notifier) == 1
+        assert notifier.last is not None
+        assert notifier.last.data["until_utc"] == str(expected_until_utc)
+        assert notifier.last.data["trials_run"] == 7
+    finally:
+        if orig_compile is not None:
+            vn.compile_daily_digest = orig_compile
+        elif hasattr(vn, "compile_daily_digest"):
+            delattr(vn, "compile_daily_digest")
