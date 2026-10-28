@@ -78,7 +78,15 @@ def test_normal_run_calls_tools_feeds_results_back_and_finishes_with_prose():
     ]
     # Every tool schema was sent to the LLM on every call.
     schema_names = [s["function"]["name"] for s in llm.tools_seen[0] or []]
-    assert schema_names == ["list_blocks", "draft_spec", "register_hypothesis", "run_trial"]
+    assert set(schema_names) == {
+        "list_blocks",
+        "describe_data",
+        "draft_spec",
+        "register_hypothesis",
+        "run_trial",
+        "get_trial",
+        "request_holdout",
+    }
 
     # Each tool result was fed back into the conversation before the next LLM call.
     final_call = llm.calls[-1]

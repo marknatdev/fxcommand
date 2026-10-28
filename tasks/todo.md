@@ -484,25 +484,30 @@
 ## Wave 1: Desk Team (M4)
 
 ### CCC-44: Desk tools (list_blocks, describe_data, draft_spec, register_hypothesis, run_trial, get_trial, request_holdout)
-- [ ] Implement `describe_data` for Research Window stats (coverage, Spread Floor, ATR levels).
-- [ ] Implement `register_hypothesis` to freeze Hypothesis in Ledger.
-- [ ] Implement `run_trial` executing Gauntlet and counting Trial.
-- [ ] Implement `get_trial` retrieving stored result and metrics.
-- [ ] Implement `request_holdout` checking §6.3 gate (CANDIDATE, Deflated Sharpe, trades >= 30).
-- [ ] Verification: `uv run pytest tests/test_desk_tools.py`
+- [x] Implement `describe_data` for Research Window stats (coverage, Spread Floor, ATR levels).
+- [x] Implement `register_hypothesis` to freeze Hypothesis in Ledger with anti-gaming checks.
+- [x] Implement `run_trial` executing Gauntlet, counting 1 Trial against family budget, raising BudgetExhausted when spent.
+- [x] Implement `get_trial` retrieving stored result and metrics.
+- [x] Implement `request_holdout` checking §6.3 gate (CANDIDATE, Deflated Sharpe, trades >= 30).
+- [x] Verification: `uv run pytest tests/test_desk_tools.py` (9 passed).
 
-### CCC-45: Grounding Rule (owned in full by separate CCC-45 worker)
-- [ ] Interface called by Desk team: `validate(prose, *, known_tokens=None) -> list[str]` and `render(prose, lookup) -> str` (resolving `{{trial:ID.metric}}`, `{{spec:ID.param}}`, `{{hyp:ID.field}}`, `{{date:ISO}}`).
-- [ ] Built and tested by separate CCC-45 worker in `src/vibedesk/desk/grounding.py` and `tests/test_grounding.py`.
-- [ ] Wiring into `desk/loop.py` (retry up to 2 times, then withhold explanation) stays with Desk Team in Wave 1.
-- [ ] Verification: `uv run pytest tests/test_grounding.py` (run by CCC-45 worker)
+### CCC-45: Grounding Rule (wiring into desk loop)
+- [x] Interface called by Desk team: `validate(prose, *, known_tokens=None) -> list[str]` and `render(prose, lookup) -> str` (resolving `{{trial:ID.metric}}`, `{{spec:ID.param}}`, `{{hyp:ID.field}}`, `{{date:ISO}}`).
+- [x] Built and tested by separate CCC-45 worker in `src/vibedesk/desk/grounding.py` and `tests/test_grounding.py` (PR #19).
+- [x] Wires into `desk/loop.py`: validates assistant prose, retries up to 2 times with a correction message, renders placeholders from stored data, or withholds explanation and sends verdict alone if retries fail. Re-exported in `src/vibedesk/desk/__init__.py`.
+- [x] Verification: `uv run pytest tests/test_grounding.py tests/test_desk_loop.py` (32 passed).
 
 ### CCC-46: Token budget enforcement
-- [ ] Count tokens from OmniRoute responses against daily cap.
-- [ ] Send `token_warning` notice at 80% of daily cap (once per day).
-- [ ] Pause desk loop at 100% of daily cap (permit manual Trials).
-- [ ] Daily reset at 00:00 Asia/Bangkok time.
-- [ ] Verification: `uv run pytest tests/test_budget.py`
+- [x] Count tokens from OmniRoute usage responses against daily cap.
+- [x] Send `token_warning` notice to Notifier at 80% of daily cap (once per day).
+- [x] Pause desk loop at 100% of daily cap with clear owner explanation while manual Trials remain permitted.
+- [x] Daily reset at 00:00 Asia/Bangkok time (UTC+7).
+- [x] Verification: `uv run pytest tests/test_budget.py` (9 passed).
+
+**Result (2026-10-28):**
+- **Files:** `src/vibedesk/desk/tools.py`, `src/vibedesk/desk/loop.py`, `src/vibedesk/desk/__init__.py`, `tests/test_desk_tools.py` (new), `tests/test_budget.py` (new), `tests/test_desk_loop.py`, `tests/test_contract.py`.
+- **Done-When (M4, spec §10):** A scripted Idea reaches a Verdict end to end with ScriptedLLM. All 7 desk tools operational, Grounding Rule retries and placeholder rendering active, TokenBudget daily cap and 80% warning enforced.
+- **Suites:** 1,410 passed, 1 skipped. Clean ruff check and format.
 
 ---
 

@@ -160,7 +160,7 @@ def test_desk_tools_registry_and_schemas():
     bad_spec = ds_tool.fn({"name": "incomplete"})
     assert bad_spec["valid"] is False
 
-    # Unimplemented tools raise NotImplementedError for Wave 1 Desk team
+    # Tools are registered for Wave 1 Desk team (CCC-44)
     for name in (
         "describe_data",
         "register_hypothesis",
@@ -170,13 +170,7 @@ def test_desk_tools_registry_and_schemas():
     ):
         tool = tools.get(name)
         assert tool is not None
-        with pytest.raises(NotImplementedError, match="CCC-44"):
-            if name in ("run_trial", "get_trial", "request_holdout"):
-                tool.fn(1)
-            elif name == "describe_data":
-                tool.fn("GOLD", "M15")
-            elif name == "register_hypothesis":
-                tool.fn({})
+        assert callable(tool.fn)
 
 
 # --- Auth Tests ---

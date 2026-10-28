@@ -23,9 +23,9 @@ from vibedesk.app.llm import (
     ToolCall,
     Turn,
 )
-from vibedesk.app.research import normalize, system_prompt
-from vibedesk.blocks.registry import LIBRARY
-from vibedesk.blocks.spec import expand_grid, validate
+from vibedesk.app.research import system_prompt
+from vibedesk.desk.budget import TokenBudget
+from vibedesk.desk.grounding import GroundingError, render, validate
 
 MAX_TOOL_CALLS = 12
 EVENT_TYPES = ("message", "tool_started", "trial_progress", "verdict")
@@ -136,7 +136,7 @@ class Tool:
 
 
 class ToolRegistry:
-    """Small registry of tools for the Research Desk loop (full tool set is CCC-44)."""
+    """Registry of tools for the Research Desk loop."""
 
     def __init__(
         self,
@@ -153,8 +153,8 @@ class ToolRegistry:
             for item in tools:
                 self.add(item)
 
-    def add(self, tool: Tool) -> Tool:
-        if tool.name in self._tools:
+    def add(self, tool: Tool, *, replace: bool = False) -> Tool:
+        if tool.name in self._tools and not replace:
             raise ValueError(f"tool {tool.name!r} is already registered")
         self._tools[tool.name] = tool
         return tool
@@ -166,11 +166,12 @@ class ToolRegistry:
         *,
         description: str = "",
         parameters: dict[str, Any] | None = None,
+        replace: bool = True,
     ) -> Any:
         def bind(func: Callable[..., Any]) -> Callable[..., Any]:
             doc = description or " ".join((func.__doc__ or "").strip().split())
             schema = parameters if parameters is not None else _infer_parameters(func)
-            self.add(Tool(name=name, fn=func, description=doc, parameters=schema))
+            self.add(Tool(name=name, fn=func, description=doc, parameters=schema), replace=replace)
             return func
 
         return bind(fn) if fn is not None else bind
@@ -185,26 +186,36 @@ class ToolRegistry:
         return [tool.schema() for tool in self._tools.values()]
 
 
-def starter_tools() -> ToolRegistry:
-    """Minimal default tool registry (full tool set is CCC-44)."""
-    registry = ToolRegistry()
+def starter_tools(ctx: Any = None) -> ToolRegistry:
+    """Default tool registry delegating to build_desk_tools (spec §7.2, CCC-44)."""
+    from vibedesk.desk.tools import DeskContext, build_desk_tools
 
-    @registry.register("list_blocks")
-    def list_blocks() -> dict[str, Any]:
-        """Return the Block Library."""
-        return {"blocks": [{"name": b.name, "kind": b.kind.value} for b in LIBRARY.all()]}
+    return build_desk_tools(ctx or DeskContext(ledger=None, market=None, family_id=0))
 
-    @registry.register("draft_spec")
-    def check_spec(spec: dict[str, Any]) -> dict[str, Any]:
-        """Validate a Strategy Spec and return its parameter grid size."""
-        validated = validate(normalize(spec))
-        return {
-            "valid": True,
-            "spec": validated.model_dump(mode="json"),
-            "combinations": len(expand_grid(validated)),
-        }
 
-    return registry
+def _record_and_check_budget(
+    budget: TokenBudget | None,
+    notifier: Any | None,
+    usage: Any,
+) -> bool:
+    """Record token consumption, send warning at 80%, and check if paused at 100%."""
+    if budget is None or not usage:
+        return False
+    budget.record_usage(usage)
+    if budget.needs_warning and notifier is not None:
+        from vibedesk.notify import Notice, NoticeKind
+
+        notifier.send(
+            Notice(
+                kind=NoticeKind.TOKEN_WARNING,
+                text=(
+                    f"Daily token budget has reached 80% ({budget.used}/{budget.daily_cap} tokens)."
+                ),
+                data={"used": budget.used, "cap": budget.daily_cap, "state": budget.state().value},
+            )
+        )
+        budget.mark_warned()
+    return budget.is_paused
 
 
 def desk_loop(
@@ -215,16 +226,26 @@ def desk_loop(
     history: list[dict[str, Any]] | None = None,
     system: str | None = None,
     max_tool_calls: int = MAX_TOOL_CALLS,
+    budget: TokenBudget | None = None,
+    notifier: Any | None = None,
+    lookup: Callable[[str, str, str], str | None] | None = None,
     _sink: list[dict[str, Any]] | None = None,
 ) -> Iterator[Event]:
     """Run one owner message through the Research Desk loop and yield SSE `Event`s.
 
     Repeats LLM call -> tool execution -> tool result feedback until the LLM answers in prose,
-    capped at `max_tool_calls` (12) tool calls per message. When the cap is hit, stops and
-    tells the owner plainly.
+    capped at `max_tool_calls` (12) tool calls per message.
+
+    Enforces:
+    - Grounding Rule: validates assistant prose against raw digits, retries up to 2 times
+      with correction messages, renders structured placeholders from stored data, or sends
+      the verdict alone with an explanation withheld note (spec §7.3, ADR 0005).
+    - Token Budget: counts tokens against daily cap, warns at 80% via Notifier, and pauses
+      Desk loop at 100% (spec §7.4, CCC-46).
     """
     if max_tool_calls < 1:
         raise ValueError("max_tool_calls must be at least 1")
+
     registry = (
         starter_tools()
         if tools is None
@@ -232,6 +253,33 @@ def desk_loop(
         if isinstance(tools, ToolRegistry)
         else ToolRegistry(tools)
     )
+
+    ctx = getattr(registry, "ctx", None)
+    if budget is None and ctx is not None:
+        budget = getattr(ctx, "budget", None)
+    if notifier is None and ctx is not None:
+        notifier = getattr(ctx, "notifier", None)
+
+    # Spec §7.4: at 100% of token budget, pause Desk loop explaining clearly to owner.
+    # Manual Trials remain permitted.
+    if budget is not None and budget.is_paused:
+        pause_msg = (
+            "The Research Desk is paused because the daily token budget has been reached (100%). "
+            "Manual Trials are still permitted."
+        )
+        yield Event(
+            "message",
+            {
+                "role": "assistant",
+                "content": pause_msg,
+                "text": pause_msg,
+                "tool_calls": 0,
+                "capped": False,
+                "paused": True,
+            },
+        )
+        return
+
     prompt = system_prompt() if system is None else system
     prior = copy.deepcopy(history) if history else []
     messages: list[dict[str, Any]] = [
@@ -241,25 +289,194 @@ def desk_loop(
     ]
     schemas = registry.schemas()
     calls_made = 0
+    executed_trials: dict[int, dict[str, Any]] = {}
+
+    def get_lookup() -> Callable[[str, str, str], str | None]:
+        if lookup is not None:
+            return lookup
+        ledger = getattr(ctx, "ledger", None) if ctx else None
+
+        def default_lookup(kind: str, id_: str, field_name: str) -> str | None:
+            if kind == "date":
+                return id_
+            if kind == "trial":
+                record: dict[str, Any] | None = None
+                try:
+                    tid = int(id_)
+                    if tid in executed_trials:
+                        record = dict(executed_trials[tid])
+                    elif ledger is not None:
+                        tr = ledger.trial(tid)
+                        record = json.loads(tr.result_json)
+                        record["verdict"] = tr.verdict
+                        record["closest_miss"] = tr.closest_miss
+                except Exception:
+                    return None
+                if record is None:
+                    return None
+                if field_name in record:
+                    val = record[field_name]
+                    return json.dumps(val) if isinstance(val, dict | list) else str(val)
+                wf = record.get("walk_forward", {})
+                if field_name in wf:
+                    val = wf[field_name]
+                    return json.dumps(val) if isinstance(val, dict | list) else str(val)
+                metrics = wf.get("metrics", {})
+                if field_name in metrics:
+                    val = metrics[field_name]
+                    return json.dumps(val) if isinstance(val, dict | list) else str(val)
+                if field_name in ("pf", "profit_factor"):
+                    pf_val = metrics.get("profit_factor", wf.get("profit_factor"))
+                    if pf_val is not None:
+                        return f"{float(pf_val):.2f}"
+                if field_name in ("trades", "trade_count"):
+                    tr_val = metrics.get("trades", wf.get("trades"))
+                    if tr_val is not None:
+                        return str(tr_val)
+                if field_name == "net_r":
+                    r_val = metrics.get("net_r", wf.get("net_r"))
+                    if r_val is not None:
+                        return f"{float(r_val):.2f}"
+                return None
+            if kind == "hyp":
+                if ledger is None:
+                    return None
+                try:
+                    h = ledger.hypothesis(int(id_))
+                    if field_name == "symbol":
+                        return h.symbol
+                    if field_name == "timeframe":
+                        return h.timeframe
+                    if field_name == "entry_block":
+                        return h.entry_block
+                    if field_name == "family_id":
+                        return str(h.family_id)
+                except Exception:
+                    return None
+            if kind == "spec":
+                if ledger is None:
+                    return None
+                try:
+                    h = ledger.hypothesis(int(id_))
+                    s = json.loads(h.spec_json)
+                    if field_name in s:
+                        val = s[field_name]
+                        return json.dumps(val) if isinstance(val, dict | list) else str(val)
+                except Exception:
+                    return None
+            return None
+
+        return default_lookup
 
     try:
         while calls_made < max_tool_calls:
             turn = _call_llm(llm, messages, schemas)
-            if not turn.tool_calls:
-                messages.append({"role": "assistant", "content": turn.content})
-                if _sink is not None:
-                    _sink[:] = messages[1:]
+            if _record_and_check_budget(budget, notifier, turn.usage):
+                pause_msg = (
+                    "The Research Desk is paused because the daily token budget has been "
+                    "reached (100%). Manual Trials are still permitted."
+                )
                 yield Event(
                     "message",
                     {
                         "role": "assistant",
-                        "content": turn.content,
-                        "text": turn.content,
+                        "content": pause_msg,
+                        "text": pause_msg,
                         "tool_calls": calls_made,
                         "capped": False,
+                        "paused": True,
                     },
                 )
                 return
+
+            if not turn.tool_calls:
+                # Assistant answered in prose. Enforce Grounding Rule (spec §7.3, ADR 0005).
+                grounding_retries = 0
+                active_lookup = get_lookup()
+                current_content = turn.content
+
+                while True:
+                    problems = validate(current_content)
+                    rendered_content: str | None = None
+                    if not problems:
+                        try:
+                            rendered_content = render(current_content, active_lookup)
+                        except GroundingError as g_err:
+                            problems = [str(g_err)]
+
+                    if not problems and rendered_content is not None:
+                        messages.append({"role": "assistant", "content": rendered_content})
+                        if _sink is not None:
+                            _sink[:] = messages[1:]
+                        yield Event(
+                            "message",
+                            {
+                                "role": "assistant",
+                                "content": rendered_content,
+                                "text": rendered_content,
+                                "tool_calls": calls_made,
+                                "capped": False,
+                            },
+                        )
+                        return
+
+                    # Validation or rendering failed
+                    if grounding_retries < 2:
+                        grounding_retries += 1
+                        messages.append({"role": "assistant", "content": current_content})
+                        correction_msg = (
+                            "Grounding Rule violation: Assistant prose may not contain raw figures "
+                            "or digits. Every figure must use structured placeholders "
+                            "like {{trial:ID.metric}}, {{spec:ID.param}}, {{hyp:ID.field}}, "
+                            "{{date:ISO}}, or whitelisted tokens. "
+                            f"Problems: {'; '.join(problems)}. "
+                            "Please regenerate your response following the Grounding Rule."
+                        )
+                        messages.append({"role": "user", "content": correction_msg})
+                        retry_turn = _call_llm(llm, messages, schemas)
+                        if _record_and_check_budget(budget, notifier, retry_turn.usage):
+                            pause_msg = (
+                                "The Research Desk is paused because the daily token budget has "
+                                "been reached (100%). Manual Trials are still permitted."
+                            )
+                            yield Event(
+                                "message",
+                                {
+                                    "role": "assistant",
+                                    "content": pause_msg,
+                                    "text": pause_msg,
+                                    "tool_calls": calls_made,
+                                    "capped": False,
+                                    "paused": True,
+                                },
+                            )
+                            return
+
+                        if retry_turn.tool_calls:
+                            turn = retry_turn
+                            break
+                        current_content = retry_turn.content
+                    else:
+                        # Retries exhausted: show verdict alone with explanation withheld note
+                        withheld_msg = (
+                            "The explanation was withheld because it did not adhere to the "
+                            "Grounding Rule."
+                        )
+                        messages.append({"role": "assistant", "content": withheld_msg})
+                        if _sink is not None:
+                            _sink[:] = messages[1:]
+                        yield Event(
+                            "message",
+                            {
+                                "role": "assistant",
+                                "content": withheld_msg,
+                                "text": withheld_msg,
+                                "tool_calls": calls_made,
+                                "capped": False,
+                                "grounding_withheld": True,
+                            },
+                        )
+                        return
 
             batch = turn.tool_calls[: max_tool_calls - calls_made]
             messages.append(turn.to_message(batch))
@@ -279,7 +496,14 @@ def desk_loop(
                     },
                 )
                 sub_events, content = _execute_tool(registry, call)
-                yield from sub_events
+                for sub_event in sub_events:
+                    if sub_event.event == "verdict":
+                        tid = sub_event.data.get("trial_id")
+                        if tid is not None:
+                            rec = sub_event.data.get("record", sub_event.data)
+                            executed_trials[tid] = dict(rec)
+                    yield sub_event
+
                 messages.append(
                     {
                         "role": "tool",
@@ -333,6 +557,9 @@ class DeskLoop:
         *,
         system: str | None = None,
         max_tool_calls: int = MAX_TOOL_CALLS,
+        budget: TokenBudget | None = None,
+        notifier: Any | None = None,
+        lookup: Callable[[str, str, str], str | None] | None = None,
     ) -> None:
         self.llm = llm
         self.tools = (
@@ -344,10 +571,19 @@ class DeskLoop:
         )
         self.system = system
         self.max_tool_calls = max_tool_calls
+        self.budget = budget
+        self.notifier = notifier
+        self.lookup = lookup
         self.history: list[dict[str, Any]] = []
 
     def stream(
-        self, message: str, *, history: list[dict[str, Any]] | None = None
+        self,
+        message: str,
+        *,
+        history: list[dict[str, Any]] | None = None,
+        budget: TokenBudget | None = None,
+        notifier: Any | None = None,
+        lookup: Callable[[str, str, str], str | None] | None = None,
     ) -> Iterator[Event]:
         active = self.history if history is None else history
         sink = self.history if history is None else None
@@ -358,16 +594,39 @@ class DeskLoop:
             history=active,
             system=self.system,
             max_tool_calls=self.max_tool_calls,
+            budget=budget or self.budget,
+            notifier=notifier or self.notifier,
+            lookup=lookup or self.lookup,
             _sink=sink,
         )
 
     chat = stream
 
-    def sse(self, message: str, *, history: list[dict[str, Any]] | None = None) -> Iterator[str]:
-        return sse_stream(self.stream(message, history=history))
+    def sse(
+        self,
+        message: str,
+        *,
+        history: list[dict[str, Any]] | None = None,
+        budget: TokenBudget | None = None,
+        notifier: Any | None = None,
+        lookup: Callable[[str, str, str], str | None] | None = None,
+    ) -> Iterator[str]:
+        return sse_stream(
+            self.stream(message, history=history, budget=budget, notifier=notifier, lookup=lookup)
+        )
 
-    def run(self, message: str, *, history: list[dict[str, Any]] | None = None) -> list[Event]:
-        return list(self.stream(message, history=history))
+    def run(
+        self,
+        message: str,
+        *,
+        history: list[dict[str, Any]] | None = None,
+        budget: TokenBudget | None = None,
+        notifier: Any | None = None,
+        lookup: Callable[[str, str, str], str | None] | None = None,
+    ) -> list[Event]:
+        return list(
+            self.stream(message, history=history, budget=budget, notifier=notifier, lookup=lookup)
+        )
 
 
 def _call_llm(llm: Any, messages: list[dict[str, Any]], schemas: list[dict[str, Any]]) -> Turn:
