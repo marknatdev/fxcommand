@@ -36,6 +36,7 @@ from vibedesk.app.api_spec import (
     TrialSummaryOut,
 )
 from vibedesk.app.auth import OWNER_COOKIE_NAME, OWNER_COOKIE_VALUE
+from vibedesk.app.chats import Chats
 from vibedesk.app.desk import Desk
 from vibedesk.app.research import EXAMPLE
 from vibedesk.app.server import create_app
@@ -352,3 +353,50 @@ def test_all_15_endpoints_in_table_covered():
         "/api/health",
     }
     assert expected.issubset(paths)
+
+
+def test_chat_stream_starter_and_desk_tools_wiring(app_env):
+    client, data_dir, _, _ = app_env
+    desk = Desk(data_dir)
+    fam_id = desk.ledger.create_family("Wiring Test Family")
+
+    # 1. POST /api/chat with empty message -> 400
+    res_400 = client.post("/api/chat", json={"message": "   "})
+    assert res_400.status_code == 400
+
+    # 2. POST /api/chat with unknown family_id -> 404
+    res_404 = client.post("/api/chat", json={"message": "breakout", "family_id": 9999})
+    assert res_404.status_code == 404
+
+    # 3. POST /api/chat without family_id -> 200 (uses starter_tools)
+    res_starter = client.post("/api/chat", json={"message": "what blocks exist?"})
+    assert res_starter.status_code == 200
+    assert "text/event-stream" in res_starter.headers["content-type"]
+    assert "event: message" in res_starter.text
+
+    # 4. POST /api/chat with valid family_id -> 200 (builds DeskContext and desk tools)
+    res_fam = client.post("/api/chat", json={"message": "breakout idea", "family_id": fam_id})
+    assert res_fam.status_code == 200
+    assert "text/event-stream" in res_fam.headers["content-type"]
+    assert "event: message" in res_fam.text
+
+    # 5. POST /api/chat with chat_id resolving family_id from prior trial
+    hyp_id = desk.ledger.register_hypothesis(fam_id, EXAMPLE)
+    res_trial = client.post(f"/api/hypotheses/{hyp_id}/trials", json={"idea": "Run 1"})
+    trial_id = res_trial.json()["trial_id"]
+    chats = Chats(data_dir / "chats.db")
+    chat_id = chats.create("Chat with trial")
+    chats.append(
+        chat_id,
+        {"role": "user", "text": "start"},
+        {"role": "trial", "trial_id": trial_id, "text": "done"},
+    )
+    res_chat_id = client.post("/api/chat", json={"message": "continue", "chat_id": chat_id})
+    assert res_chat_id.status_code == 200
+    assert "text/event-stream" in res_chat_id.headers["content-type"]
+
+    # 6. Shared TokenBudget updates on PUT /api/settings
+    client.cookies.set(OWNER_COOKIE_NAME, OWNER_COOKIE_VALUE)
+    res_put = client.put("/api/settings", json={"daily_token_cap": 300_000})
+    assert res_put.status_code == 200
+    assert client.app.state.budget.daily_cap == 300_000

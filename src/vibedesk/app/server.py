@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import threading
 import webbrowser
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -43,7 +45,7 @@ from vibedesk.app.scheduler import Scheduler
 from vibedesk.blocks.registry import LIBRARY
 from vibedesk.blocks.spec import SpecInvalid
 from vibedesk.desk.budget import TokenBudget
-from vibedesk.desk.loop import ToolRegistry, desk_loop, sse_stream
+from vibedesk.desk.loop import ToolRegistry, desk_loop, sse_stream, starter_tools
 from vibedesk.desk.tools import DeskContext, build_desk_tools
 from vibedesk.gauntlet.trial import HoldoutRefused
 from vibedesk.ledger.store import BudgetExhausted, HoldoutSpent, NotFound
@@ -57,6 +59,7 @@ PORT = 8765
 class DraftIn(BaseModel):
     message: str
     chat_id: int | None = None  # None starts a new chat
+    family_id: int | None = None
 
 
 class TrialIn(BaseModel):
@@ -115,6 +118,24 @@ def create_app(
             return llm
         s = state["settings"]
         return OmniRoute(s.llm_url, s.llm_key, s.llm_model)
+
+    def _run_desk_loop(llm_client: Llm, message: str, chat_tools: Any) -> Any:
+        kwargs: dict[str, Any] = {}
+        try:
+            sig = inspect.signature(desk_loop)
+            has_budget = "budget" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
+            if has_budget and budget is not None:
+                kwargs["budget"] = budget
+            has_notifier = "notifier" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
+            if has_notifier and notifier is not None:
+                kwargs["notifier"] = notifier
+        except (ValueError, TypeError):
+            pass
+        return desk_loop(llm_client, message, tools=chat_tools, **kwargs)
 
     # --- UI Page (Sets owner cookie on 127.0.0.1:8765 per spec §8.1) ---
 
@@ -197,7 +218,7 @@ def create_app(
             )
             chat_tools = build_desk_tools(ctx)
 
-        events = desk_loop(current_llm(), body.message, tools=chat_tools)
+        events = _run_desk_loop(current_llm(), body.message, chat_tools)
         return StreamingResponse(sse_stream(events), media_type="text/event-stream")
 
     # --- Trials (spec §8.1, CCC-50, CCC-55) ---
@@ -376,6 +397,8 @@ def create_app(
         config.save(s, settings_root)
         reloaded = config.load(settings_root)
         state["settings"] = reloaded
+        if budget is not None:
+            budget.daily_cap = reloaded.daily_token_cap
         return PublicSettingsOut(**reloaded.public())
 
     @app.post("/api/settings")
@@ -386,6 +409,10 @@ def create_app(
             if value is not None:
                 setattr(s, name, value.strip())
         config.save(s, settings_root)
+        reloaded = config.load(settings_root)
+        state["settings"] = reloaded
+        if budget is not None:
+            budget.daily_cap = reloaded.daily_token_cap
         return s.public()
 
     # --- Health (spec §8.1, CCC-50) ---
@@ -460,7 +487,42 @@ def create_app(
     def chat_stream(body: DraftIn):
         if not body.message.strip():
             raise HTTPException(400, "say what the idea is")
-        events = desk_loop(current_llm(), body.message, tools=tools)
+        chat_tools = tools
+        if chat_tools is None:
+            family_id = body.family_id
+            if family_id is None and body.chat_id is not None:
+                try:
+                    chat_data = chats.get(body.chat_id)
+                    for msg in chat_data.get("messages", []):
+                        if "trial_id" in msg:
+                            try:
+                                trial_row = desk.ledger.trial(msg["trial_id"])
+                                hyp = desk.ledger.hypothesis(trial_row.hypothesis_id)
+                                family_id = hyp.family_id
+                                break
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+            if family_id is not None:
+                try:
+                    desk.ledger.family(family_id)
+                except NotFound as err:
+                    raise HTTPException(404, f"family {family_id} not found") from err
+                ctx = DeskContext(
+                    ledger=desk.ledger,
+                    market=desk.market,
+                    family_id=family_id,
+                    budget=budget,
+                    notifier=notifier,
+                    root=root,
+                )
+                chat_tools = build_desk_tools(ctx)
+            else:
+                chat_tools = starter_tools()
+
+        events = _run_desk_loop(current_llm(), body.message, chat_tools)
         return StreamingResponse(sse_stream(events), media_type="text/event-stream")
 
     @app.post("/api/draft")
