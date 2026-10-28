@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import numpy as np
 import pytest
 
 from vibedesk.app.settings import Settings, save_secrets
+from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.desk.budget import TokenBudget
+from vibedesk.engine.costs import CostSnapshot
 from vibedesk.ledger.store import Ledger
+from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.notify import (
+    BANGKOK_TZ,
     NoOpNotifier,
     Notice,
     NoticeKind,
@@ -144,20 +151,155 @@ def test_compile_daily_digest_explicit_counts():
     assert notice.data["tokens_used"] == 12000
 
 
-def test_compile_daily_digest_with_budget_and_ledger(tmp_path: Path):
+def test_compile_daily_digest_window_derives_date():
+    # Injected now at 21:00 Bangkok on 2026-10-28
+    fixed_now = datetime(2026, 10, 28, 21, 0, 0, tzinfo=BANGKOK_TZ)
+    notice = compile_daily_digest(
+        reject_count=3,
+        trials_run=5,
+        tokens_used=10000,
+        now=fixed_now,
+    )
+    assert notice.data["date"] == "2026-10-28"
+    assert notice.data["until_utc"] == fixed_now.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    since_exp = (fixed_now - timedelta(hours=24)).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert notice.data["since_utc"] == since_exp
+
+
+def test_compile_daily_digest_with_budget_and_mock_ledger():
     budget = TokenBudget(daily_cap=100000)
     budget.record_usage(42000)
 
+    # Caller passes counts directly along with budget
+    notice = compile_daily_digest(budget=budget, reject_count=10, trials_run=12, date="2026-10-28")
+    assert notice.data["tokens_used"] == 42000
+    assert notice.data["trials_run"] == 12
+    assert notice.data["reject_count"] == 10
+
+    # If ledger implements public trial_counts, it is used
+    class MockLedger:
+        def trial_counts(
+            self, since_utc: str | None = None, until_utc: str | None = None
+        ) -> tuple[int, int]:
+            return (8, 6)
+
+    notice_mock = compile_daily_digest(budget=budget, ledger=MockLedger(), date="2026-10-28")
+    assert notice_mock.data["trials_run"] == 8
+    assert notice_mock.data["reject_count"] == 6
+    assert notice_mock.data["tokens_used"] == 42000
+
+    # If an invalid ledger is passed without trial_counts, it raises AttributeError
+    class InvalidLedger:
+        pass
+
+    with pytest.raises(AttributeError, match="Ledger does not implement public method"):
+        compile_daily_digest(ledger=InvalidLedger())
+
+    # If trial_counts raises, the error propagates and is not silenced
+    class FailingLedger:
+        def trial_counts(
+            self, since_utc: str | None = None, until_utc: str | None = None
+        ) -> tuple[int, int]:
+            raise RuntimeError("Database connection dropped")
+
+    with pytest.raises(RuntimeError, match="Database connection dropped"):
+        compile_daily_digest(ledger=FailingLedger())
+
+
+def test_compile_daily_digest_with_real_ledger(tmp_path: Path):
     ledger_path = tmp_path / "desk.db"
-    ledger = Ledger(ledger_path)
+    with Ledger(ledger_path) as ledger:
+        family = ledger.create_family("Trend following on gold")
+        spec = {
+            "name": "donchian_breakout",
+            "symbol": "GOLD",
+            "timeframe": "M15",
+            "direction": "both",
+            "entry": {"block": "donchian_breakout", "params": {"period": 20}},
+            "exit": {
+                "stop": {"block": "atr_stop", "params": {"period": 14, "mult": 2.0}},
+                "target": {"block": "r_target", "params": {"r": 2.0}},
+            },
+            "sizing": {"block": "fixed_risk", "params": {}},
+        }
+        hyp = ledger.register_hypothesis(family, spec)
 
-    # Compile digest with empty ledger
-    notice_empty = compile_daily_digest(budget=budget, ledger=ledger, date="2026-10-28")
-    assert notice_empty.data["tokens_used"] == 42000
-    assert notice_empty.data["trials_run"] == 0
-    assert notice_empty.data["reject_count"] == 0
+        time_arr = 1_420_070_400 + 900 * np.arange(8)
+        close = 1200.0 + np.arange(8)
+        bars = Bars(
+            "GOLD",
+            Timeframe.M15,
+            0.01,
+            2,
+            time_arr,
+            close,
+            close + 1,
+            close - 1,
+            close,
+            np.full(8, 30),
+        )
+        cost = CostSnapshot(
+            0.01, 55, 1, swap_long_points=-83.83, swap_short_points=20.64, as_of="2026-10-21"
+        )
+        miss = {"check": "profit_factor", "value": 0.95, "threshold": 1.2}
+        grid = expand_grid(validate(spec))
 
-    ledger.close()
+        # Record Trial 1: CANDIDATE
+        ledger.record_trial(
+            hyp,
+            combinations=[(grid[0], 1.2)],
+            verdict="CANDIDATE",
+            closest_miss=None,
+            cost=cost,
+            bars=bars,
+            rules_version=1,
+            result_json='{"folds": [], "checks": []}',
+        )
+
+        # Record Trial 2: REJECT
+        ledger.record_trial(
+            hyp,
+            combinations=[(grid[0], 0.8)],
+            verdict="REJECT",
+            closest_miss=miss,
+            cost=cost,
+            bars=bars,
+            rules_version=1,
+            result_json='{"folds": [], "checks": []}',
+        )
+
+        # Record Trial 3: REJECT
+        ledger.record_trial(
+            hyp,
+            combinations=[(grid[0], 0.7)],
+            verdict="REJECT",
+            closest_miss=miss,
+            cost=cost,
+            bars=bars,
+            rules_version=1,
+            result_json='{"folds": [], "checks": []}',
+        )
+
+        budget = TokenBudget(daily_cap=100000)
+        budget.record_usage(35000)
+
+        # Digest evaluated at the current time: includes all 3 recorded trials
+        now_current = datetime.now(UTC)
+        notice = compile_daily_digest(ledger=ledger, budget=budget, now=now_current)
+        assert notice.data["trials_run"] == 3
+        assert notice.data["reject_count"] == 2
+        assert notice.data["tokens_used"] == 35000
+        assert "Trials run: 3" in notice.text
+        assert "REJECT count: 2" in notice.text
+        assert "Tokens used: 35000" in notice.text
+
+        # Digest evaluated 26 hours in the future: window is [now + 2h, now + 26h]
+        # The 3 trials recorded at `now_current` fall before the window, so they are excluded
+        future_now = now_current + timedelta(hours=26)
+        notice_future = compile_daily_digest(ledger=ledger, budget=budget, now=future_now)
+        assert notice_future.data["trials_run"] == 0
+        assert notice_future.data["reject_count"] == 0
+        assert notice_future.data["tokens_used"] == 35000
 
 
 # --- TelegramNotifier Push Delivery & Security Tests ---
@@ -323,6 +465,10 @@ def test_get_notifier_selection(tmp_path: Path):
 # --- scripts/setup-telegram.ps1 Tests ---
 
 
+ps_exe = shutil.which("pwsh") or shutil.which("powershell")
+
+
+@pytest.mark.skipif(ps_exe is None, reason="No PowerShell executable found")
 def test_setup_telegram_powershell_script(tmp_path: Path):
     script_path = Path(__file__).resolve().parents[1] / "scripts" / "setup-telegram.ps1"
     assert script_path.exists()
@@ -331,7 +477,7 @@ def test_setup_telegram_powershell_script(tmp_path: Path):
     chat_id = "11223344"
 
     cmd = [
-        "pwsh",
+        ps_exe,
         "-NoProfile",
         "-NonInteractive",
         "-File",

@@ -16,8 +16,9 @@ Settings Precedence Notes:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
@@ -27,6 +28,10 @@ import httpx
 
 logger = logging.getLogger("vibedesk.notify")
 BANGKOK_TZ = ZoneInfo("Asia/Bangkok")
+
+# Suppress httpx request logging at INFO level, as its log lines contain full URLs
+# with the Telegram bot token.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class NoticeKind(StrEnum):
@@ -96,19 +101,16 @@ def format_notice(notice: Notice) -> str:
     text = notice.text.strip() if notice.text else ""
 
     prefix_map = {
-        NoticeKind.CANDIDATE: "[CANDIDATE]",
-        NoticeKind.PASS: "[PASS]",
-        NoticeKind.HOLDOUT_FAIL: "[HOLDOUT FAIL]",
-        NoticeKind.HOLDOUT_REQUEST: "[HOLDOUT REQUEST]",
-        NoticeKind.TOKEN_WARNING: "[TOKEN BUDGET WARNING]",
-        NoticeKind.DAILY_DIGEST: "[DAILY DIGEST]",
+        "candidate": "[CANDIDATE]",
+        "pass": "[PASS]",
+        "holdout_fail": "[HOLDOUT FAIL]",
+        "holdout_request": "[HOLDOUT REQUEST]",
+        "token_warning": "[TOKEN BUDGET WARNING]",
+        "daily_digest": "[DAILY DIGEST]",
     }
 
-    prefix = prefix_map.get(
-        NoticeKind(kind) if kind in NoticeKind._value2member_map_ else kind  # type: ignore[arg-type]
-    )
-    if prefix is None:
-        prefix = f"[{str(kind).upper()}]"
+    kind_val = kind.value if isinstance(kind, NoticeKind) else str(kind).lower()
+    prefix = prefix_map.get(kind_val, f"[{str(kind).upper()}]")
 
     # If text already starts with the prefix or bracketed kind, don't duplicate
     if text.upper().startswith(prefix.upper()):
@@ -144,35 +146,82 @@ def compile_daily_digest(
     trials_run: int = 0,
     tokens_used: int = 0,
     date: str | None = None,
+    since: str | datetime | None = None,
+    until: str | datetime | None = None,
+    now: Callable[[], datetime] | datetime | None = None,
     ledger: Any = None,
     budget: Any = None,
 ) -> Notice:
-    """Compile a DAILY_DIGEST notice from explicit counts or ledger/budget objects."""
-    now_bkk = datetime.now(BANGKOK_TZ)
+    """Compile a DAILY_DIGEST notice (spec §8.4).
+
+    Windowing:
+    - By default, uses a 24-hour rolling window ending at `now` (or current Bangkok time),
+      ensuring trials recorded in the 21:00-24:00 period on day N are counted in the next
+      digest at 21:00 on day N+1.
+    - `since` and `until` can be explicitly provided as datetimes or UTC ISO strings.
+    - The date label is derived from the window's `until` timestamp (in Bangkok time)
+      unless explicitly overridden via `date`.
+
+    Data sources:
+    - `ledger`: if provided, queries `ledger.trial_counts(since_utc, until_utc)`.
+      Real query failures raise directly rather than reporting misleading zeros.
+    - `budget`: if provided, reads `budget.used`. Note: tokens_used reflects the TokenBudget
+      consumption, which resets daily at 00:00 Asia/Bangkok.
+    - `reject_count`, `trials_run`, `tokens_used`: if ledger/budget are omitted, uses these
+      explicit counts.
+    """
+    if callable(now):
+        current_now = now()
+    elif isinstance(now, datetime):
+        current_now = now
+    else:
+        current_now = datetime.now(BANGKOK_TZ)
+
+    if current_now.tzinfo is None:
+        current_now = current_now.replace(tzinfo=BANGKOK_TZ)
+
+    # Resolve `until`
+    if until is None:
+        until_dt = current_now
+    elif isinstance(until, datetime):
+        until_dt = until if until.tzinfo is not None else until.replace(tzinfo=BANGKOK_TZ)
+    else:
+        until_dt = datetime.fromisoformat(until)
+        if until_dt.tzinfo is None:
+            until_dt = until_dt.replace(tzinfo=BANGKOK_TZ)
+
+    # Resolve `since`
+    if since is None:
+        since_dt = until_dt - timedelta(hours=24)
+    elif isinstance(since, datetime):
+        since_dt = since if since.tzinfo is not None else since.replace(tzinfo=BANGKOK_TZ)
+    else:
+        since_dt = datetime.fromisoformat(since)
+        if since_dt.tzinfo is None:
+            since_dt = since_dt.replace(tzinfo=BANGKOK_TZ)
+
+    since_utc = since_dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    until_utc = until_dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     if date is None:
-        date = now_bkk.strftime("%Y-%m-%d")
+        date = until_dt.astimezone(BANGKOK_TZ).strftime("%Y-%m-%d")
 
-    if budget is not None and hasattr(budget, "used"):
-        tokens_used = getattr(budget, "used", tokens_used)
-
-    if ledger is not None and hasattr(ledger, "_db") and hasattr(ledger, "_lock"):
-        try:
-            start_bkk = datetime(
-                now_bkk.year, now_bkk.month, now_bkk.day, 0, 0, 0, tzinfo=BANGKOK_TZ
+    if budget is not None:
+        if hasattr(budget, "used"):
+            tokens_used = budget.used
+        else:
+            raise AttributeError(
+                "Budget does not implement 'used'; caller must pass tokens_used directly."
             )
-            start_utc = start_bkk.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            with ledger._lock:
-                row = ledger._db.execute(
-                    "SELECT COUNT(*), "
-                    "COALESCE(SUM(CASE WHEN verdict = 'REJECT' THEN 1 ELSE 0 END), 0) "
-                    "FROM trials WHERE created_at >= ?",
-                    (start_utc,),
-                ).fetchone()
-                if row:
-                    trials_run = int(row[0])
-                    reject_count = int(row[1])
-        except Exception as exc:
-            logger.warning("Could not query ledger for daily digest counts: %s", exc)
+
+    if ledger is not None:
+        if hasattr(ledger, "trial_counts"):
+            trials_run, reject_count = ledger.trial_counts(since_utc=since_utc, until_utc=until_utc)
+        else:
+            raise AttributeError(
+                "Ledger does not implement public method 'trial_counts'; "
+                "caller must pass reject_count and trials_run directly."
+            )
 
     text = format_daily_digest(
         reject_count=reject_count,
@@ -188,6 +237,8 @@ def compile_daily_digest(
             "trials_run": trials_run,
             "tokens_used": tokens_used,
             "date": date,
+            "since_utc": since_utc,
+            "until_utc": until_utc,
         },
     )
 

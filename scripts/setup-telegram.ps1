@@ -34,7 +34,10 @@ Write-Host "token warnings, and the 21:00 Bangkok daily digest."
 Write-Host ""
 
 if ([string]::IsNullOrWhiteSpace($BotToken)) {
-    $BotToken = Read-Host -Prompt "Enter your Telegram Bot Token (from @BotFather)"
+    $secToken = Read-Host -Prompt "Enter your Telegram Bot Token (from @BotFather)" -AsSecureString
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secToken)
+    $BotToken = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
 }
 
 if ([string]::IsNullOrWhiteSpace($ChatId)) {
