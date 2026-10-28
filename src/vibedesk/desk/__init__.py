@@ -1,5 +1,12 @@
-"""The Research Desk (spec §7): tool-calling loop, SSE event stream, and ScriptedLLM seam."""
+"""The Research Desk (spec §7): loop, SSE event stream, tools, and budget."""
 
+from vibedesk.desk.budget import (
+    BANGKOK_TZ,
+    PAUSE_THRESHOLD,
+    WARN_THRESHOLD,
+    BudgetState,
+    TokenBudget,
+)
 from vibedesk.desk.loop import (
     EVENT_TYPES,
     MAX_TOOL_CALLS,
@@ -18,22 +25,47 @@ from vibedesk.desk.loop import (
     sse_stream,
     starter_tools,
 )
+from vibedesk.desk.tools import (
+    DESCRIBE_DATA_SCHEMA,
+    DRAFT_SPEC_SCHEMA,
+    GET_TRIAL_SCHEMA,
+    LIST_BLOCKS_SCHEMA,
+    REGISTER_HYPOTHESIS_SCHEMA,
+    REQUEST_HOLDOUT_SCHEMA,
+    RUN_TRIAL_SCHEMA,
+    DeskContext,
+    build_desk_tools,
+)
 
 __all__ = [
+    "BANGKOK_TZ",
+    "DESCRIBE_DATA_SCHEMA",
+    "DRAFT_SPEC_SCHEMA",
+    "DeskContext",
     "DeskLoop",
     "EVENT_TYPES",
     "Event",
+    "GET_TRIAL_SCHEMA",
+    "LIST_BLOCKS_SCHEMA",
     "MAX_TOOL_CALLS",
     "OmniRoute",
     "OmniRouteLLM",
+    "PAUSE_THRESHOLD",
+    "REGISTER_HYPOTHESIS_SCHEMA",
+    "REQUEST_HOLDOUT_SCHEMA",
+    "RUN_TRIAL_SCHEMA",
     "ScriptedLLM",
     "ScriptedLlm",
     "Tool",
     "ToolCall",
     "ToolRegistry",
     "Turn",
+    "WARN_THRESHOLD",
+    "build_desk_tools",
     "desk_loop",
     "parse_sse",
     "sse_stream",
     "starter_tools",
+    "BudgetState",
+    "TokenBudget",
 ]
