@@ -509,21 +509,27 @@
 ## Wave 1: API Team (M5 Backend)
 
 ### CCC-50: HTTP API with owner-only actions
-- [ ] Implement 15 endpoints in `ENDPOINT_TABLE`.
-- [ ] Enforce `require_owner` on `approve_holdout`, `extend_budget`, `PUT /api/settings` (HTTP 403 on missing cookie).
-- [ ] Wire `POST /api/families/{id}/chat` to SSE stream running `desk_loop` with `build_desk_tools`.
-- [ ] Verification: `uv run pytest tests/test_api.py`
+- [x] Implement 15 endpoints in `ENDPOINT_TABLE`.
+- [x] Enforce `require_owner` on `approve_holdout`, `extend_budget`, `PUT /api/settings` (HTTP 403 on missing cookie).
+- [x] Wire `POST /api/families/{id}/chat` to SSE stream running `desk_loop` with `build_desk_tools`.
+- [x] Verification: `uv run pytest tests/test_api.py`
 
 ### CCC-53: Scheduler
-- [ ] Background thread for nightly refresh (02:00 Bangkok), weekly floors (Sunday 00:00 Bangkok), daily digest (21:00 Bangkok).
-- [ ] Manual trigger `run_job_now(name)`.
-- [ ] Verification: `uv run pytest tests/test_scheduler.py`
+- [x] Background thread for nightly refresh (02:00 Bangkok), weekly floors (Sunday 00:00 Bangkok), daily digest (21:00 Bangkok).
+- [x] Manual trigger `run_job_now(name)`.
+- [x] Verification: `uv run pytest tests/test_scheduler.py`
 
 ### CCC-55: Holdout and Trial carry-forwards
-- [ ] Reusable Holdout grant until spend is recorded.
-- [ ] Bind Holdout Request to Trial ID.
-- [ ] Per-family trial lock to freeze N during execution.
-- [ ] Verification: `uv run pytest tests/test_carry_forwards.py`
+- [x] Reusable Holdout grant until spend is recorded.
+- [x] Bind Holdout Request to Trial ID.
+- [x] Per-family trial lock to freeze N during execution.
+- [x] Verification: `uv run pytest tests/test_carry_forwards.py`
+
+**Result (Wave 1 API Team, branch ao/role-wave-1-2/root):**
+- **CCC-50:** Implemented 15 endpoints per spec §8.1 and contract `ENDPOINT_TABLE` in `src/vibedesk/app/server.py`. Protected owner actions (`POST /api/holdout-requests/{id}/approve`, `POST /api/families/{id}/budget`, `PUT /api/settings`) with `require_owner` yielding HTTP 403 on missing/invalid cookie. Added `SameSite=Strict` cookie issuance on `GET /`. Wired SSE chat stream `POST /api/families/{id}/chat` with `desk_loop` and `build_desk_tools(desk, family_id, ...)`. Maintained full backward compatibility for legacy simple-app endpoints (`POST /api/draft`, `POST /api/trial`, etc.).
+- **CCC-53:** Implemented `Scheduler` in `src/vibedesk/app/scheduler.py` with daemon thread, job scheduling with Bangkok timezone (`Asia/Bangkok`), manual invocation `run_job_now(name)` for `nightly_refresh`, `weekly_spread_floors`, and `daily_digest`, supporting injected clocks and MT5 API instances.
+- **CCC-55:** Verified reusable `HoldoutGrant` across multiple bar fetches until spend recorded in ledger. Bound Holdout Requests to Trial IDs in `desk.py`. Added per-family trial execution locks (`family_lock`) in `desk.py` serializing runs and freezing $N$ deflation inputs during trial execution.
+- **Verification:** All tests passed (`tests/test_api.py`, `tests/test_scheduler.py`, `tests/test_carry_forwards.py`, `tests/test_contract.py`, `tests/test_app.py`). Ruff clean and formatted.
 
 ---
 

@@ -9,8 +9,10 @@ Jobs:
 from __future__ import annotations
 
 import logging
+import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -39,11 +41,21 @@ class Scheduler:
         root: Path,
         desk: Any = None,
         notifier: Any | None = None,
+        budget: Any | None = None,
+        clock: Callable[[], datetime] | None = None,
+        api: Any | None = None,
+        symbols: Sequence[str] | None = None,
     ) -> None:
         self.root = Path(root)
         self.desk = desk
         self.notifier = notifier
+        self.budget = budget
+        self._clock = clock or (lambda: datetime.now(BANGKOK_TZ))
+        self._api = api
+        self.symbols = tuple(symbols) if symbols is not None else None
         self._running = False
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
         self._jobs = {
             "nightly_refresh": JobInfo(
                 name="nightly_refresh",
@@ -62,14 +74,47 @@ class Scheduler:
             ),
         }
 
+    def _compute_next_run(self, name: str, now: datetime) -> datetime:
+        """Compute the next scheduled run time in Asia/Bangkok."""
+        current = now if now.tzinfo is not None else now.replace(tzinfo=BANGKOK_TZ)
+        current = current.astimezone(BANGKOK_TZ)
+
+        if name == "nightly_refresh":
+            target = current.replace(hour=2, minute=0, second=0, microsecond=0)
+            return target if current < target else target + timedelta(days=1)
+        elif name == "daily_digest":
+            target = current.replace(hour=21, minute=0, second=0, microsecond=0)
+            return target if current < target else target + timedelta(days=1)
+        elif name == "weekly_spread_floors":
+            # Sunday is weekday 6
+            days_ahead = (6 - current.weekday()) % 7
+            target = (current + timedelta(days=days_ahead)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            return target if current < target else target + timedelta(days=7)
+        raise KeyError(f"unknown job {name!r}")
+
     def start(self) -> None:
-        """Start the background scheduler thread/loop. Implemented in CCC-53."""
+        """Start the background scheduler thread/loop (spec §4, CCC-53)."""
+        if self._running:
+            return
         self._running = True
+        self._stop_event.clear()
+        now = self._clock()
+        for name, job in self._jobs.items():
+            if job.next_run is None:
+                job.next_run = self._compute_next_run(name, now)
+        self._thread = threading.Thread(target=self._worker, daemon=True, name="vibedesk-scheduler")
+        self._thread.start()
         logger.info("Scheduler started with %d jobs", len(self._jobs))
 
     def stop(self) -> None:
         """Stop the background scheduler."""
         self._running = False
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self._thread = None
         logger.info("Scheduler stopped")
 
     @property
@@ -83,11 +128,175 @@ class Scheduler:
     def job(self, name: str) -> JobInfo | None:
         return self._jobs.get(name)
 
+    def tick(self, now: datetime | None = None) -> list[str]:
+        """Check scheduled jobs and execute any whose time has arrived (CCC-53)."""
+        current_time = now or self._clock()
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=BANGKOK_TZ)
+        else:
+            current_time = current_time.astimezone(BANGKOK_TZ)
+
+        ran: list[str] = []
+        for name, job in self._jobs.items():
+            if job.next_run is None:
+                job.next_run = self._compute_next_run(name, current_time)
+            elif current_time >= job.next_run:
+                self.run_job_now(name)
+                job.next_run = self._compute_next_run(name, current_time)
+                ran.append(name)
+        return ran
+
+    def _worker(self) -> None:
+        while not self._stop_event.wait(timeout=1.0):
+            if not self._running:
+                break
+            try:
+                self.tick()
+            except Exception as e:
+                logger.error("Error in scheduler tick: %s", e)
+
+    def _run_nightly_refresh(self) -> dict[str, Any]:
+        from vibedesk.market.cache import CacheError, read_meta
+        from vibedesk.market.importer import import_history, refresh
+        from vibedesk.market.universe import SYMBOLS
+
+        api = self._api
+        if api is None:
+            try:
+                from vibedesk.market.mt5_api import real_api
+
+                api = real_api()
+            except Exception as e:
+                return {
+                    "job": "nightly_refresh",
+                    "status": "error",
+                    "error": f"MT5 api unavailable: {e}",
+                }
+
+        imported = 0
+        target_symbols = self.symbols or SYMBOLS
+        try:
+            for symbol in target_symbols:
+                try:
+                    known = read_meta(self.root, symbol).last_import is not None
+                except CacheError:
+                    known = False
+                run = refresh if known else import_history
+                run(api, self.root, symbols=(symbol,))
+                imported += 1
+            return {"job": "nightly_refresh", "status": "ok", "symbols": imported}
+        except Exception as e:
+            return {
+                "job": "nightly_refresh",
+                "status": "error",
+                "error": str(e),
+                "symbols": imported,
+            }
+
+    def _run_weekly_spread_floors(self) -> dict[str, Any]:
+        from vibedesk.market.costs import measure_cost, record_cost
+        from vibedesk.market.universe import SYMBOLS
+
+        api = self._api
+        if api is None:
+            try:
+                from vibedesk.market.mt5_api import real_api
+
+                api = real_api()
+            except Exception as e:
+                return {
+                    "job": "weekly_spread_floors",
+                    "status": "error",
+                    "error": f"MT5 api unavailable: {e}",
+                }
+
+        clock_time = self._clock()
+        if clock_time.tzinfo is not None:
+            now = clock_time.astimezone(UTC)
+        else:
+            now = clock_time.replace(tzinfo=BANGKOK_TZ).astimezone(UTC)
+
+        measured = 0
+        target_symbols = self.symbols or SYMBOLS
+        if not api.initialize():
+            err = api.last_error() if hasattr(api, "last_error") else "initialize failed"
+            return {
+                "job": "weekly_spread_floors",
+                "status": "error",
+                "error": f"MT5 initialize failed: {err}",
+            }
+        try:
+            for symbol in target_symbols:
+                api.symbol_select(symbol, True)
+                cost = measure_cost(api, symbol, now)
+                record_cost(self.root, cost)
+                measured += 1
+            return {"job": "weekly_spread_floors", "status": "ok", "symbols": measured}
+        except Exception as e:
+            return {
+                "job": "weekly_spread_floors",
+                "status": "error",
+                "error": str(e),
+                "symbols": measured,
+            }
+        finally:
+            api.shutdown()
+
+    def _run_daily_digest(self) -> dict[str, Any]:
+        from vibedesk.notify import Notice, NoticeKind
+
+        rejects = 0
+        trials_count = 0
+        tokens_used = self.budget.used if self.budget is not None else 0
+        if self.desk is not None and hasattr(self.desk, "ledger"):
+            rows = self.desk.ledger.recent_trials(limit=500)
+            trials_count = len(rows)
+            rejects = sum(1 for r in rows if r["verdict"] == "REJECT")
+
+        text = (
+            f"Daily digest: {rejects} REJECTs, {trials_count} Trials run, "
+            f"{tokens_used} tokens used today"
+        )
+        notice = Notice(
+            kind=NoticeKind.DAILY_DIGEST,
+            text=text,
+            data={"rejects": rejects, "trials": trials_count, "tokens_used": tokens_used},
+        )
+        sent = False
+        if self.notifier is not None:
+            sent = self.notifier.send(notice)
+        return {
+            "job": "daily_digest",
+            "status": "ok",
+            "rejects": rejects,
+            "trials": trials_count,
+            "tokens_used": tokens_used,
+            "sent": sent,
+        }
+
     def run_job_now(self, name: str) -> dict[str, Any]:
-        """Manually trigger a job immediately (for testing or admin). Implemented in CCC-53."""
+        """Manually trigger a job immediately (for testing or admin per CCC-53)."""
         if name not in self._jobs:
             raise KeyError(f"unknown job {name!r}; expected one of {list(self._jobs.keys())}")
-        raise NotImplementedError(f"run_job_now for {name!r} will be implemented in CCC-53")
+        job = self._jobs[name]
+        job.status = "running"
+        now = self._clock()
+        try:
+            if name == "nightly_refresh":
+                res = self._run_nightly_refresh()
+            elif name == "weekly_spread_floors":
+                res = self._run_weekly_spread_floors()
+            elif name == "daily_digest":
+                res = self._run_daily_digest()
+            else:
+                raise KeyError(name)
+            job.last_run = now
+            job.status = "idle" if res.get("status") == "ok" else "error"
+            return res
+        except Exception as e:
+            job.last_run = now
+            job.status = "error"
+            return {"job": name, "status": "error", "error": str(e)}
 
 
 __all__ = [

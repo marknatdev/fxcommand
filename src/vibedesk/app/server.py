@@ -5,20 +5,50 @@ from __future__ import annotations
 import argparse
 import threading
 import webbrowser
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from vibedesk.app import settings as config
+from vibedesk.app.api_spec import (
+    BlockLibraryOut,
+    BlockOut,
+    BudgetGrantIn,
+    BudgetGrantOut,
+    ChatIn,
+    CreateFamilyIn,
+    FamilyDetailOut,
+    FamilySummaryOut,
+    HealthOut,
+    HoldoutApproveOut,
+    HoldoutRequestIn,
+    HoldoutRequestOut,
+    HypothesisDetailOut,
+    LedgerStatsOut,
+    PublicSettingsOut,
+    RunTrialIn,
+    TrialSummaryOut,
+    UpdateSettingsIn,
+)
+from vibedesk.app.auth import require_owner, set_owner_cookie
 from vibedesk.app.chats import ChatNotFound, Chats, ai_history, result_message
 from vibedesk.app.desk import Desk
 from vibedesk.app.llm import Llm, LlmError, OmniRoute
 from vibedesk.app.research import DraftFailed, draft_spec
+from vibedesk.app.scheduler import Scheduler
+from vibedesk.blocks.registry import LIBRARY
 from vibedesk.blocks.spec import SpecInvalid
+from vibedesk.desk.budget import TokenBudget
 from vibedesk.desk.loop import ToolRegistry, desk_loop, sse_stream
+from vibedesk.desk.tools import DeskContext, build_desk_tools
+from vibedesk.gauntlet.trial import HoldoutRefused
+from vibedesk.ledger.store import BudgetExhausted, HoldoutSpent, NotFound
 from vibedesk.market.costs import CostError
+from vibedesk.notify import Notice, NoticeKind, Notifier, get_notifier
 
 STATIC = Path(__file__).parent / "static"
 PORT = 8765
@@ -41,17 +71,44 @@ class SettingsIn(BaseModel):
     llm_model: str | None = None
 
 
-def create_app(root: Path = config.DATA, llm: Llm | None = None, db: Path | None = None,
-               settings_root: Path | None = None,
-               tools: ToolRegistry | None = None) -> FastAPI:  # fmt: skip
+def create_app(
+    root: Path = config.DATA,
+    llm: Llm | None = None,
+    db: Path | None = None,
+    settings_root: Path | None = None,
+    tools: ToolRegistry | None = None,
+    budget: TokenBudget | None = None,
+    notifier: Notifier | None = None,
+    scheduler: Scheduler | None = None,
+) -> FastAPI:
     """The app over the bar cache at `root`. Tests pass a fake `llm`, and may keep the Ledger
     (`db`) and settings (`settings_root`) apart from the real ones."""
-    app = FastAPI(title="Vibe Desk")
+    settings_root = settings_root or root
     desk = Desk(root, db)
     chats = Chats((Path(db).parent if db else Path(root)) / "chats.db")
     restore_old_trials(desk, chats)
-    settings_root = settings_root or root
     state = {"settings": config.load(settings_root)}
+
+    # Budget & Notifier initialization
+    budget = budget or TokenBudget(daily_cap=state["settings"].daily_token_cap)
+    notifier = notifier or get_notifier(root=settings_root, settings=state["settings"])
+    scheduler = scheduler or Scheduler(root=root, desk=desk, notifier=notifier, budget=budget)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if scheduler is not None:
+            scheduler.start()
+        try:
+            yield
+        finally:
+            if scheduler is not None:
+                scheduler.stop()
+
+    app = FastAPI(title="Vibe Desk", lifespan=lifespan)
+    app.state.desk = desk
+    app.state.budget = budget
+    app.state.notifier = notifier
+    app.state.scheduler = scheduler
 
     def current_llm() -> Llm:
         if llm is not None:
@@ -59,14 +116,23 @@ def create_app(root: Path = config.DATA, llm: Llm | None = None, db: Path | None
         s = state["settings"]
         return OmniRoute(s.llm_url, s.llm_key, s.llm_model)
 
+    # --- UI Page (Sets owner cookie on 127.0.0.1:8765 per spec §8.1) ---
+
     @app.get("/")
     def index():
-        return FileResponse(STATIC / "index.html")
+        res = FileResponse(STATIC / "index.html")
+        set_owner_cookie(res)
+        return res
+
+    # --- Status & OmniRoute Models (Simple App) ---
 
     @app.get("/api/status")
     def status():
-        return {"data": desk.data_status(), "update": desk.update.state(),
-                "settings": state["settings"].public()}  # fmt: skip
+        return {
+            "data": desk.data_status(),
+            "update": desk.update.state(),
+            "settings": state["settings"].public(),
+        }
 
     @app.get("/api/models")
     def models():
@@ -78,14 +144,301 @@ def create_app(root: Path = config.DATA, llm: Llm | None = None, db: Path | None
         except LlmError as error:
             return {"models": [], "error": str(error)}
 
+    # --- Families & Hypotheses (spec §8.1, CCC-50) ---
+
+    @app.get("/api/families", response_model=list[FamilySummaryOut])
+    def list_families():
+        return [FamilySummaryOut(**f) for f in desk.list_families()]
+
+    @app.post("/api/families", response_model=FamilyDetailOut)
+    def create_family(body: CreateFamilyIn):
+        if not body.idea.strip():
+            raise HTTPException(400, "an Idea needs some text")
+        try:
+            family_id = desk.ledger.create_family(body.idea.strip())
+            return FamilyDetailOut(**desk.get_family(family_id))
+        except Exception as err:
+            raise HTTPException(400, str(err)) from err
+
+    @app.get("/api/families/{family_id}", response_model=FamilyDetailOut)
+    def get_family(family_id: int):
+        try:
+            return FamilyDetailOut(**desk.get_family(family_id))
+        except (NotFound, Exception) as err:
+            raise HTTPException(404, f"family {family_id} not found") from err
+
+    @app.get("/api/hypotheses/{hypothesis_id}", response_model=HypothesisDetailOut)
+    def get_hypothesis(hypothesis_id: int):
+        try:
+            return HypothesisDetailOut(**desk.get_hypothesis(hypothesis_id))
+        except (NotFound, Exception) as err:
+            raise HTTPException(404, f"hypothesis {hypothesis_id} not found") from err
+
+    # --- Chat: Desk Loop SSE Event Stream (spec §8.1, CCC-50) ---
+
+    @app.post("/api/families/{family_id}/chat")
+    def family_chat(family_id: int, body: ChatIn):
+        if not body.message.strip():
+            raise HTTPException(400, "message cannot be empty")
+        try:
+            desk.ledger.family(family_id)
+        except NotFound as err:
+            raise HTTPException(404, f"family {family_id} not found") from err
+
+        chat_tools = tools
+        if chat_tools is None:
+            ctx = DeskContext(
+                ledger=desk.ledger,
+                market=desk.market,
+                family_id=family_id,
+                budget=budget,
+                notifier=notifier,
+                root=root,
+            )
+            chat_tools = build_desk_tools(ctx)
+
+        events = desk_loop(current_llm(), body.message, tools=chat_tools)
+        return StreamingResponse(sse_stream(events), media_type="text/event-stream")
+
+    # --- Trials (spec §8.1, CCC-50, CCC-55) ---
+
+    @app.post("/api/hypotheses/{hypothesis_id}/trials", response_model=TrialSummaryOut)
+    def run_hypothesis_trial(hypothesis_id: int, body: RunTrialIn):
+        try:
+            desk.ledger.hypothesis(hypothesis_id)
+        except NotFound as err:
+            raise HTTPException(404, f"hypothesis {hypothesis_id} not found") from err
+
+        try:
+            res = desk.run_hypothesis(hypothesis_id, idea=body.idea)
+            if res.get("verdict") == "CANDIDATE" and notifier:
+                notifier.send(
+                    Notice(
+                        kind=NoticeKind.CANDIDATE,
+                        text=f"Trial #{res['trial_id']} reached CANDIDATE verdict",
+                        data={"trial_id": res["trial_id"], "hypothesis_id": hypothesis_id},
+                    )
+                )
+            return TrialSummaryOut(**res)
+        except BudgetExhausted as err:
+            raise HTTPException(409, str(err)) from err
+        except (CostError, ValueError) as err:
+            raise HTTPException(400, str(err)) from err
+        except Exception as err:
+            raise HTTPException(500, str(err)) from err
+
+    @app.get("/api/trials/{trial_id}", response_model=TrialSummaryOut)
+    def one_trial(trial_id: int):
+        try:
+            return TrialSummaryOut(**desk.get_trial_detail(trial_id))
+        except (NotFound, Exception) as error:
+            raise HTTPException(404, str(error)) from error
+
+    # --- Blocks & Ledger (spec §8.1, CCC-50) ---
+
+    @app.get("/api/blocks", response_model=BlockLibraryOut)
+    def get_blocks():
+        blocks = [
+            BlockOut(
+                name=b.name,
+                kind=b.kind.value,
+                description=b.__doc__ or "",
+                parameters=getattr(b, "parameters", {}),
+            )
+            for b in LIBRARY.all()
+        ]
+        return BlockLibraryOut(blocks=blocks)
+
+    @app.get("/api/ledger", response_model=LedgerStatsOut)
+    def get_ledger():
+        return LedgerStatsOut(**desk.ledger_stats())
+
+    # --- Holdout (spec §8.1, CCC-50, CCC-55) ---
+
+    @app.post(
+        "/api/hypotheses/{hypothesis_id}/holdout-requests",
+        response_model=HoldoutRequestOut,
+    )
+    def request_holdout_endpoint(hypothesis_id: int, body: HoldoutRequestIn):
+        try:
+            hyp = desk.ledger.hypothesis(hypothesis_id)
+        except NotFound as err:
+            raise HTTPException(404, str(err)) from err
+
+        try:
+            req_id = desk.request_holdout(hypothesis_id)
+            req = desk.ledger.holdout_request(req_id)
+            if notifier:
+                notifier.send(
+                    Notice(
+                        kind=NoticeKind.HOLDOUT_REQUEST,
+                        text=(
+                            f"Holdout requested for Hypothesis #{hypothesis_id} "
+                            "awaiting owner approval"
+                        ),
+                        data={
+                            "hypothesis_id": hypothesis_id,
+                            "request_id": req_id,
+                            "family_id": hyp.family_id,
+                        },
+                    )
+                )
+            return HoldoutRequestOut(
+                request_id=req_id,
+                hypothesis_id=hypothesis_id,
+                family_id=hyp.family_id,
+                status="pending",
+                refusal_reason=None,
+                created_at=req.created_at,
+            )
+        except HoldoutRefused as err:
+            return HoldoutRequestOut(
+                request_id=0,
+                hypothesis_id=hypothesis_id,
+                family_id=hyp.family_id,
+                status="refused",
+                refusal_reason=str(err),
+                created_at=datetime.now(UTC).isoformat(),
+            )
+        except HoldoutSpent as err:
+            return HoldoutRequestOut(
+                request_id=0,
+                hypothesis_id=hypothesis_id,
+                family_id=hyp.family_id,
+                status="spent",
+                refusal_reason=str(err),
+                created_at=datetime.now(UTC).isoformat(),
+            )
+
+    @app.post(
+        "/api/holdout-requests/{request_id}/approve",
+        dependencies=[Depends(require_owner)],
+        response_model=HoldoutApproveOut,
+    )
+    def approve_holdout_endpoint(request_id: int):
+        try:
+            desk.ledger.holdout_request(request_id)
+        except (NotFound, Exception) as err:
+            raise HTTPException(404, f"Holdout request {request_id} not found") from err
+        try:
+            grant = desk.approve_holdout(request_id)
+            return HoldoutApproveOut(
+                request_id=grant.request_id,
+                approved=True,
+                grant_token=grant.token,
+                family_id=grant.family_id,
+            )
+        except Exception as err:
+            raise HTTPException(400, str(err)) from err
+
+    # --- Budget (spec §8.1, CCC-50: Owner-only) ---
+
+    @app.post(
+        "/api/families/{family_id}/budget",
+        dependencies=[Depends(require_owner)],
+        response_model=BudgetGrantOut,
+    )
+    def extend_budget_endpoint(family_id: int, body: BudgetGrantIn):
+        try:
+            desk.ledger.family(family_id)
+        except NotFound as err:
+            raise HTTPException(404, f"Family {family_id} not found") from err
+        try:
+            new_budget = desk.extend_budget(family_id, amount=body.amount)
+            return BudgetGrantOut(
+                family_id=family_id,
+                new_budget=new_budget,
+                added=body.amount,
+            )
+        except Exception as err:
+            raise HTTPException(400, str(err)) from err
+
+    # --- Settings: GET & PUT (spec §8.1, CCC-50: PUT is owner-only) ---
+
+    @app.get("/api/settings", response_model=PublicSettingsOut)
+    def get_public_settings():
+        return PublicSettingsOut(**state["settings"].public())
+
+    @app.put(
+        "/api/settings",
+        dependencies=[Depends(require_owner)],
+        response_model=PublicSettingsOut,
+    )
+    def update_settings(body: UpdateSettingsIn):
+        s = state["settings"]
+        for name, value in body.model_dump(exclude_unset=True).items():
+            if value is not None:
+                if isinstance(value, str):
+                    if value.strip():
+                        setattr(s, name, value.strip())
+                elif isinstance(value, bool | int):
+                    setattr(s, name, value)
+        config.save(s, settings_root)
+        reloaded = config.load(settings_root)
+        state["settings"] = reloaded
+        return PublicSettingsOut(**reloaded.public())
+
     @app.post("/api/settings")
     def save_settings(body: SettingsIn):
+        """Legacy simple-app settings update."""
         s = state["settings"]
         for name, value in body.model_dump().items():
             if value is not None:
                 setattr(s, name, value.strip())
         config.save(s, settings_root)
         return s.public()
+
+    # --- Health (spec §8.1, CCC-50) ---
+
+    @app.get("/api/health", response_model=HealthOut)
+    def health():
+        mt5_ok = False
+        try:
+            if scheduler and scheduler._api:
+                mt5_ok = scheduler._api.initialize()
+                if mt5_ok:
+                    scheduler._api.shutdown()
+            else:
+                from vibedesk.market.mt5_api import real_api
+
+                api = real_api()
+                mt5_ok = api.initialize()
+                if mt5_ok:
+                    api.shutdown()
+        except Exception:
+            mt5_ok = False
+
+        client = current_llm()
+        omni_ok = False
+        if not isinstance(client, OmniRoute):
+            omni_ok = True
+        else:
+            try:
+                if client.url:
+                    omni_ok = bool(client.models())
+            except Exception:
+                omni_ok = False
+
+        last_refresh = None
+        statuses = desk.data_status()
+        import_dates = [s["last_import"] for s in statuses if s.get("last_import")]
+        if import_dates:
+            last_refresh = max(import_dates)
+
+        b_state = budget.state().value if budget else "ok"
+        tokens_used = budget.used if budget else 0
+        active_jobs = sum(1 for j in scheduler.jobs() if j.status == "running") if scheduler else 0
+
+        return HealthOut(
+            mt5_connected=mt5_ok,
+            omniroute_connected=omni_ok,
+            last_refresh=last_refresh,
+            token_budget_state=b_state,
+            tokens_used_today=tokens_used,
+            active_jobs=active_jobs,
+        )
+
+    # --- Simple App Endpoints (Kept working per spec and instructions) ---
 
     @app.get("/api/chats")
     def list_chats():
@@ -125,11 +478,20 @@ def create_app(root: Path = config.DATA, llm: Llm | None = None, db: Path | None
         except DraftFailed as error:
             chats.append(chat_id, user, {"role": "error", "text": str(error)})
             return JSONResponse({"detail": str(error), "chat_id": chat_id}, status_code=502)
-        answer = {"role": "assistant", "text": result.explanation, "spec": result.spec,
-                  "combinations": result.combinations}  # fmt: skip
+        answer = {
+            "role": "assistant",
+            "text": result.explanation,
+            "spec": result.spec,
+            "combinations": result.combinations,
+        }
         chats.append(chat_id, user, answer)
-        return {"chat_id": chat_id, "spec": result.spec, "explanation": result.explanation,
-                "combinations": result.combinations, "attempts": result.attempts}  # fmt: skip
+        return {
+            "chat_id": chat_id,
+            "spec": result.spec,
+            "explanation": result.explanation,
+            "combinations": result.combinations,
+            "attempts": result.attempts,
+        }
 
     @app.post("/api/trial")
     def trial(body: TrialIn):
@@ -154,13 +516,6 @@ def create_app(root: Path = config.DATA, llm: Llm | None = None, db: Path | None
     def trials():
         return desk.history()
 
-    @app.get("/api/trials/{trial_id}")
-    def one_trial(trial_id: int):
-        try:
-            return desk.trial(trial_id)
-        except Exception as error:
-            raise HTTPException(404, str(error)) from error
-
     @app.post("/api/data/update")
     def update_data():
         return {"started": desk.update.start(), **desk.update.state()}
@@ -180,10 +535,14 @@ def restore_old_trials(desk: Desk, chats: Chats) -> None:
         chats.append(
             chat_id,
             {"role": "user", "text": row["idea"] or row["name"]},
-            {"role": "assistant", "text": "Restored from a test run before chats were saved.",
-             "spec": summary["spec"], "combinations": summary["combinations"]},
+            {
+                "role": "assistant",
+                "text": "Restored from a test run before chats were saved.",
+                "spec": summary["spec"],
+                "combinations": summary["combinations"],
+            },
             result_message(summary),
-        )  # fmt: skip
+        )
 
 
 def main() -> None:

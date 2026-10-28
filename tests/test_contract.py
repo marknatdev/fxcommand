@@ -226,9 +226,6 @@ def test_scheduler_jobs_and_lifecycle(tmp_path: Path):
     with pytest.raises(KeyError):
         scheduler.run_job_now("nonexistent_job")
 
-    with pytest.raises(NotImplementedError, match="CCC-53"):
-        scheduler.run_job_now("nightly_refresh")
-
 
 # --- API Spec & MCP Tool Map Tests ---
 
