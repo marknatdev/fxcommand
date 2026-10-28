@@ -16,7 +16,7 @@ The owner wants fast answers about ideas, not more process. On 2026-10-23 they d
 | Real data | All 8 symbols imported from the owner's XM terminal, read-only, through 2026-10-22; spreads and swaps measured. |
 | AI (OmniRoute) | Configured by the owner (key, tailnet URL, model `agy/gemini-4-argon-high`); `/api/models` answers. **A real draft has not succeeded yet**: OmniRoute answers 503 `resource_pressure` because the shared server is out of memory (section 9). |
 | Test engine (Gauntlet, Ledger) | Done (milestones M1 to M3), about 1,240 tests green. |
-| Telegram alerts, MCP server, live trading | Not built. A live EA idea is parked on the board (CCC-82). |
+| Telegram alerts, MCP server, live trading | Not built. A live EA idea is parked in kanban.md (CCC-82). |
 
 First real results: a GOLD H1 Donchian breakout was "No edge" (1,184 blind trades, profit factor 0.80, 7 of 8 years losing); an EURUSD H4 RSI bounce never traded (too few trades to pick settings).
 
@@ -106,7 +106,7 @@ Refresh with the app's "Update data" button or `uv run desk refresh` then `uv ru
 - Everything else from the old rule set (Holdout lock, every look is a Trial, rules versioning with fingerprint pins, served bars never change, XM clock checks) still runs and its tests stay green, but it no longer gates new work. Don't extend it unless the owner asks. If a change alters trades on purpose, bump `RULES_VERSION` in `src/vibedesk/rules.py` and re-pin `tests/test_rules_version.py` (`uv run python tests/test_rules_version.py` prints the new pins).
 - Commit as you go without asking; messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` (or your own agent's line). Push only when the owner asks. Record plans and results in `tasks/todo.md`.
 - GitHub: `origin` is https://github.com/marknatdev/fxcommand, branch `main`, **public**. This project replaced an older, unrelated fxcommand there on 2026-10-24 (owner's choice, no backup branch; the old project's `feature/*` branches are still on GitHub). Local `master` tracks `origin/main`. Never commit `data/` or `.env` (both ignored); the public files already name the server's address and tailnet host, by the owner's choice.
-- The owner's Ubuntu server (`ubuntu@54.254.218.196`, key `D:\millmaker\ssh-key.pem`, tailnet `ip-172-26-4-45`) is shared with other projects (Hermes agents, Open WebUI, aipass, the Vibe Kanban backend, OmniRoute). Read-only checks only unless the owner asks for a change.
+- The owner's Ubuntu server (`ubuntu@54.254.218.196`, key `D:\millmaker\ssh-key.pem`, tailnet `ip-172-26-4-45`) is shared with other projects (Hermes agents, Open WebUI, aipass, OmniRoute). Read-only checks only unless the owner asks for a change.
 
 ## 9. Known issues and open items, most important first
 
@@ -118,15 +118,9 @@ Refresh with the app's "Update data" button or `uv run desk refresh` then `uv ru
 6. ADR 0005 (the AI's prose has no digits) is not enforced by the simple app.
 7. Not built: a Holdout button, Telegram alerts and an MCP server (milestone M6), a Playwright end-to-end suite (M7), the live/demo Forward Arena (Layer B). A live EA with hard caps is parked as CCC-82; Claude Code's auto-mode safety check blocked work on it, so the owner must allow it before anyone builds it.
 
-## 10. The Vibe Kanban board (owner's rule)
+## 10. The Vibe Kanban board (sunset)
 
-Whenever a task, decision or issue starts, finishes or changes, update the board in the same turn.
-- Vibe Kanban runs on the owner's laptop (`vibe-kanban.exe`, web UI on 127.0.0.1, port changes) with its data on the server. Project "Fxcommand", id `0f530a08-1bad-4dbd-ad53-b2452e8c7e07`. Statuses: Backlog, To do, In progress, In review, Done, Cancelled.
-- Use the `vibe_kanban` MCP. If it isn't connected, run it over stdio: `npx -y vibe-kanban@latest --mcp` and speak JSON-RPC (`initialize`, `notifications/initialized`, `tools/call` with `list_issues`, `create_issue`, `update_issue`, …). `update_issue` replaces the whole description; `create_issue` takes no status, so set it with `update_issue` after.
-- Titles: `Roadmap · Layer A · M5 …` (epics), `M5 · …` (tasks, as sub-issues of their epic), `Issue · …`, `Decision · …`, `Chore · …`, `Bug · …`, `Layer B · …`.
-- Don't call the board's API with the token the local app hands out (`/api/auth/token`); Claude Code's safety check blocked that as credential exploration.
-
-Recent cards: CCC-83 the simple app (In review), CCC-87 the redesign (In review), CCC-88 saved chats (Done), CCC-82 live EA (parked, Backlog), plus the XM clock issue and the OmniRoute-key chore (To do).
+The Vibe Kanban board was sunset by the owner on 2026-10-28. Do not use the `vibe_kanban` MCP or the local Vibe Kanban app (`vibe-kanban.exe`). Work is tracked in `tasks/` (source of truth) and `kanban.md` (the snapshot task list; card IDs like CCC-85 stay as labels).
 
 ## 11. Traps on this machine
 

@@ -1,6 +1,6 @@
 # Vibe Desk task board
 
-Every card on the Vibe Kanban board (project "Fxcommand"), done or not, exported on 2026-10-24 and updated 2026-10-25 with the changes below. The board is the live copy; this file is a snapshot. The live board (Vibe Kanban) was unreachable on 2026-10-25, so these changes are not yet on the board. `[x]` is done, `[ ]` is not; the status is in italics.
+The project's task list now that the Vibe Kanban board was sunset on 2026-10-28; it began as an export of that board (2026-10-24, updated 2026-10-25). `[x]` is done, `[ ]` is not; the status is in italics.
 
 | Status | Cards |
 |---|---|
