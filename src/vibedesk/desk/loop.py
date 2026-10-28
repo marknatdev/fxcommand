@@ -296,6 +296,24 @@ def desk_loop(
             return lookup
         ledger = getattr(ctx, "ledger", None) if ctx else None
 
+        def _format_lookup_value(field: str, val: Any) -> str | None:
+            if val is None:
+                return None
+            if field in ("pf", "profit_factor", "net_r", "expectancy_r", "max_drawdown_r"):
+                try:
+                    return f"{float(val):.2f}"
+                except (ValueError, TypeError):
+                    return str(val)
+            if field in ("trades", "trade_count"):
+                try:
+                    return str(int(val))
+                except (ValueError, TypeError):
+                    return str(val)
+            if isinstance(val, dict | list):
+                return json.dumps(val)
+            res = str(val)
+            return None if res == "None" else res
+
         def default_lookup(kind: str, id_: str, field_name: str) -> str | None:
             if kind == "date":
                 return id_
@@ -317,35 +335,23 @@ def desk_loop(
                     return None
                 if record is None:
                     return None
-                if field_name in record:
-                    val = record[field_name]
-                    return json.dumps(val) if isinstance(val, dict | list) else str(val)
                 summary = record.get("summary", {})
-                if field_name in summary:
-                    val = summary[field_name]
-                    return json.dumps(val) if isinstance(val, dict | list) else str(val)
                 wf = record.get("walk_forward", {})
-                if field_name in wf:
-                    val = wf[field_name]
-                    return json.dumps(val) if isinstance(val, dict | list) else str(val)
                 metrics = wf.get("metrics", {})
-                if field_name in metrics:
-                    val = metrics[field_name]
-                    return json.dumps(val) if isinstance(val, dict | list) else str(val)
+                for source in (record, summary, wf, metrics):
+                    if field_name in source:
+                        return _format_lookup_value(field_name, source[field_name])
                 if field_name in ("pf", "profit_factor"):
                     pf_val = summary.get(
                         "profit_factor", metrics.get("profit_factor", wf.get("profit_factor"))
                     )
-                    if pf_val is not None:
-                        return f"{float(pf_val):.2f}"
+                    return _format_lookup_value(field_name, pf_val)
                 if field_name in ("trades", "trade_count"):
                     tr_val = summary.get("trades", metrics.get("trades", wf.get("trades")))
-                    if tr_val is not None:
-                        return str(tr_val)
+                    return _format_lookup_value(field_name, tr_val)
                 if field_name == "net_r":
                     r_val = summary.get("net_r", metrics.get("net_r", wf.get("net_r")))
-                    if r_val is not None:
-                        return f"{float(r_val):.2f}"
+                    return _format_lookup_value(field_name, r_val)
                 return None
             if kind == "hyp":
                 if ledger is None:
@@ -369,8 +375,48 @@ def desk_loop(
                     h = ledger.hypothesis(int(id_))
                     s = json.loads(h.spec_json)
                     if field_name in s:
-                        val = s[field_name]
-                        return json.dumps(val) if isinstance(val, dict | list) else str(val)
+                        return _format_lookup_value(field_name, s[field_name])
+                    if "." in field_name:
+                        curr: Any = s
+                        for part in field_name.split("."):
+                            if isinstance(curr, dict) and part in curr:
+                                curr = curr[part]
+                            elif (
+                                isinstance(curr, dict)
+                                and "params" in curr
+                                and part in curr["params"]
+                            ):
+                                curr = curr["params"][part]
+                            else:
+                                curr = None
+                                break
+                        if curr is not None:
+                            return _format_lookup_value(field_name.split(".")[-1], curr)
+
+                    def _find_param(data: Any, key: str) -> Any:
+                        if isinstance(data, dict):
+                            if key in data:
+                                return data[key]
+                            if (
+                                "params" in data
+                                and isinstance(data["params"], dict)
+                                and key in data["params"]
+                            ):
+                                return data["params"][key]
+                            for v in data.values():
+                                found = _find_param(v, key)
+                                if found is not None:
+                                    return found
+                        elif isinstance(data, list):
+                            for item in data:
+                                found = _find_param(item, key)
+                                if found is not None:
+                                    return found
+                        return None
+
+                    found_val = _find_param(s, field_name)
+                    if found_val is not None:
+                        return _format_lookup_value(field_name, found_val)
                 except Exception:
                     return None
             return None

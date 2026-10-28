@@ -472,3 +472,93 @@ def test_starter_tools_exposes_only_context_free_tools_without_context():
         "list_blocks",
         "draft_spec",
     ]
+
+
+# --- Grounding Rule wiring tests (spec §7.3, ADR 0005) ---
+
+
+def test_grounding_rule_retries_and_recovers_when_model_fixes_prose():
+    # Attempt 1 contains raw digits ("profit factor was 1.55")
+    # Model receives correction prompt and fixes on Attempt 2
+    llm = ScriptedLLM(
+        Turn(content="The profit factor was 1.55 on the blind years."),
+        Turn(content="The strategy was rejected due to lack of edge."),
+    )
+
+    events = list(desk_loop(llm, "Check results"))
+    assert len(events) == 1
+    assert events[0].event == "message"
+    assert events[0].data["content"] == "The strategy was rejected due to lack of edge."
+    assert len(llm.calls) == 2
+
+    # Check that correction message was sent to LLM
+    second_call = llm.calls[1]
+    user_msgs = [m for m in second_call if m["role"] == "user"]
+    assert any("Grounding Rule violation" in m["content"] for m in user_msgs)
+
+
+def test_grounding_rule_withholds_explanation_after_two_failed_retries():
+    # Model fails 3 times in a row (initial + 2 retries)
+    llm = ScriptedLLM(
+        Turn(content="Profit factor was 1.5."),
+        Turn(content="Win rate was 60%."),
+        Turn(content="Net return was 250 points."),
+    )
+
+    events = list(desk_loop(llm, "Check results"))
+    assert len(events) == 1
+    assert events[0].event == "message"
+    assert events[0].data["grounding_withheld"] is True
+    assert "explanation was withheld" in events[0].data["content"].lower()
+    assert len(llm.calls) == 3
+
+
+def test_grounding_rule_renders_placeholders_and_nested_spec_params():
+    from datetime import date
+
+    from vibedesk.desk.tools import DeskContext, build_desk_tools
+    from vibedesk.engine.costs import CostSnapshot
+    from vibedesk.ledger import Ledger
+    from vibedesk.market.data import MarketData
+    from vibedesk.market.synthetic import PLANTED_EDGE_RANGE, SyntheticBarSource, SyntheticConfig
+
+    with Ledger(":memory:") as ledger:
+        market = MarketData(
+            SyntheticBarSource(
+                1, date(2020, 1, 1), PLANTED_EDGE_RANGE[1], config=SyntheticConfig()
+            ),
+            ledger,
+        )
+        cost = CostSnapshot(point=0.01, spread_floor_points=10.0, slippage_points=1.0)
+        family_id = ledger.create_family("Placeholder test")
+        ctx = DeskContext(
+            ledger=ledger,
+            market=market,
+            family_id=family_id,
+            cost=cost,
+            use_m1=False,
+        )
+        tools = build_desk_tools(ctx)
+
+        hyp_id = tools.get("register_hypothesis").fn(EXAMPLE)["hypothesis_id"]
+        trial_res = tools.get("run_trial").fn(hyp_id)
+        trial_id = trial_res["trial_id"]
+        verdict = trial_res["verdict"]
+
+        # Model uses valid placeholders including nested spec parameter (period=20 from EXAMPLE)
+        llm = ScriptedLLM(
+            Turn(
+                content=(
+                    f"Evaluated {{{{hyp:{hyp_id}.symbol}}}} "
+                    f"with period {{{{spec:{hyp_id}.period}}}} "
+                    f"on {{{{date:2024-10-24}}}}. The verdict was {{{{trial:{trial_id}.verdict}}}} "
+                    f"with profit factor {{{{trial:{trial_id}.pf}}}}."
+                )
+            )
+        )
+
+        events = list(desk_loop(llm, "Summary", tools=tools))
+        assert len(events) == 1
+        content = events[0].data["content"]
+        assert "Evaluated GOLD with period [20, 55] on 2024-10-24." in content
+        assert f"The verdict was {verdict}" in content

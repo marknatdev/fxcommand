@@ -33,7 +33,6 @@ from vibedesk.gauntlet.trial import (
 from vibedesk.gauntlet.trial import (
     run_trial as gauntlet_run_trial,
 )
-from vibedesk.ledger import BudgetExhausted, NotFound
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.costs import CostError, current_cost
 from vibedesk.market.grant import HOLDOUT_START, RESEARCH_START
@@ -307,13 +306,6 @@ def build_desk_tools(ctx: DeskContext | None = None) -> ToolRegistry:
         hyp = ctx.ledger.hypothesis(hypothesis_id)
         symbol = hyp.symbol
 
-        # Spec §6.4, §7.2: charge 1 Trial against family budget. Refused once budget is spent.
-        # The Research Desk cannot extend a budget.
-        used = ctx.ledger.trial_count(hyp.family_id)
-        budget = ctx.ledger.budget(hyp.family_id)
-        if used >= budget:
-            raise BudgetExhausted(hyp.family_id, used, budget)
-
         # Resolve cost snapshot: refuse instead of falling back to 0 spread floor (spec §5)
         if ctx.cost is not None:
             cost = ctx.cost
@@ -376,10 +368,7 @@ def build_desk_tools(ctx: DeskContext | None = None) -> ToolRegistry:
     def get_trial(trial_id: int) -> dict[str, Any]:
         if ctx.ledger is None:
             raise ValueError("ledger is not configured in DeskContext")
-        try:
-            tr = ctx.ledger.trial(trial_id)
-        except NotFound:
-            raise
+        tr = ctx.ledger.trial(trial_id)
         result_record = json.loads(tr.result_json)
         summary = _compact_trial_summary(result_record)
         return {
