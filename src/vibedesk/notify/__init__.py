@@ -29,8 +29,8 @@ import httpx
 logger = logging.getLogger("vibedesk.notify")
 BANGKOK_TZ = ZoneInfo("Asia/Bangkok")
 
-# Suppress httpx request logging at INFO level, as its log lines contain full URLs
-# with the Telegram bot token.
+# Pin httpx logger to WARNING at import so outgoing Telegram Bot API URLs
+# (which contain the secret bot token) are never logged at httpx's default INFO level.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
@@ -155,10 +155,13 @@ def compile_daily_digest(
     """Compile a DAILY_DIGEST notice (spec §8.4).
 
     Windowing:
-    - By default, uses a 24-hour rolling window ending at `now` (or current Bangkok time),
-      ensuring trials recorded in the 21:00-24:00 period on day N are counted in the next
-      digest at 21:00 on day N+1.
-    - `since` and `until` can be explicitly provided as datetimes or UTC ISO strings.
+    - By default, uses a 24-hour rolling window ending at `until` (defaulting to `now`
+      or current Bangkok time), ensuring trials recorded in the 21:00-24:00 period on
+      day N are counted in the next digest at 21:00 on day N+1.
+    - Explicit `until` can be provided (e.g. by the scheduler for the scheduled 21:00 run)
+      so consecutive digest windows line up exactly without jitter.
+    - `since` and `until` can be provided as datetimes or UTC ISO strings. Naive values
+      are treated as UTC to match Ledger timestamps.
     - The date label is derived from the window's `until` timestamp (in Bangkok time)
       unless explicitly overridden via `date`.
 
@@ -180,25 +183,25 @@ def compile_daily_digest(
     if current_now.tzinfo is None:
         current_now = current_now.replace(tzinfo=BANGKOK_TZ)
 
-    # Resolve `until`
+    # Resolve `until`: explicit string or datetime; naive values are treated as UTC
     if until is None:
         until_dt = current_now
     elif isinstance(until, datetime):
-        until_dt = until if until.tzinfo is not None else until.replace(tzinfo=BANGKOK_TZ)
+        until_dt = until if until.tzinfo is not None else until.replace(tzinfo=UTC)
     else:
         until_dt = datetime.fromisoformat(until)
         if until_dt.tzinfo is None:
-            until_dt = until_dt.replace(tzinfo=BANGKOK_TZ)
+            until_dt = until_dt.replace(tzinfo=UTC)
 
-    # Resolve `since`
+    # Resolve `since`: explicit string or datetime; naive values are treated as UTC
     if since is None:
         since_dt = until_dt - timedelta(hours=24)
     elif isinstance(since, datetime):
-        since_dt = since if since.tzinfo is not None else since.replace(tzinfo=BANGKOK_TZ)
+        since_dt = since if since.tzinfo is not None else since.replace(tzinfo=UTC)
     else:
         since_dt = datetime.fromisoformat(since)
         if since_dt.tzinfo is None:
-            since_dt = since_dt.replace(tzinfo=BANGKOK_TZ)
+            since_dt = since_dt.replace(tzinfo=UTC)
 
     since_utc = since_dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     until_utc = until_dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

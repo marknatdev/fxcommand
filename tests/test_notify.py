@@ -166,6 +166,34 @@ def test_compile_daily_digest_window_derives_date():
     assert notice.data["since_utc"] == since_exp
 
 
+def test_compile_daily_digest_naive_since_until_treated_as_utc():
+    # Naive UTC ISO strings without Z are treated as UTC to match Ledger timestamps
+    notice_str = compile_daily_digest(
+        reject_count=2,
+        trials_run=4,
+        tokens_used=5000,
+        since="2026-10-27T14:00:00",
+        until="2026-10-28T14:00:00",
+    )
+    assert notice_str.data["since_utc"] == "2026-10-27T14:00:00Z"
+    assert notice_str.data["until_utc"] == "2026-10-28T14:00:00Z"
+    # 14:00 UTC is 21:00 Bangkok on 2026-10-28
+    assert notice_str.data["date"] == "2026-10-28"
+
+    # Naive datetime objects are also treated as UTC
+    dt_until = datetime(2026, 10, 28, 14, 0, 0)
+    dt_since = datetime(2026, 10, 27, 14, 0, 0)
+    notice_dt = compile_daily_digest(
+        reject_count=2,
+        trials_run=4,
+        tokens_used=5000,
+        since=dt_since,
+        until=dt_until,
+    )
+    assert notice_dt.data["since_utc"] == "2026-10-27T14:00:00Z"
+    assert notice_dt.data["until_utc"] == "2026-10-28T14:00:00Z"
+
+
 def test_compile_daily_digest_with_budget_and_mock_ledger():
     budget = TokenBudget(daily_cap=100000)
     budget.record_usage(42000)
