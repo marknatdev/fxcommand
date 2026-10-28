@@ -185,8 +185,14 @@ def client(tmp_path):
 def test_settings_never_send_the_key_back(client, tmp_path):
     saved = client.post("/api/settings", json={"llm_key": "sk-secret-123", "llm_model": "m1"})
 
-    assert saved.json() == {"llm_url": "http://127.0.0.1:20128/v1", "llm_model": "m1",
-                            "llm_key_set": True}  # fmt: skip
+    exp = {"llm_url": "http://127.0.0.1:20128/v1", "llm_model": "m1"}
+    exp.update(
+        llm_key_set=True,
+        daily_token_cap=100_000,
+        telegram_enabled=False,
+        telegram_chat_id_set=False,
+    )
+    assert saved.json() == exp
     assert "sk-secret-123" not in client.get("/api/status").text
     assert "sk-secret-123" in (tmp_path / "settings" / "settings.json").read_text()
 

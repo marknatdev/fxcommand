@@ -139,3 +139,204 @@ Every report (the import report, `desk data-report`, `desk smoke`) is computed i
 
 - **For M5 (the API and app):** the grant is reusable until the spend is recorded; bind each Holdout Request to its Trial id; run one family's Trials one at a time, since each reads the family's N when it starts (the Holdout gate re-checks N, but a Verdict card shows N as judged); schedule the nightly refresh and the weekly floors; a one-click start (double-click) that sets up and opens the app, so the owner can test it themselves (owner's request, 2026-10-23: wait for the real app rather than a demo now).
 - **For Layer B (the live runner):** it always sits on the latest bar, where a time filter uses the clock's next open; it must re-check time filters against the bar it actually fills on.
+
+
+---
+
+# Layer A Teams: Waves 0 to 3 Implementation Plan
+
+## 1. Overview and Architecture
+
+The owner wants all of Layer A completed by parallel teams working in separate worktrees without touching each other's files.
+Following the owner's directive since 2026-10-23 ("make it simple, done now"):
+- Build the simplest working form that satisfies the specification.
+- No unnecessary guards, reviews, or procedural checkpoints.
+- Strict non-negotiable rule: **No orders, ever.** Nothing in `src/` may call MT5 order or position functions. MT5 is reached only through `real_api()`, which wraps it in `ReadOnlyMt5`. Tests use `FakeMt5` and `ScriptedLLM`.
+
+## 2. Contract Summary (Wave 0)
+
+Wave 0 defines the shared contracts, interfaces, and stubs so Wave 1 and Wave 2 teams can build in parallel without merge conflicts:
+
+1. **`vibedesk.notify`** (spec §3.2, §3.3, §8.4):
+   - `NoticeKind`: `candidate`, `pass`, `holdout_fail`, `holdout_request`, `token_warning`, `daily_digest`.
+   - `Notice`: immutable dataclass (`kind`, `text`, `data`, `created_at`).
+   - `Notifier(Protocol)`: `send(notice: Notice) -> bool`.
+   - `RecordingNotifier`: fully implemented in-memory notifier for testing.
+   - `TelegramNotifier`: push-only stub calling Telegram Bot API over httpx; token stored in git-ignored `data/secrets.json` (or env `VIBEDESK_TELEGRAM_BOT_TOKEN`), never logged.
+   - `get_notifier(root, settings)`: factory wiring point.
+2. **`vibedesk.desk.budget`** (spec §7.4, CCC-46):
+   - `TokenBudget`: tracks OmniRoute `usage` against a daily token cap.
+   - States: `ok` (<80%), `warn` (>=80% and <100%), `paused` (>=100%).
+   - Daily reset: **00:00 Asia/Bangkok time (UTC+7)**, aligning with local desk operations, the 21:00 Bangkok daily digest, and the 02:00 Bangkok nightly refresh.
+   - Methods: `record_usage(usage, when)`, `state(when)`, `status(when)`, `is_paused`, `remaining`.
+3. **`vibedesk.desk.grounding`** (spec §7.3, ADR 0005, CCC-45 — owned in full by separate CCC-45 worker):
+   - Grounding Rule interface called by the Desk team:
+     - `validate(prose, *, known_tokens=None) -> list[str]`: returns list of problems (empty = ok). Enforces that assistant prose may not contain any digit except inside universe symbols, timeframes (`M1`, `M15`, `H1`, `H4`, `D1`), block names, or placeholders.
+     - `render(prose: str, lookup) -> str`: resolves `{{trial:ID.metric}}`, `{{spec:ID.param}}`, `{{hyp:ID.field}}`, `{{date:ISO}}`.
+   - Implementation of `src/vibedesk/desk/grounding.py` and `tests/test_grounding.py` is owned entirely by the parallel CCC-45 worker.
+   - Wiring it into `desk/loop.py` (retry up to 2 times on validation failure, then withhold explanation) stays with the Desk team in Wave 1.
+4. **`vibedesk.desk.tools`** (spec §7.2, CCC-44):
+   - `DeskContext`: dependency container (`ledger`, `market`, `family_id`, `budget`, `notifier`, `root`).
+   - `build_desk_tools(ctx: DeskContext) -> ToolRegistry`: builds the 7 tools from spec §7.2:
+     - `list_blocks()`: returns the Block Library.
+     - `describe_data(symbol, timeframe)`: Research Window statistics (coverage, Spread Floor, ATR levels).
+     - `draft_spec(spec)`: validates a Strategy Spec and returns grid size (0 Trials counted).
+     - `register_hypothesis(spec, family_id)`: freezes a Hypothesis in the Ledger.
+     - `run_trial(hypothesis_id)`: runs the Gauntlet, counts 1 Trial, refused if budget spent.
+     - `get_trial(trial_id)`: retrieves stored results and metrics.
+     - `request_holdout(hypothesis_id)`: submits Holdout Request through the gate in spec §6.3.
+5. **`vibedesk.app.scheduler`** (spec §4, §8.4, CCC-53):
+   - Manages background scheduled tasks:
+     - `nightly_refresh`: 02:00 Asia/Bangkok daily (read-only incremental bar import from MT5).
+     - `weekly_spread_floors`: 00:00 Asia/Bangkok Sunday (re-measures tick p50 spreads and swaps).
+     - `daily_digest`: 21:00 Asia/Bangkok daily (Telegram push of REJECTs, Trials run, tokens used).
+   - Signatures: `start()`, `stop()`, `is_running`, `jobs()`, `run_job_now(name)`.
+6. **`vibedesk.app.auth`** (spec §8.1, CCC-50):
+   - Owner actions (approve Holdout, extend budget, update settings) require the owner cookie:
+     `OWNER_COOKIE_NAME = "vibedesk_owner"`.
+   - UI page sets the cookie on `127.0.0.1:8765`: `SameSite=Strict; Path=/`.
+   - `require_owner` FastAPI dependency raises HTTP 403 on missing/invalid cookie.
+7. **`vibedesk.app.api_spec`** (spec §8.1, §8.2, CCC-50, CCC-58):
+   - Complete Pydantic schemas for all endpoints in spec §8.1.
+   - `ENDPOINT_TABLE`: 15 endpoints with methods, owner-only flags, and payload types.
+   - `MCP_TOOL_MAP`: 8 tools mapped to API endpoints (5 read, 3 act; no owner tools).
+8. **`vibedesk.app.settings`**:
+   - Keys: `llm_url`, `llm_model`, `llm_key`, `daily_token_cap`, `telegram_enabled`, `telegram_chat_id`.
+   - Secrets (`telegram_bot_token`) stored in git-ignored `data/secrets.json` (or environment), never returned in `public()`.
+9. **CCC-55 Carry-Forwards**:
+   - **Grant reusability:** a `HoldoutGrant` is reusable until the spend is recorded in `holdout_spends`.
+   - **Binding:** bind each Holdout Request to its `trial_id`.
+   - **Trial serialization per family:** run one Idea Family's Trials one at a time using a per-family lock, since each Trial reads the family's combination count $N$ when it starts. The Verdict Card displays $N$ as judged; the Holdout gate re-checks $N$ at request time.
+   - **Holdout Gate:** only CANDIDATE Trials under current `RULES_VERSION` with Deflated Sharpe $\ge 0.95$ at current $N$ and expected Holdout trades $\ge 30$ pass.
+
+## 3. File Ownership Table
+
+To ensure zero merge conflicts during parallel execution across worktrees, each team has strict file ownership:
+
+| File / Directory | Owning Team | Milestone Card | Wave | Notes |
+|---|---|---|---|---|
+| `src/vibedesk/notify/__init__.py` | Notify Team | CCC-59 | Wave 1 | Implement `TelegramNotifier.send` via Bot API |
+| `scripts/setup-telegram.ps1` | Notify Team | CCC-59 | Wave 1 | Script to prompt and write `data/secrets.json` |
+| `tests/test_notify.py` | Notify Team | CCC-59, CCC-60 | Wave 1 | Tests for Telegram notices, digest, RecordingNotifier |
+| `src/vibedesk/desk/tools.py` | Desk Team | CCC-44 | Wave 1 | Full implementation of the 7 tools against Ledger & Market |
+| `src/vibedesk/desk/grounding.py` | CCC-45 Worker | CCC-45 | Wave 1 | Built in full by separate CCC-45 worker (validate & render) |
+| `src/vibedesk/desk/budget.py` | Desk Team | CCC-46 | Wave 1 | Wire budget check & warning notices into desk loop |
+| `tests/test_desk_tools.py` | Desk Team | CCC-44 | Wave 1 | Tests for the 7 desk tools |
+| `tests/test_grounding.py` | CCC-45 Worker | CCC-45 | Wave 1 | Owned and tested in full by separate CCC-45 worker |
+| `tests/test_budget.py` | Desk Team | CCC-46 | Wave 1 | Tests for token counting, 80% warning, 100% pause |
+| `src/vibedesk/app/server.py` | API Team | CCC-50 | Wave 1 | Wire new endpoints per spec §8.1, `require_owner` |
+| `src/vibedesk/app/auth.py` | API Team | CCC-50 | Wave 1 | Owner cookie dependency enforcement |
+| `src/vibedesk/app/scheduler.py` | API Team | CCC-53 | Wave 1 | Background thread/loop for the 3 scheduled jobs |
+| `tests/test_api.py` | API Team | CCC-50, CCC-55 | Wave 1 | Tests for HTTP API endpoints & owner-only refusals |
+| `tests/test_scheduler.py` | API Team | CCC-53 | Wave 1 | Tests for scheduler execution and timing |
+| `tests/test_carry_forwards.py` | API Team | CCC-55 | Wave 1 | Tests for grant reusability, Holdout Request binding, family lock |
+| `src/vibedesk/app/static/index.html` | UI Team | CCC-52, CCC-56 | Wave 2 | 4 pages (Desk, Ideas, Ledger, Settings), 375 px layout, owner cookie |
+| `tests/test_ui_playwright.py` | UI Team | CCC-56 | Wave 2 | Playwright E2E on fakes; 375 px mobile viewport check |
+| `src/vibedesk/mcp/` | MCP Team | CCC-58, CCC-60 | Wave 2 | Stdio MCP server calling HTTP API (read/act tools only) |
+| `tests/test_mcp.py` | MCP Team | CCC-58, CCC-60 | Wave 2 | Tests for MCP tools and owner-only tool exclusions |
+| `tests/test_m7_whole_app.py` | Whole-App Team | CCC-61, CCC-62 | Wave 3 | Deterministic end-to-end suite across all layers |
+| `CLAUDE.md` | Whole-App Team | CCC-64 | Wave 3 | Document whole-app run, test, and verification commands |
+
+### Shared Files Rules
+- `src/vibedesk/app/server.py`: owned exclusively by the **API Team**. The UI team works strictly in `static/index.html` and does not edit `server.py`.
+- `pyproject.toml`: dependencies are frozen by Wave 0 (`fastapi`, `httpx`, `numba`, `numpy`, `pyarrow`, `pydantic`, `tzdata`, `uvicorn`, `pytest`, `ruff`). If MCP team requires `mcp`, add via `uv add mcp`.
+- `src/vibedesk/ledger/store.py`: read-only reference for tools and API. Any schema migrations must be coordinated and append-only.
+- `data/`: ignored by git. Never commit `data/` or secrets.
+
+## 4. Wave Merge Order
+
+```mermaid
+flowchart TD
+    W0["Wave 0: Contract (this PR)"] --> W1_Desk["Wave 1: Desk Team (M4)<br/>CCC-44, CCC-45, CCC-46"]
+    W0 --> W1_API["Wave 1: API Team (M5)<br/>CCC-50, CCC-53, CCC-55"]
+    W0 --> W1_Notify["Wave 1: Notify Team (M6)<br/>CCC-59"]
+    W1_Desk --> M_W1["Merge Wave 1 into main"]
+    W1_API --> M_W1
+    W1_Notify --> M_W1
+    M_W1 --> W2_UI["Wave 2: UI Team (M5)<br/>CCC-52, CCC-56"]
+    M_W1 --> W2_MCP["Wave 2: MCP Team (M6)<br/>CCC-58, CCC-60"]
+    W2_UI --> M_W2["Merge Wave 2 into main"]
+    W2_MCP --> M_W2
+    M_W2 --> W3["Wave 3: Whole-App E2E (M7)<br/>CCC-61, CCC-62, CCC-63, CCC-64"]
+```
+
+1. **Wave 0 (Contract)**: Merged into `main` first. Provides all interfaces, schemas, and test harnesses.
+2. **Wave 1 (Parallel Worktrees)**:
+   - Branch `feature/desk-m4`: Desk Team (CCC-44, CCC-45, CCC-46).
+   - Branch `feature/api-m5`: API Team (CCC-50, CCC-53, CCC-55).
+   - Branch `feature/notify-m6`: Notify Team (CCC-59).
+   All three branches develop independently without touching overlapping files. Merged into `main` after automated tests pass.
+3. **Wave 2 (Parallel Worktrees)**:
+   - Branch `feature/ui-m5`: UI Team builds on the completed HTTP API in `src/vibedesk/app/static/index.html`.
+   - Branch `feature/mcp-m6`: MCP Team builds `src/vibedesk/mcp/` calling the HTTP API.
+   Merged into `main` after automated tests pass.
+4. **Wave 3 (Integration & Verification)**:
+   - Branch `feature/whole-app-m7`: Whole-app test suite, click-through validation, and `CLAUDE.md` updates.
+
+## 5. Acceptance Checklist Per Card
+
+### Wave 1: Desk Team (M4)
+- [ ] **CCC-44 Desk tools**:
+  - `list_blocks`: returns all blocks from `LIBRARY.all()`.
+  - `describe_data(symbol, tf)`: returns bar count, start/end date, spread floor, ATR p50 for Research Window.
+  - `draft_spec(spec)`: validates spec, normalizes mixed numbers, returns combinations count, counts 0 Trials.
+  - `register_hypothesis(spec, family_id)`: freezes Hypothesis in Ledger, links to current or existing family.
+  - `run_trial(hypothesis_id)`: executes Gauntlet via `trial.run_trial`, charges 1 Trial against budget, raises if budget exhausted.
+  - `get_trial(trial_id)`: returns stored record and summary from Ledger.
+  - `request_holdout(hypothesis_id)`: checks §6.3 gate (CANDIDATE, rules version, Deflated Sharpe, expected trades >= 30).
+- [ ] **CCC-45 Grounding Rule (owned in full by separate CCC-45 worker)**:
+  - `validate(prose, *, known_tokens=None) -> list[str]`: problems (empty = ok); rejects any digit unless inside allowed symbol, timeframe, block name, or valid placeholder.
+  - `render(prose: str, lookup) -> str`: resolves `{{trial:ID.metric}}`, `{{spec:ID.param}}`, `{{hyp:ID.field}}`, `{{date:ISO}}`.
+  - Built and tested in full by separate worker (`src/vibedesk/desk/grounding.py` and `tests/test_grounding.py`).
+  - Wiring into `desk/loop.py` (retry up to 2 times on validation failure; withhold explanation if still failing) stays with Desk Team in Wave 1.
+- [ ] **CCC-46 Daily token budget**:
+  - Count tokens from OmniRoute usage responses.
+  - Trigger `token_warning` Notice to Notifier at 80% of daily cap (once per day).
+  - Pause Desk loop at 100% of daily cap, explaining clearly to owner. Manual Trials still permitted.
+  - Daily reset at 00:00 Asia/Bangkok time.
+
+### Wave 1: API Team (M5 Backend)
+- [ ] **CCC-50 HTTP API per spec §8.1**:
+  - Implement all 15 endpoints in `ENDPOINT_TABLE`.
+  - Enforce `require_owner` dependency on owner-only actions (`approve_holdout`, `extend_budget`, `PUT /api/settings`). Missing cookie returns HTTP 403.
+  - Wire `POST /api/families/{id}/chat` to SSE stream running `desk_loop` with `build_desk_tools`.
+- [ ] **CCC-53 Scheduler**:
+  - Background thread running `nightly_refresh` (02:00 Bangkok), `weekly_spread_floors` (Sunday 00:00 Bangkok), and `daily_digest` (21:00 Bangkok).
+  - Support `run_job_now(name)` for immediate manual or test triggering.
+- [ ] **CCC-55 Holdout and Trial carry-forwards**:
+  - Reusable Holdout grant until spend is recorded.
+  - Bind Holdout Request to Trial ID.
+  - Serialize Trial runs per Idea Family to freeze combination count $N$ consistently.
+
+### Wave 1: Notify Team (M6 Part)
+- [ ] **CCC-59 Telegram notices & daily digest**:
+  - `TelegramNotifier.send` posts notices (CANDIDATE, PASS, HOLDOUT FAIL, Holdout Request awaiting owner, token warning).
+  - Format and send 21:00 Bangkok daily digest (REJECTs, Trials, tokens used).
+  - `scripts/setup-telegram.ps1` writes bot token to `data/secrets.json`. Secrets never logged.
+
+### Wave 2: UI Team (M5 Frontend)
+- [ ] **CCC-52 Ideas, Ledger, Settings pages in one-page app**:
+  - Single-page application in `src/vibedesk/app/static/index.html`.
+  - Navigation between Desk, Ideas, Ledger, and Settings.
+  - UI automatically sets `vibedesk_owner` cookie on load.
+  - Verdict Cards display stitched equity curve, fold bars, baseline histogram, Pass Bar checks, Closest Miss.
+- [ ] **CCC-56 Layout at 375 px and Playwright E2E on fakes**:
+  - Clean responsive design at 375 px phone width with no horizontal overflow/scroll.
+  - Playwright test suite running against deterministic backend fakes.
+
+### Wave 2: MCP Team (M6 Part)
+- [ ] **CCC-58 MCP Server**:
+  - Stdio MCP server calling HTTP API on `127.0.0.1:8765`.
+  - Exposes 5 read tools and 3 act tools per spec §8.2.
+  - Does NOT expose owner-only tools (no approve, no budget, no settings).
+- [ ] **CCC-60 Test owner-only refusals & RecordingNotifier**:
+  - Automated tests asserting MCP client cannot call owner endpoints and receives HTTP 403.
+  - Tests verifying notices arrive in `RecordingNotifier`.
+
+### Wave 3: Whole-App Team (M7)
+- [ ] **CCC-61 / CCC-62 Whole-app E2E**:
+  - End-to-end integration test on deterministic fakes from chat to Verdict Card.
+- [ ] **CCC-63 Exploratory click-through**:
+  - Verification across all pages, zero browser console errors, responsive layout at 375 px.
+- [ ] **CCC-64 CLAUDE.md commands**:
+  - Update `CLAUDE.md` with complete whole-app execution, testing, and maintenance commands.

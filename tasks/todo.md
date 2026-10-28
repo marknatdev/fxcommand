@@ -459,3 +459,110 @@
 **Result (2026-10-28):**
 - **Files:** `src/vibedesk/desk/grounding.py` (new), `tests/test_grounding.py` (new).
 - **Suites:** 20 dedicated tests in `tests/test_grounding.py` passing; full test suite (1,383 passed, 1 skipped) green. Clean ruff check and format. Strict ISO date validation and whitespace rejection addressing review comments.
+
+---
+
+## Wave 0: Contract for Layer A parallel teams (2026-10-28)
+
+**Description:** Contract worker providing the shared code-level interfaces, types, stubs, and file ownership definitions for Wave 1 and Wave 2 parallel teams.
+
+**Acceptance criteria:**
+- [x] Code-level interfaces implemented with types, docstrings, and stubs:
+  - `vibedesk.notify`: `Notice`, `NoticeKind`, `Notifier`, `RecordingNotifier` (full), `TelegramNotifier` (stub), `get_notifier`.
+  - `vibedesk.desk.budget`: `TokenBudget`, daily reset at 00:00 Bangkok time (UTC+7), `BudgetState` (ok, warn, paused).
+  - `vibedesk.desk.grounding`: interface documented for Desk team; module owned in full by separate CCC-45 worker.
+  - `vibedesk.desk.tools`: `DeskContext`, `build_desk_tools(ctx)` registering all 7 tools from spec §7.2.
+  - `vibedesk.app.scheduler`: `Scheduler` with the 3 maintenance jobs (nightly refresh, weekly floors, daily digest).
+  - `vibedesk.app.auth`: `OWNER_COOKIE_NAME` (`vibedesk_owner`, SameSite=Strict), `require_owner` FastAPI dependency.
+  - `vibedesk.app.api_spec`: `ENDPOINT_TABLE` (15 endpoints), `MCP_TOOL_MAP` (8 tools).
+  - `vibedesk.app.settings`: Settings keys and git-ignored `data/secrets.json` storage.
+- [x] Plan and ownership: `tasks/plan.md` updated with Layer A teams section, File Ownership Table, merge order, and acceptance checklists.
+- [x] Test suite: `tests/test_contract.py` (10 tests) green, `test_guard.py` clean (no forbidden order calls), ruff clean.
+
+---
+
+## Wave 1: Desk Team (M4)
+
+### CCC-44: Desk tools (list_blocks, describe_data, draft_spec, register_hypothesis, run_trial, get_trial, request_holdout)
+- [ ] Implement `describe_data` for Research Window stats (coverage, Spread Floor, ATR levels).
+- [ ] Implement `register_hypothesis` to freeze Hypothesis in Ledger.
+- [ ] Implement `run_trial` executing Gauntlet and counting Trial.
+- [ ] Implement `get_trial` retrieving stored result and metrics.
+- [ ] Implement `request_holdout` checking §6.3 gate (CANDIDATE, Deflated Sharpe, trades >= 30).
+- [ ] Verification: `uv run pytest tests/test_desk_tools.py`
+
+### CCC-45: Grounding Rule (owned in full by separate CCC-45 worker)
+- [ ] Interface called by Desk team: `validate(prose, *, known_tokens=None) -> list[str]` and `render(prose, lookup) -> str` (resolving `{{trial:ID.metric}}`, `{{spec:ID.param}}`, `{{hyp:ID.field}}`, `{{date:ISO}}`).
+- [ ] Built and tested by separate CCC-45 worker in `src/vibedesk/desk/grounding.py` and `tests/test_grounding.py`.
+- [ ] Wiring into `desk/loop.py` (retry up to 2 times, then withhold explanation) stays with Desk Team in Wave 1.
+- [ ] Verification: `uv run pytest tests/test_grounding.py` (run by CCC-45 worker)
+
+### CCC-46: Token budget enforcement
+- [ ] Count tokens from OmniRoute responses against daily cap.
+- [ ] Send `token_warning` notice at 80% of daily cap (once per day).
+- [ ] Pause desk loop at 100% of daily cap (permit manual Trials).
+- [ ] Daily reset at 00:00 Asia/Bangkok time.
+- [ ] Verification: `uv run pytest tests/test_budget.py`
+
+---
+
+## Wave 1: API Team (M5 Backend)
+
+### CCC-50: HTTP API with owner-only actions
+- [ ] Implement 15 endpoints in `ENDPOINT_TABLE`.
+- [ ] Enforce `require_owner` on `approve_holdout`, `extend_budget`, `PUT /api/settings` (HTTP 403 on missing cookie).
+- [ ] Wire `POST /api/families/{id}/chat` to SSE stream running `desk_loop` with `build_desk_tools`.
+- [ ] Verification: `uv run pytest tests/test_api.py`
+
+### CCC-53: Scheduler
+- [ ] Background thread for nightly refresh (02:00 Bangkok), weekly floors (Sunday 00:00 Bangkok), daily digest (21:00 Bangkok).
+- [ ] Manual trigger `run_job_now(name)`.
+- [ ] Verification: `uv run pytest tests/test_scheduler.py`
+
+### CCC-55: Holdout and Trial carry-forwards
+- [ ] Reusable Holdout grant until spend is recorded.
+- [ ] Bind Holdout Request to Trial ID.
+- [ ] Per-family trial lock to freeze N during execution.
+- [ ] Verification: `uv run pytest tests/test_carry_forwards.py`
+
+---
+
+## Wave 1: Notify Team (M6 Part)
+
+### CCC-59: Telegram notices and daily digest
+- [ ] Implement `TelegramNotifier.send` over httpx.
+- [ ] Format and push CANDIDATE, PASS, HOLDOUT FAIL, Holdout Request, and token warning notices.
+- [ ] Compile and push 21:00 Bangkok daily digest.
+- [ ] `scripts/setup-telegram.ps1` for interactive setup into `data/secrets.json`.
+- [ ] Verification: `uv run pytest tests/test_notify.py`
+
+---
+
+## Wave 2: UI Team (M5 Frontend)
+
+### CCC-52 & CCC-56: 4-page UI and Playwright E2E
+- [ ] Build Desk, Ideas, Ledger, and Settings in `src/vibedesk/app/static/index.html`.
+- [ ] Set `vibedesk_owner` cookie with SameSite=Strict on page load.
+- [ ] Responsive layout at 375 px phone width without horizontal scroll.
+- [ ] Playwright E2E suite on deterministic fakes.
+- [ ] Verification: Playwright test suite
+
+---
+
+## Wave 2: MCP Team (M6 Part)
+
+### CCC-58 & CCC-60: Stdio MCP Server and Refusal Tests
+- [ ] Build stdio MCP server calling HTTP API on `127.0.0.1:8765`.
+- [ ] Expose 5 read tools and 3 act tools per spec §8.2.
+- [ ] Omit all owner tools (no approve, no budget, no settings).
+- [ ] Automated tests asserting 403 refusals and RecordingNotifier capture.
+- [ ] Verification: `uv run pytest tests/test_mcp.py`
+
+---
+
+## Wave 3: Whole-App Team (M7)
+
+### CCC-61, CCC-62, CCC-63, CCC-64: Whole-app E2E and Click-through
+- [ ] Whole-app E2E on deterministic fakes.
+- [ ] Browser click-through with playwright-cli checking console errors and phone width.
+- [ ] Document commands in `CLAUDE.md`.
