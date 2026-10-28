@@ -1,13 +1,14 @@
 # Vibe Desk task board
 
-The project's task list now that the Vibe Kanban board was sunset on 2026-10-28; it began as an export of that board (2026-10-24, updated 2026-10-25). `[x]` is done, `[ ]` is not; the status is in italics.
+The project's task list now that the Vibe Kanban board was sunset on 2026-10-28; it began as an export of that board (2026-10-24, updated 2026-10-28). `[x]` is done, `[ ]` is not; the status is in italics.
 
 | Status | Cards |
 |---|---|
 | In review | 5 |
-| To do | 5 |
-| Backlog | 30 |
-| Done | 47 |
+| In progress | 6 |
+| To do | 2 |
+| Backlog | 26 |
+| Done | 48 |
 | **Total** | **87** |
 
 **Note.** Some M4 and M5 cards describe the original, fuller plan, and the simple app (CCC-83) already covers them in a simpler form. CCC-47, CCC-51 and CCC-54 are now closed as covered; CCC-52 (partly) and CCC-63 remain open:
@@ -16,6 +17,12 @@ The project's task list now that the Vibe Kanban board was sunset on 2026-10-28;
 - CCC-52 (open), partly: Settings and the Recents list, but no separate Ideas or Ledger pages;
 - CCC-54 (closed), one-click start: `Start Vibe Desk.bat` and the desktop shortcut;
 - CCC-63 (open), a click-through of the app: done in the browser, not as a whole-app suite.
+
+**Layer A team effort (2026-10-28).** Layer A is being finished by AO worker teams in waves:
+- Wave 0: the Vibe Kanban board was sunset (PR #18), and the shared team contract and file ownership went into tasks/plan.md (PR #17).
+- Wave 1 is in progress: the Desk team (CCC-44, CCC-46, Grounding Rule wiring), the API team (CCC-50, CCC-53, CCC-55) and the Notify team (CCC-59).
+- Next come Wave 2 (the UI team, CCC-52/56; the MCP team, CCC-58/60) and Wave 3 (M7, CCC-62/63/64).
+- Owner-only items: CCC-41, CCC-48, CCC-79, CCC-80, CCC-83, CCC-87 and CCC-90.
 
 ## Not done yet
 
@@ -27,24 +34,26 @@ The project's task list now that the Vibe Kanban board was sunset on 2026-10-28;
 - [ ] **CCC-87** M5 · Redesign the app in a claude.ai-like style (design only) (under CCC-49)
 - [ ] **CCC-90** Issue · OmniRoute answers 503 resource_pressure: the shared server is out of memory (PR #14)
 
-### To do (5)
+### In progress (6)
 
-- [ ] **CCC-41** M3 · Checkpoint C: M3 done, owner reviews (under CCC-29)
 - [ ] **CCC-44** M4 · Desk tools: list_blocks, describe_data, draft_spec, register_hypothesis, run_trial, get_trial, request_holdout (under CCC-42)
-- [ ] **CCC-45** M4 · Grounding Rule validator: no digits in prose, placeholders rendered from stored data (under CCC-42)
 - [ ] **CCC-46** M4 · Token budget: daily cap from OmniRoute usage, 80% warning, pause at 100% (under CCC-42)
-- [ ] **CCC-48** M4 · Validate: 20 sample ideas → valid Strategy Specs, and the Block Library covers the owner's last 15 ideas (under CCC-42)
-
-### Backlog (30)
-
 - [ ] **CCC-50** M5 · HTTP API with owner-only actions (owner cookie, SameSite=Strict) (under CCC-49)
-- [ ] **CCC-52** M5 · Ideas, Ledger and Settings pages (under CCC-49)
 - [ ] **CCC-53** M5 · Scheduler: nightly data refresh and weekly Spread Floors (under CCC-49)
 - [ ] **CCC-55** M5 · Holdout and Trial carry-forwards (under CCC-49)
+- [ ] **CCC-59** M6 · Telegram notices and daily digest (push-only) (under CCC-57)
+
+### To do (2)
+
+- [ ] **CCC-41** M3 · Checkpoint C: M3 done, owner reviews (under CCC-29)
+- [ ] **CCC-48** M4 · Validate: 20 sample ideas → valid Strategy Specs, and the Block Library covers the owner's last 15 ideas (under CCC-42)
+
+### Backlog (26)
+
+- [ ] **CCC-52** M5 · Ideas, Ledger and Settings pages (under CCC-49)
 - [ ] **CCC-56** M5 · Playwright E2E on the fakes; layout at 375 px (under CCC-49)
 - [ ] **CCC-57** Roadmap · Layer A · M6 MCP server and Telegram
 - [ ] **CCC-58** M6 · MCP server (stdio, calls the API): read and act tools, no owner tools (under CCC-57)
-- [ ] **CCC-59** M6 · Telegram notices and daily digest (push-only) (under CCC-57)
 - [ ] **CCC-60** M6 · Test the owner-only refusals and the RecordingNotifier (under CCC-57)
 - [ ] **CCC-61** Roadmap · Layer A · M7 Whole-app test
 - [ ] **CCC-62** M7 · E2E on deterministic fakes (under CCC-61)
@@ -120,12 +129,12 @@ CCC-29 · *Done* · 11 of 12 done
 
 ### Layer A · M4 Research Desk (LLM)
 
-CCC-42 · *In review* · 2 of 6 done
+CCC-42 · *In review* · 3 of 6 done
 
 - [x] **CCC-43** M4 · Desk loop with ScriptedLLM: tool calls, SSE events, ≤ 12 tool calls per message (PR #15) · *Done*
-- [ ] **CCC-44** M4 · Desk tools: list_blocks, describe_data, draft_spec, register_hypothesis, run_trial, get_trial, request_holdout · *To do*
-- [ ] **CCC-45** M4 · Grounding Rule validator: no digits in prose, placeholders rendered from stored data · *To do*
-- [ ] **CCC-46** M4 · Token budget: daily cap from OmniRoute usage, 80% warning, pause at 100% · *To do*
+- [ ] **CCC-44** M4 · Desk tools: list_blocks, describe_data, draft_spec, register_hypothesis, run_trial, get_trial, request_holdout · *In progress*
+- [x] **CCC-45** M4 · Grounding Rule validator: no digits in prose, placeholders rendered from stored data (PR #19) · *Done*
+- [ ] **CCC-46** M4 · Token budget: daily cap from OmniRoute usage, 80% warning, pause at 100% · *In progress*
 - [x] **CCC-47** M4 · OmniRouteLLM adapter (OpenAI-compatible, combo vibe-desk) · *Done*
 - [ ] **CCC-48** M4 · Validate: 20 sample ideas → valid Strategy Specs, and the Block Library covers the owner's last 15 ideas · *To do*
 
@@ -133,12 +142,12 @@ CCC-42 · *In review* · 2 of 6 done
 
 CCC-49 · *In review* · 3 of 10 done
 
-- [ ] **CCC-50** M5 · HTTP API with owner-only actions (owner cookie, SameSite=Strict) · *Backlog*
+- [ ] **CCC-50** M5 · HTTP API with owner-only actions (owner cookie, SameSite=Strict) · *In progress*
 - [x] **CCC-51** M5 · Desk page: chat, live Trial progress, Verdict Cards · *Done*
 - [ ] **CCC-52** M5 · Ideas, Ledger and Settings pages · *Backlog*
-- [ ] **CCC-53** M5 · Scheduler: nightly data refresh and weekly Spread Floors · *Backlog*
+- [ ] **CCC-53** M5 · Scheduler: nightly data refresh and weekly Spread Floors · *In progress*
 - [x] **CCC-54** M5 · One-click start: double-click sets up and opens the app · *Done*
-- [ ] **CCC-55** M5 · Holdout and Trial carry-forwards · *Backlog*
+- [ ] **CCC-55** M5 · Holdout and Trial carry-forwards · *In progress*
 - [ ] **CCC-56** M5 · Playwright E2E on the fakes; layout at 375 px · *Backlog*
 - [ ] **CCC-83** M5 · Simple web app: chat an idea, AI writes the Spec, test on real XM data · *In review*
 - [ ] **CCC-87** M5 · Redesign the app in a claude.ai-like style (design only) · *In review*
@@ -149,7 +158,7 @@ CCC-49 · *In review* · 3 of 10 done
 CCC-57 · *Backlog* · 0 of 3 done
 
 - [ ] **CCC-58** M6 · MCP server (stdio, calls the API): read and act tools, no owner tools · *Backlog*
-- [ ] **CCC-59** M6 · Telegram notices and daily digest (push-only) · *Backlog*
+- [ ] **CCC-59** M6 · Telegram notices and daily digest (push-only) · *In progress*
 - [ ] **CCC-60** M6 · Test the owner-only refusals and the RecordingNotifier · *Backlog*
 
 ### Layer A · M7 Whole-app test
