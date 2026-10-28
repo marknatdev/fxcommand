@@ -435,3 +435,27 @@
 **App change:**
 - `src/vibedesk/app/llm.py`: when OmniRoute answers `resource_pressure` (or `heap_pressure`), raise a plain message (`"OmniRoute is stuck under memory pressure on the server ({status} resource_pressure{retried}). Restart omniroute.service with the raised limits (see tasks/todo.md CCC-90 or AGENTS.md), then try again."`) using `response.status_code` and only claiming a retry when the status code is in `BUSY`.
 - `tests/test_app.py`: added `test_resource_pressure_after_retries_shows_a_plain_message_in_the_chat` and `test_resource_pressure_without_retry_reports_status_and_no_retry_claim`.
+
+
+---
+
+## M4 · CCC-45: Grounding Rule validator: no digits in prose, placeholders rendered from stored data
+
+**Description:** Spec §7.3, §9.4, and ADR 0005. Grounding Rule validator and placeholder renderer for assistant prose:
+- `validate(prose, *, known_tokens=None) -> list[str]`: Assistant prose may not contain raw digits. Digits are permitted only inside whitelisted known tokens (universe symbols, timeframes M1/M15/H1/H4/D1, Block names) and valid placeholders (`{{trial:ID.metric}}`, `{{spec:ID.param}}`, `{{hyp:ID.field}}`, `{{date:ISO}}`). Malformed placeholders or unknown placeholder kinds fail validation.
+- `render(prose, lookup) -> str`: Pure placeholder renderer replacing each placeholder with `lookup(kind, id, field)` (for date: `kind="date"`, `id=ISO`, `field=""`). Unresolved placeholders (where `lookup` returns `None`), unknown placeholder kinds, and malformed placeholders raise `GroundingError`.
+- `PLACEHOLDER_PATTERN`, `PLACEHOLDER_REGEX`, `KNOWN_PLACEHOLDER_KINDS` exported for consumers. Pure implementation with no I/O and no Ledger access.
+
+**Acceptance criteria:**
+- [x] Raw digits in prose rejected; digits glued to words ("20x", "1.5R", "M150") rejected.
+- [x] Whitelisted tokens pass validation: universe symbols (GOLD, EURUSD, ...), timeframes (M1, M15, H1, H4, D1), and Block names (donchian_breakout, ...), including custom tokens passed via `known_tokens`.
+- [x] Valid placeholders pass validation with numbers allowed inside.
+- [x] Unknown placeholder kinds and malformed placeholders fail validation and render.
+- [x] `render(prose, lookup)` replaces placeholders from fake lookup; unresolved placeholders (`lookup -> None`) raise `GroundingError`.
+- [x] Date placeholder passes `("date", ISO, "")` to lookup.
+- [x] Exported regex grammar and small constants for other modules.
+- [x] Full test suite green (`uv run pytest`, `uv run ruff check src tests`, `uv run ruff format --check src tests`).
+
+**Result (2026-10-28):**
+- **Files:** `src/vibedesk/desk/grounding.py` (new), `tests/test_grounding.py` (new).
+- **Suites:** 20 dedicated tests in `tests/test_grounding.py` passing; full test suite (1,383 passed, 1 skipped) green. Clean ruff check and format. Strict ISO date validation and whitespace rejection addressing review comments.
