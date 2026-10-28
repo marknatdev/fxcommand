@@ -507,7 +507,12 @@
 **Result (2026-10-28):**
 - **Files:** `src/vibedesk/desk/tools.py`, `src/vibedesk/desk/loop.py`, `src/vibedesk/desk/__init__.py`, `tests/test_desk_tools.py` (new), `tests/test_budget.py` (new), `tests/test_desk_loop.py`, `tests/test_contract.py`.
 - **Done-When (M4, spec §10):** A scripted Idea reaches a Verdict end to end with ScriptedLLM. All 7 desk tools operational, Grounding Rule retries and placeholder rendering active, TokenBudget daily cap and 80% warning enforced.
-- **Suites:** 1,410 passed, 1 skipped. Clean ruff check and format.
+- **Review fixes addressed:**
+  - Context-free tool registration: `starter_tools()` and `build_desk_tools()` expose only `list_blocks` and `draft_spec` when unconfigured (`ledger`/`market` is None), preventing live `/api/chat` model call failures.
+  - Honest Verdict cost refusal: `run_trial` refuses with clear ValueError when no Spread Floor is measured instead of falling back to 0 spread floor and hard-coded point.
+  - Compact tool returns: `run_trial` and `get_trial` return compact summaries with headline metrics and checks, bounded under 4KB, keeping full trade/daily arrays in Ledger.
+  - Mid-message budget pause: turns crossing 100% with prose answers finish normally (grounding check, history updated to `_sink`) before reporting pause.
+- **Suites:** 44 desk/budget tests passed. Clean ruff check and format.
 
 ---
 

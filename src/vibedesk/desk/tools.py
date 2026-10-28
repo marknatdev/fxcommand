@@ -138,8 +138,38 @@ REQUEST_HOLDOUT_SCHEMA: dict[str, Any] = {
 }
 
 
-def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
-    """Build the ToolRegistry containing all 7 Research Desk tools (spec §7.2, CCC-44)."""
+def _compact_trial_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """Extract compact summary for LLM consumption, keeping full record in Ledger."""
+    wf = record.get("walk_forward", {})
+    metrics = wf.get("metrics", {})
+    checks = record.get("checks", [])
+    compact_checks = [
+        {
+            "check": c.get("check"),
+            "passed": c.get("passed"),
+            "value": c.get("value"),
+            "threshold": c.get("threshold"),
+        }
+        for c in checks
+    ]
+    return {
+        "trades": metrics.get("trades"),
+        "net_r": metrics.get("net_r"),
+        "profit_factor": metrics.get("profit_factor"),
+        "win_rate": metrics.get("win_rate"),
+        "max_drawdown_r": metrics.get("max_drawdown_r"),
+        "expectancy_r": metrics.get("expectancy_r"),
+        "checks": compact_checks,
+    }
+
+
+def build_desk_tools(ctx: DeskContext | None = None) -> ToolRegistry:
+    """Build the ToolRegistry containing Research Desk tools (spec §7.2, CCC-44).
+
+    When no ctx is given (or ctx.ledger/market is None), registers only the context-free
+    tools (`list_blocks`, `draft_spec`). When full context (ledger and market) is provided,
+    registers all 7 tools.
+    """
     registry = ToolRegistry()
 
     @registry.register(
@@ -160,13 +190,40 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
         }
 
     @registry.register(
+        "draft_spec",
+        description="Validate a Strategy Spec and return errors or the parameter grid size.",
+        parameters=DRAFT_SPEC_SCHEMA,
+    )
+    def draft_spec(spec: dict[str, Any]) -> dict[str, Any]:
+        try:
+            validated = validate(normalize(spec))
+            combinations = len(expand_grid(validated))
+            return {
+                "valid": True,
+                "spec": validated.model_dump(mode="json"),
+                "combinations": combinations,
+                "errors": [],
+            }
+        except ValueError as error:
+            return {
+                "valid": False,
+                "spec": spec,
+                "combinations": 0,
+                "errors": [str(error)],
+                "error": f"{error.__class__.__name__}: {error}",
+            }
+
+    if ctx is None or ctx.ledger is None or ctx.market is None:
+        if ctx is not None:
+            registry.ctx = ctx  # type: ignore[attr-defined]
+        return registry
+
+    @registry.register(
         "describe_data",
         description="Return statistics on the Research Window data for a symbol and timeframe.",
         parameters=DESCRIBE_DATA_SCHEMA,
     )
     def describe_data(symbol: str, timeframe: str) -> dict[str, Any]:
-        if ctx.market is None:
-            raise ValueError("market is not configured in DeskContext")
         if symbol not in SYMBOLS:
             raise ValueError(f"unknown symbol {symbol!r}; expected one of {SYMBOLS}")
         tf = Timeframe(timeframe)
@@ -205,30 +262,6 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
             "spread_floor": floor,
             "atr_p50": atr_p50,
         }
-
-    @registry.register(
-        "draft_spec",
-        description="Validate a Strategy Spec and return errors or the parameter grid size.",
-        parameters=DRAFT_SPEC_SCHEMA,
-    )
-    def draft_spec(spec: dict[str, Any]) -> dict[str, Any]:
-        try:
-            validated = validate(normalize(spec))
-            combinations = len(expand_grid(validated))
-            return {
-                "valid": True,
-                "spec": validated.model_dump(mode="json"),
-                "combinations": combinations,
-                "errors": [],
-            }
-        except ValueError as error:
-            return {
-                "valid": False,
-                "spec": spec,
-                "combinations": 0,
-                "errors": [str(error)],
-                "error": f"{error.__class__.__name__}: {error}",
-            }
 
     @registry.register(
         "register_hypothesis",
@@ -281,18 +314,18 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
         if used >= budget:
             raise BudgetExhausted(hyp.family_id, used, budget)
 
-        # Resolve cost snapshot
+        # Resolve cost snapshot: refuse instead of falling back to 0 spread floor (spec §5)
         if ctx.cost is not None:
             cost = ctx.cost
         elif ctx.root is not None:
             try:
                 cost = current_cost(ctx.root, symbol)
-            except CostError:
-                point = 0.01 if symbol == "GOLD" else 0.00001
-                cost = CostSnapshot(point=point, spread_floor_points=0.0, slippage_points=1.0)
+            except CostError as err:
+                raise ValueError(
+                    f"no Spread Floor measured for {symbol}; run Update data first"
+                ) from err
         else:
-            point = 0.01 if symbol == "GOLD" else 0.00001
-            cost = CostSnapshot(point=point, spread_floor_points=0.0, slippage_points=1.0)
+            raise ValueError(f"no Spread Floor measured for {symbol}; run Update data first")
 
         # Determine M1 usage
         use_m1 = True
@@ -326,12 +359,13 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
                 )
             )
 
+        summary = _compact_trial_summary(trial_res.record)
         return {
             "trial_id": trial_res.trial_id,
             "hypothesis_id": hypothesis_id,
             "verdict": trial_res.verdict.verdict,
             "closest_miss": trial_res.verdict.closest_miss,
-            "record": trial_res.record,
+            "summary": summary,
         }
 
     @registry.register(
@@ -347,6 +381,7 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
         except NotFound:
             raise
         result_record = json.loads(tr.result_json)
+        summary = _compact_trial_summary(result_record)
         return {
             "trial_id": tr.id,
             "hypothesis_id": tr.hypothesis_id,
@@ -355,7 +390,7 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
             "cost": tr.cost.to_json(),
             "created_at": tr.created_at,
             "rules_version": tr.rules_version,
-            "result": result_record,
+            "summary": summary,
         }
 
     @registry.register(

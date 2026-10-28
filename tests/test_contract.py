@@ -134,7 +134,10 @@ def test_token_budget_resets_on_bangkok_day_boundary():
 
 
 def test_desk_tools_registry_and_schemas():
-    ctx = DeskContext(ledger=None, market=None, family_id=1)
+    # When unconfigured, only context-free tools are exposed
+    assert {t.name for t in build_desk_tools().all()} == {"list_blocks", "draft_spec"}
+
+    ctx = DeskContext(ledger=object(), market=object(), family_id=1)
     tools = build_desk_tools(ctx)
 
     expected_tools = {

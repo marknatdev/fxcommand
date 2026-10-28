@@ -188,9 +188,9 @@ class ToolRegistry:
 
 def starter_tools(ctx: Any = None) -> ToolRegistry:
     """Default tool registry delegating to build_desk_tools (spec §7.2, CCC-44)."""
-    from vibedesk.desk.tools import DeskContext, build_desk_tools
+    from vibedesk.desk.tools import build_desk_tools
 
-    return build_desk_tools(ctx or DeskContext(ledger=None, market=None, family_id=0))
+    return build_desk_tools(ctx)
 
 
 def _record_and_check_budget(
@@ -303,19 +303,26 @@ def desk_loop(
                 record: dict[str, Any] | None = None
                 try:
                     tid = int(id_)
-                    if tid in executed_trials:
-                        record = dict(executed_trials[tid])
-                    elif ledger is not None:
-                        tr = ledger.trial(tid)
-                        record = json.loads(tr.result_json)
-                        record["verdict"] = tr.verdict
-                        record["closest_miss"] = tr.closest_miss
+                    if ledger is not None:
+                        try:
+                            tr = ledger.trial(tid)
+                            record = json.loads(tr.result_json)
+                            record["verdict"] = tr.verdict
+                            record["closest_miss"] = tr.closest_miss
+                        except Exception:
+                            record = executed_trials.get(tid)
+                    else:
+                        record = executed_trials.get(tid)
                 except Exception:
                     return None
                 if record is None:
                     return None
                 if field_name in record:
                     val = record[field_name]
+                    return json.dumps(val) if isinstance(val, dict | list) else str(val)
+                summary = record.get("summary", {})
+                if field_name in summary:
+                    val = summary[field_name]
                     return json.dumps(val) if isinstance(val, dict | list) else str(val)
                 wf = record.get("walk_forward", {})
                 if field_name in wf:
@@ -326,15 +333,17 @@ def desk_loop(
                     val = metrics[field_name]
                     return json.dumps(val) if isinstance(val, dict | list) else str(val)
                 if field_name in ("pf", "profit_factor"):
-                    pf_val = metrics.get("profit_factor", wf.get("profit_factor"))
+                    pf_val = summary.get(
+                        "profit_factor", metrics.get("profit_factor", wf.get("profit_factor"))
+                    )
                     if pf_val is not None:
                         return f"{float(pf_val):.2f}"
                 if field_name in ("trades", "trade_count"):
-                    tr_val = metrics.get("trades", wf.get("trades"))
+                    tr_val = summary.get("trades", metrics.get("trades", wf.get("trades")))
                     if tr_val is not None:
                         return str(tr_val)
                 if field_name == "net_r":
-                    r_val = metrics.get("net_r", wf.get("net_r"))
+                    r_val = summary.get("net_r", metrics.get("net_r", wf.get("net_r")))
                     if r_val is not None:
                         return f"{float(r_val):.2f}"
                 return None
@@ -371,23 +380,7 @@ def desk_loop(
     try:
         while calls_made < max_tool_calls:
             turn = _call_llm(llm, messages, schemas)
-            if _record_and_check_budget(budget, notifier, turn.usage):
-                pause_msg = (
-                    "The Research Desk is paused because the daily token budget has been "
-                    "reached (100%). Manual Trials are still permitted."
-                )
-                yield Event(
-                    "message",
-                    {
-                        "role": "assistant",
-                        "content": pause_msg,
-                        "text": pause_msg,
-                        "tool_calls": calls_made,
-                        "capped": False,
-                        "paused": True,
-                    },
-                )
-                return
+            is_paused = _record_and_check_budget(budget, notifier, turn.usage)
 
             if not turn.tool_calls:
                 # Assistant answered in prose. Enforce Grounding Rule (spec §7.3, ADR 0005).
@@ -407,7 +400,7 @@ def desk_loop(
                     if not problems and rendered_content is not None:
                         messages.append({"role": "assistant", "content": rendered_content})
                         if _sink is not None:
-                            _sink[:] = messages[1:]
+                            _sink[:] = [m for m in messages if m.get("role") != "system"]
                         yield Event(
                             "message",
                             {
@@ -418,23 +411,7 @@ def desk_loop(
                                 "capped": False,
                             },
                         )
-                        return
-
-                    # Validation or rendering failed
-                    if grounding_retries < 2:
-                        grounding_retries += 1
-                        messages.append({"role": "assistant", "content": current_content})
-                        correction_msg = (
-                            "Grounding Rule violation: Assistant prose may not contain raw figures "
-                            "or digits. Every figure must use structured placeholders "
-                            "like {{trial:ID.metric}}, {{spec:ID.param}}, {{hyp:ID.field}}, "
-                            "{{date:ISO}}, or whitelisted tokens. "
-                            f"Problems: {'; '.join(problems)}. "
-                            "Please regenerate your response following the Grounding Rule."
-                        )
-                        messages.append({"role": "user", "content": correction_msg})
-                        retry_turn = _call_llm(llm, messages, schemas)
-                        if _record_and_check_budget(budget, notifier, retry_turn.usage):
+                        if is_paused:
                             pause_msg = (
                                 "The Research Desk is paused because the daily token budget has "
                                 "been reached (100%). Manual Trials are still permitted."
@@ -450,21 +427,37 @@ def desk_loop(
                                     "paused": True,
                                 },
                             )
-                            return
+                        return
+
+                    # Validation or rendering failed
+                    if grounding_retries < 2 and not is_paused:
+                        grounding_retries += 1
+                        messages.append({"role": "assistant", "content": current_content})
+                        correction_msg = (
+                            "Grounding Rule violation: Assistant prose may not contain raw figures "
+                            "or digits. Every figure must use structured placeholders "
+                            "like {{trial:ID.metric}}, {{spec:ID.param}}, {{hyp:ID.field}}, "
+                            "{{date:ISO}}, or whitelisted tokens. "
+                            f"Problems: {'; '.join(problems)}. "
+                            "Please regenerate your response following the Grounding Rule."
+                        )
+                        messages.append({"role": "user", "content": correction_msg})
+                        retry_turn = _call_llm(llm, messages, schemas)
+                        is_paused = _record_and_check_budget(budget, notifier, retry_turn.usage)
 
                         if retry_turn.tool_calls:
                             turn = retry_turn
                             break
                         current_content = retry_turn.content
                     else:
-                        # Retries exhausted: show verdict alone with explanation withheld note
+                        # Retries exhausted or budget paused: show verdict alone with withheld note
                         withheld_msg = (
                             "The explanation was withheld because it did not adhere to the "
                             "Grounding Rule."
                         )
                         messages.append({"role": "assistant", "content": withheld_msg})
                         if _sink is not None:
-                            _sink[:] = messages[1:]
+                            _sink[:] = [m for m in messages if m.get("role") != "system"]
                         yield Event(
                             "message",
                             {
@@ -476,7 +469,45 @@ def desk_loop(
                                 "grounding_withheld": True,
                             },
                         )
+                        if is_paused:
+                            pause_msg = (
+                                "The Research Desk is paused because the daily token budget has "
+                                "been reached (100%). Manual Trials are still permitted."
+                            )
+                            yield Event(
+                                "message",
+                                {
+                                    "role": "assistant",
+                                    "content": pause_msg,
+                                    "text": pause_msg,
+                                    "tool_calls": calls_made,
+                                    "capped": False,
+                                    "paused": True,
+                                },
+                            )
                         return
+
+            if is_paused:
+                # Crossed 100% budget mid-message while requesting more tool calls.
+                # Update _sink to preserve history up to this point and report pause.
+                if _sink is not None:
+                    _sink[:] = [m for m in messages if m.get("role") != "system"]
+                pause_msg = (
+                    "The Research Desk is paused because the daily token budget has been "
+                    "reached (100%). Manual Trials are still permitted."
+                )
+                yield Event(
+                    "message",
+                    {
+                        "role": "assistant",
+                        "content": pause_msg,
+                        "text": pause_msg,
+                        "tool_calls": calls_made,
+                        "capped": False,
+                        "paused": True,
+                    },
+                )
+                return
 
             batch = turn.tool_calls[: max_tool_calls - calls_made]
             messages.append(turn.to_message(batch))

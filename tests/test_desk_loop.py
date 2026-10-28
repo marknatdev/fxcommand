@@ -78,15 +78,7 @@ def test_normal_run_calls_tools_feeds_results_back_and_finishes_with_prose():
     ]
     # Every tool schema was sent to the LLM on every call.
     schema_names = [s["function"]["name"] for s in llm.tools_seen[0] or []]
-    assert set(schema_names) == {
-        "list_blocks",
-        "describe_data",
-        "draft_spec",
-        "register_hypothesis",
-        "run_trial",
-        "get_trial",
-        "request_holdout",
-    }
+    assert schema_names == ["list_blocks", "draft_spec", "register_hypothesis", "run_trial"]
 
     # Each tool result was fed back into the conversation before the next LLM call.
     final_call = llm.calls[-1]
@@ -466,3 +458,17 @@ def test_desk_loop_recovers_after_llm_error_without_poisoning_history():
     assert not any(m.get("role") == "error" for m in last_call)
     roles = [m["role"] for m in last_call]
     assert "error" not in roles
+
+
+def test_starter_tools_exposes_only_context_free_tools_without_context():
+    reg = starter_tools()
+    schema_names = [s["function"]["name"] for s in reg.schemas()]
+    assert schema_names == ["list_blocks", "draft_spec"]
+
+    from vibedesk.desk.tools import DeskContext
+
+    reg_unconfigured = starter_tools(DeskContext(ledger=None, market=None, family_id=0))
+    assert [s["function"]["name"] for s in reg_unconfigured.schemas()] == [
+        "list_blocks",
+        "draft_spec",
+    ]

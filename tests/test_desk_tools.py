@@ -12,6 +12,7 @@ Covers all 7 tools exposed to the Research Desk LLM:
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime
 
 import pytest
@@ -113,10 +114,9 @@ def test_describe_data_returns_research_window_statistics(ledger, synthetic_mark
     with pytest.raises(ValueError, match="unknown symbol"):
         desc_tool.fn("UNKNOWN_SYM", "M15")
 
-    # Rejects when market is unconfigured
+    # When market is unconfigured, describe_data is not registered
     unconfigured_ctx = DeskContext(ledger=ledger, market=None, family_id=1)
-    with pytest.raises(ValueError, match="market is not configured"):
-        build_desk_tools(unconfigured_ctx).get("describe_data").fn("GOLD", "M15")
+    assert build_desk_tools(unconfigured_ctx).get("describe_data") is None
 
 
 def test_draft_spec_validates_and_normalizes():
@@ -152,9 +152,9 @@ def test_draft_spec_validates_and_normalizes():
     assert len(res_bad["errors"]) > 0
 
 
-def test_register_hypothesis_freezes_and_enforces_anti_gaming(ledger):
+def test_register_hypothesis_freezes_and_enforces_anti_gaming(ledger, synthetic_market):
     family_1 = ledger.create_family("Trend following on GOLD")
-    ctx = DeskContext(ledger=ledger, market=None, family_id=family_1)
+    ctx = DeskContext(ledger=ledger, market=synthetic_market, family_id=family_1)
     tools = build_desk_tools(ctx)
     reg_tool = tools.get("register_hypothesis")
     assert reg_tool is not None
@@ -170,7 +170,7 @@ def test_register_hypothesis_freezes_and_enforces_anti_gaming(ledger):
     # A new chat with a different family trying to register the same entry_block & symbol
     # must attach to family_1 so Trial counts cannot reset
     family_2 = ledger.create_family("Another Idea on GOLD")
-    ctx_family_2 = DeskContext(ledger=ledger, market=None, family_id=family_2)
+    ctx_family_2 = DeskContext(ledger=ledger, market=synthetic_market, family_id=family_2)
     tools_2 = build_desk_tools(ctx_family_2)
 
     res2 = tools_2.get("register_hypothesis").fn(SPEC)
@@ -178,8 +178,8 @@ def test_register_hypothesis_freezes_and_enforces_anti_gaming(ledger):
     assert res2["hypothesis_id"] == 2
 
 
-def test_register_hypothesis_auto_creates_family_when_none_provided(ledger):
-    ctx = DeskContext(ledger=ledger, market=None, family_id=0)
+def test_register_hypothesis_auto_creates_family_when_none_provided(ledger, synthetic_market):
+    ctx = DeskContext(ledger=ledger, market=synthetic_market, family_id=0)
     tools = build_desk_tools(ctx)
     res = tools.get("register_hypothesis").fn(SPEC)
     assert res["hypothesis_id"] == 1
@@ -277,7 +277,9 @@ def test_get_trial_retrieves_stored_record(ledger, synthetic_market):
     assert fetched["trial_id"] == trial_id
     assert fetched["hypothesis_id"] == hyp_id
     assert fetched["verdict"] == trial_res["verdict"]
-    assert "walk_forward" in fetched["result"]
+    assert "summary" in fetched
+    assert "trades" in fetched["summary"]
+    assert "trade_list" not in json.dumps(fetched)
 
     # Nonexistent trial raises NotFound
     with pytest.raises(NotFound):
@@ -308,21 +310,68 @@ def test_request_holdout_gate_refuses_reject_trial(ledger, synthetic_market):
     assert len(notifier.by_kind(NoticeKind.HOLDOUT_REQUEST)) == 0
 
 
-def test_unconfigured_context_raises_value_error():
+def test_unconfigured_context_only_registers_context_free_tools():
+    # Without ctx
+    tools_no_ctx = build_desk_tools()
+    assert {t.name for t in tools_no_ctx.all()} == {"list_blocks", "draft_spec"}
+
+    # With ctx but None ledger/market
     ctx = DeskContext(ledger=None, market=None, family_id=1)
     tools = build_desk_tools(ctx)
+    assert {t.name for t in tools.all()} == {"list_blocks", "draft_spec"}
+    assert tools.get("describe_data") is None
+    assert tools.get("register_hypothesis") is None
+    assert tools.get("run_trial") is None
+    assert tools.get("get_trial") is None
+    assert tools.get("request_holdout") is None
 
-    with pytest.raises(ValueError, match="market is not configured"):
-        tools.get("describe_data").fn("GOLD", "M15")
 
-    with pytest.raises(ValueError, match="ledger is not configured"):
-        tools.get("register_hypothesis").fn(SPEC)
+def test_run_trial_refuses_when_no_cost_measured_and_does_not_charge_budget(
+    ledger, synthetic_market, tmp_path
+):
+    family_id = ledger.create_family("Unmeasured cost refusal test")
+    ctx = DeskContext(
+        ledger=ledger,
+        market=synthetic_market,
+        family_id=family_id,
+        cost=None,
+        root=tmp_path,  # empty dir: no data/costs/*.jsonl exists
+        use_m1=False,
+    )
+    tools = build_desk_tools(ctx)
+    hyp_id = tools.get("register_hypothesis").fn(SPEC)["hypothesis_id"]
 
-    with pytest.raises(ValueError, match="ledger is not configured"):
-        tools.get("run_trial").fn(1)
+    # Refuses instead of falling back to 0 spread floor (honest verdict rule)
+    with pytest.raises(
+        ValueError, match="no Spread Floor measured for GOLD; run Update data first"
+    ):
+        tools.get("run_trial").fn(hyp_id)
 
-    with pytest.raises(ValueError, match="ledger is not configured"):
-        tools.get("get_trial").fn(1)
+    # Budget is NOT charged and no trial recorded in Ledger
+    assert ledger.trial_count(family_id) == 0
 
-    with pytest.raises(ValueError, match="ledger is not configured"):
-        tools.get("request_holdout").fn(1)
+
+def test_trial_tools_bound_content_size_for_llm_context(ledger, synthetic_market):
+    ctx = DeskContext(
+        ledger=ledger,
+        market=synthetic_market,
+        family_id=ledger.create_family("Bounded tool content size test"),
+        cost=COST,
+        use_m1=False,
+    )
+    tools = build_desk_tools(ctx)
+    hyp_id = tools.get("register_hypothesis").fn(SPEC)["hypothesis_id"]
+
+    run_res = tools.get("run_trial").fn(hyp_id)
+    run_json = json.dumps(run_res)
+    assert len(run_json) < 4096, f"run_trial output too large: {len(run_json)} bytes"
+    assert "trade_list" not in run_json
+    assert "daily_r" not in run_json
+    assert "summary" in run_res
+
+    get_res = tools.get("get_trial").fn(run_res["trial_id"])
+    get_json = json.dumps(get_res)
+    assert len(get_json) < 4096, f"get_trial output too large: {len(get_json)} bytes"
+    assert "trade_list" not in get_json
+    assert "daily_r" not in get_json
+    assert "summary" in get_res
