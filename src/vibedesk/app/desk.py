@@ -138,10 +138,6 @@ class Desk:
             **summary,
         }
 
-    def bind_holdout_request(self, request_id: int, trial_id: int) -> None:
-        """Binding is recorded in Ledger (CCC-55). Kept for interface backward compatibility."""
-        pass
-
     def holdout_request_trial(self, request_id: int) -> int | None:
         """Retrieve the Trial ID bound to a Holdout Request from Ledger (CCC-55)."""
         req = self.ledger.holdout_request(request_id)
@@ -337,6 +333,7 @@ class DataUpdate:
         self.root = root
         self.running = False
         self.log: list[str] = []
+        self.last_ok: bool | None = None
         self._lock = threading.Lock()
 
     def start(self, symbols=SYMBOLS) -> bool:
@@ -388,7 +385,9 @@ class DataUpdate:
                 finally:
                     api.shutdown()
                 self._say("done")
+                self.last_ok = True
             except Exception as error:  # shown on the page; the server keeps running
+                self.last_ok = False
                 self._say(f"FAILED: {error}")
                 traceback.print_exc()
             finally:

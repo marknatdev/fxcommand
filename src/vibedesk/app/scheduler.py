@@ -241,9 +241,14 @@ class Scheduler:
                         cost = measure_cost(api, symbol, now)
                         record_cost(self.root, cost)
                         measured += 1
-                    except (CostError, Exception) as e:
+                    except CostError as e:
                         logger.warning("Spread floor measurement failed for %s: %s", symbol, e)
                         errors[symbol] = str(e)
+                    except Exception as e:
+                        logger.exception(
+                            "Unexpected error measuring spread floor for %s: %s", symbol, e
+                        )
+                        errors[symbol] = f"Unexpected: {e}"
             finally:
                 api.shutdown()
 

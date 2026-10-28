@@ -442,8 +442,16 @@ def create_app(
         if import_dates:
             last_refresh = max(import_dates)
 
-        # Cached last-known MT5 status without probing initialize/shutdown
-        mt5_ok = bool(mt5_api is not None or last_refresh or desk.update.running)
+        # Cached last refresh / import result without probing initialize/shutdown
+        nightly_job = scheduler.jobs().get("nightly_refresh") if scheduler else None
+        if desk.update.running:
+            refresh_ok = True
+        elif desk.update.last_ok is not None:
+            refresh_ok = desk.update.last_ok
+        elif nightly_job and nightly_job.last_run:
+            refresh_ok = nightly_job.status != "error"
+        else:
+            refresh_ok = bool(mt5_api is not None or last_refresh)
 
         # Cached last-known OmniRoute status without probing network
         client = current_llm()
@@ -454,7 +462,7 @@ def create_app(
         active_jobs = sum(1 for j in scheduler.jobs() if j.status == "running") if scheduler else 0
 
         return HealthOut(
-            mt5_connected=mt5_ok,
+            mt5_connected=refresh_ok,
             omniroute_connected=omni_ok,
             last_refresh=last_refresh,
             token_budget_state=b_state,
