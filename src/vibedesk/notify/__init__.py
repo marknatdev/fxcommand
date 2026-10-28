@@ -71,6 +71,13 @@ class RecordingNotifier:
         return len(self.notices)
 
 
+class NoOpNotifier:
+    """Null notifier for production runs when notifications are disabled or unconfigured."""
+
+    def send(self, notice: Notice) -> bool:
+        return True
+
+
 class TelegramNotifier:
     """Push-only Telegram notifier via Bot API sendMessage (spec §8.4).
 
@@ -97,7 +104,7 @@ class TelegramNotifier:
 
 def get_notifier(root: Path | None = None, settings: Any = None) -> Notifier:
     """Wiring point for notifiers: returns TelegramNotifier if enabled and token present,
-    otherwise RecordingNotifier.
+    otherwise NoOpNotifier.
     """
     from vibedesk.app.settings import DATA, load_secrets
 
@@ -109,10 +116,11 @@ def get_notifier(root: Path | None = None, settings: Any = None) -> Notifier:
 
     if enabled and token and chat_id:
         return TelegramNotifier(bot_token=token, chat_id=chat_id)
-    return RecordingNotifier()
+    return NoOpNotifier()
 
 
 __all__ = [
+    "NoOpNotifier",
     "Notice",
     "NoticeKind",
     "Notifier",

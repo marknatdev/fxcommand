@@ -2,10 +2,13 @@
 
 Daily reset is anchored to 00:00 Asia/Bangkok time (UTC+7), aligning with the owner's
 local desk operations and the 21:00 Bangkok daily digest (spec §4, §8.4).
+Clock is injected via `now: Callable[[], datetime]` (defaulting to UTC wall clock)
+for deterministic testing.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -15,6 +18,10 @@ from zoneinfo import ZoneInfo
 BANGKOK_TZ = ZoneInfo("Asia/Bangkok")
 WARN_THRESHOLD = 0.80
 PAUSE_THRESHOLD = 1.00
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 class BudgetState(StrEnum):
@@ -29,41 +36,41 @@ class TokenBudget:
 
     daily_cap: int = 100_000
     tz: ZoneInfo = BANGKOK_TZ
+    now: Callable[[], datetime] = field(default=_utc_now)
     _used: int = 0
     _current_day: str = field(default="")
     _warned_today: bool = False
 
     def __post_init__(self) -> None:
         if not self._current_day:
-            self._current_day = self._date_str(datetime.now(self.tz))
+            self._current_day = self._current_bangkok_date()
 
-    def _date_str(self, dt: datetime) -> str:
+    def _current_bangkok_date(self) -> str:
+        dt = self.now()
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
+            raise ValueError("TokenBudget clock must return a timezone-aware datetime")
         return dt.astimezone(self.tz).strftime("%Y-%m-%d")
 
-    def _check_reset(self, when: datetime | None = None) -> bool:
-        now = (when or datetime.now(UTC)).astimezone(self.tz)
-        today = self._date_str(now)
-        if today != self._current_day:
+    def _check_reset(self) -> bool:
+        today = self._current_bangkok_date()
+        # Reset only when the Bangkok calendar date moves forward
+        if today > self._current_day:
             self._current_day = today
             self._used = 0
             self._warned_today = False
             return True
         return False
 
-    def record_usage(
-        self, usage: dict[str, Any] | int, when: datetime | None = None
-    ) -> BudgetState:
+    def record_usage(self, usage: dict[str, Any] | int) -> BudgetState:
         """Record token consumption from OmniRoute's usage field or an integer count."""
-        self._check_reset(when)
+        self._check_reset()
         tokens = usage if isinstance(usage, int) else int(usage.get("total_tokens", 0))
         self._used += max(0, tokens)
-        return self.state(when)
+        return self.state()
 
-    def state(self, when: datetime | None = None) -> BudgetState:
+    def state(self) -> BudgetState:
         """Current state: OK (<80%), WARN (80-99%), PAUSED (>=100%)."""
-        self._check_reset(when)
+        self._check_reset()
         if self.daily_cap <= 0:
             return BudgetState.OK
         ratio = self._used / self.daily_cap
@@ -100,9 +107,9 @@ class TokenBudget:
     def mark_warned(self) -> None:
         self._warned_today = True
 
-    def status(self, when: datetime | None = None) -> dict[str, Any]:
+    def status(self) -> dict[str, Any]:
         """Status dictionary for Settings and Health APIs."""
-        st = self.state(when)
+        st = self.state()
         return {
             "daily_cap": self.daily_cap,
             "tokens_used": self._used,

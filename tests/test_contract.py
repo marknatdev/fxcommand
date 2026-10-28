@@ -8,7 +8,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import HTTPException
-from starlette.requests import Request
 from starlette.responses import Response
 
 from vibedesk.app.api_spec import ENDPOINT_TABLE, MCP_TOOL_MAP
@@ -18,6 +17,7 @@ from vibedesk.app.settings import Settings, load, load_secrets, save_secrets
 from vibedesk.desk.budget import BudgetState, TokenBudget
 from vibedesk.desk.tools import DeskContext, build_desk_tools
 from vibedesk.notify import (
+    NoOpNotifier,
     Notice,
     NoticeKind,
     RecordingNotifier,
@@ -58,9 +58,9 @@ def test_telegram_notifier_stub_and_get_notifier(tmp_path: Path):
     with pytest.raises(NotImplementedError, match="CCC-59"):
         tn.send(Notice(kind=NoticeKind.CANDIDATE, text="test"))
 
-    # When no secrets exist, get_notifier falls back to RecordingNotifier
+    # When no secrets exist, get_notifier falls back to NoOpNotifier
     fallback = get_notifier(root=tmp_path)
-    assert isinstance(fallback, RecordingNotifier)
+    assert isinstance(fallback, NoOpNotifier)
 
     # When secrets and settings are present and enabled
     save_secrets({"telegram_bot_token": "secret_token"}, root=tmp_path)
@@ -109,16 +109,25 @@ def test_token_budget_tracking_and_state():
 
 
 def test_token_budget_resets_on_bangkok_day_boundary():
-    budget = TokenBudget(daily_cap=1000)
-    day1 = datetime(2026, 10, 24, 12, 0, tzinfo=ZoneInfo("Asia/Bangkok"))
-    day2 = datetime(2026, 10, 25, 1, 0, tzinfo=ZoneInfo("Asia/Bangkok"))
+    current_time = datetime(2026, 10, 24, 12, 0, tzinfo=ZoneInfo("Asia/Bangkok"))
 
-    budget.record_usage(1000, when=day1)
-    assert budget.state(when=day1) == BudgetState.PAUSED
+    budget = TokenBudget(daily_cap=1000, now=lambda: current_time)
+    budget.record_usage(1000)
+    assert budget.state() == BudgetState.PAUSED
+    assert budget.used == 1000
 
-    # On day 2, budget resets to OK and 0 used
-    assert budget.state(when=day2) == BudgetState.OK
+    # Moving to next Bangkok day resets the budget
+    current_time = datetime(2026, 10, 25, 1, 0, tzinfo=ZoneInfo("Asia/Bangkok"))
+    assert budget.state() == BudgetState.OK
     assert budget.remaining == 1000
+    assert budget.used == 0
+
+    # Moving clock backwards does NOT reset
+    budget.record_usage(500)
+    assert budget.used == 500
+    current_time = datetime(2026, 10, 24, 12, 0, tzinfo=ZoneInfo("Asia/Bangkok"))
+    assert budget.state() == BudgetState.OK
+    assert budget.used == 500
 
 
 # --- Desk Tools Tests ---
@@ -181,21 +190,22 @@ def test_owner_auth_cookie():
     assert "samesite=strict" in cookie_header.lower()
 
     # require_owner rejects missing cookie
-    req_without = Request({"type": "http", "method": "POST", "path": "/api/test", "headers": []})
-    with pytest.raises(HTTPException) as exc:
-        require_owner(req_without, owner=None)
-    assert exc.value.status_code == 403
+    with pytest.raises(HTTPException) as exc_missing:
+        require_owner(owner=None)
+    assert exc_missing.value.status_code == 403
 
-    # require_owner accepts cookie
-    req_with = Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/api/test",
-            "headers": [(b"cookie", f"{OWNER_COOKIE_NAME}={OWNER_COOKIE_VALUE}".encode())],
-        }
-    )
-    assert require_owner(req_with, owner=OWNER_COOKIE_VALUE) is True
+    # require_owner rejects wrong cookie value
+    with pytest.raises(HTTPException) as exc_wrong:
+        require_owner(owner="wrong_value")
+    assert exc_wrong.value.status_code == 403
+
+    # require_owner rejects empty cookie
+    with pytest.raises(HTTPException) as exc_empty:
+        require_owner(owner="")
+    assert exc_empty.value.status_code == 403
+
+    # require_owner accepts valid cookie
+    assert require_owner(owner=OWNER_COOKIE_VALUE) is True
 
 
 # --- Scheduler Tests ---
@@ -241,7 +251,7 @@ def test_api_spec_and_mcp_map():
 
 
 def test_settings_and_secrets(tmp_path: Path):
-    s = load(root=tmp_path)
+    s = load(root=tmp_path, env={})
     assert s.daily_token_cap == 100_000
     pub = s.public()
     assert "daily_token_cap" in pub
@@ -252,3 +262,30 @@ def test_settings_and_secrets(tmp_path: Path):
     save_secrets({"telegram_bot_token": "tg123"}, root=tmp_path)
     sec = load_secrets(root=tmp_path)
     assert sec.get("telegram_bot_token") == "tg123"
+
+    # Precedence: settings.json with empty key does NOT clobber environment key
+    (tmp_path / "settings.json").write_text(
+        '{"llm_key": "", "llm_url": "", "telegram_chat_id": ""}',
+        encoding="utf-8",
+    )
+    s2 = load(
+        root=tmp_path,
+        env={
+            "VIBEDESK_LLM_KEY": "sk-env-key",
+            "VIBEDESK_LLM_URL": "http://127.0.0.1:20128/v1",
+            "VIBEDESK_TELEGRAM_CHAT_ID": "chat-999",
+        },
+    )
+    assert s2.llm_key == "sk-env-key"
+    assert s2.llm_url == "http://127.0.0.1:20128/v1"
+    assert s2.telegram_chat_id == "chat-999"
+
+    # Boolean precedence: env telegram enabled stays True even if settings.json is false
+    (tmp_path / "settings.json").write_text('{"telegram_enabled": false}', encoding="utf-8")
+    s3 = load(root=tmp_path, env={"VIBEDESK_TELEGRAM_ENABLED": "1"})
+    assert s3.telegram_enabled is True
+
+    # Boolean precedence: settings.json enables telegram if env doesn't
+    (tmp_path / "settings.json").write_text('{"telegram_enabled": true}', encoding="utf-8")
+    s4 = load(root=tmp_path, env={})
+    assert s4.telegram_enabled is True

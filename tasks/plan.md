@@ -221,15 +221,19 @@ To ensure zero merge conflicts during parallel execution across worktrees, each 
 | `src/vibedesk/desk/tools.py` | Desk Team | CCC-44 | Wave 1 | Full implementation of the 7 tools against Ledger & Market |
 | `src/vibedesk/desk/grounding.py` | CCC-45 Worker | CCC-45 | Wave 1 | Built in full by separate CCC-45 worker (validate & render) |
 | `src/vibedesk/desk/budget.py` | Desk Team | CCC-46 | Wave 1 | Wire budget check & warning notices into desk loop |
+| `src/vibedesk/desk/loop.py` | Desk Team | CCC-45, CCC-46 | Wave 1 | Wires grounding retries and budget pause into desk loop |
+| `src/vibedesk/desk/__init__.py` | Desk Team | CCC-44, CCC-45 | Wave 1 | Re-exports; CCC-45 worker does not edit; Desk Team adds grounding export |
 | `tests/test_desk_tools.py` | Desk Team | CCC-44 | Wave 1 | Tests for the 7 desk tools |
 | `tests/test_grounding.py` | CCC-45 Worker | CCC-45 | Wave 1 | Owned and tested in full by separate CCC-45 worker |
 | `tests/test_budget.py` | Desk Team | CCC-46 | Wave 1 | Tests for token counting, 80% warning, 100% pause |
 | `src/vibedesk/app/server.py` | API Team | CCC-50 | Wave 1 | Wire new endpoints per spec §8.1, `require_owner` |
 | `src/vibedesk/app/auth.py` | API Team | CCC-50 | Wave 1 | Owner cookie dependency enforcement |
+| `src/vibedesk/app/settings.py` | API Team | CCC-50 | Wave 1 | Owns for `PUT /api/settings`; Notify Team uses `load_secrets`/`save_secrets` without editing |
 | `src/vibedesk/app/scheduler.py` | API Team | CCC-53 | Wave 1 | Background thread/loop for the 3 scheduled jobs |
 | `tests/test_api.py` | API Team | CCC-50, CCC-55 | Wave 1 | Tests for HTTP API endpoints & owner-only refusals |
 | `tests/test_scheduler.py` | API Team | CCC-53 | Wave 1 | Tests for scheduler execution and timing |
 | `tests/test_carry_forwards.py` | API Team | CCC-55 | Wave 1 | Tests for grant reusability, Holdout Request binding, family lock |
+| `tests/test_contract.py` | Contract (Wave 0) | Wave 0 | Wave 0 | Baseline test of Wave 0 contracts; frozen after Wave 0 (see rules below) |
 | `src/vibedesk/app/static/index.html` | UI Team | CCC-52, CCC-56 | Wave 2 | 4 pages (Desk, Ideas, Ledger, Settings), 375 px layout, owner cookie |
 | `tests/test_ui_playwright.py` | UI Team | CCC-56 | Wave 2 | Playwright E2E on fakes; 375 px mobile viewport check |
 | `src/vibedesk/mcp/` | MCP Team | CCC-58, CCC-60 | Wave 2 | Stdio MCP server calling HTTP API (read/act tools only) |
@@ -239,6 +243,9 @@ To ensure zero merge conflicts during parallel execution across worktrees, each 
 
 ### Shared Files Rules
 - `src/vibedesk/app/server.py`: owned exclusively by the **API Team**. The UI team works strictly in `static/index.html` and does not edit `server.py`.
+- `src/vibedesk/desk/loop.py` & `src/vibedesk/desk/__init__.py`: owned exclusively by the **Desk Team**. The CCC-45 worker only writes `src/vibedesk/desk/grounding.py` and `tests/test_grounding.py`; the Desk Team wires grounding into `loop.py` and re-exports it in `__init__.py`.
+- `src/vibedesk/app/settings.py`: owned exclusively by the **API Team** for `PUT /api/settings`. The Notify Team consumes `load_secrets`/`save_secrets` without modifying `settings.py`.
+- `tests/test_contract.py`: frozen after Wave 0. When a Wave 1 team implements a stubbed function (e.g. Desk Team in CCC-44 or API Team in CCC-53), they remove only the specific `NotImplementedError` stub assertion in `test_contract.py` for that component in their own PR, and test the real implementation in their own dedicated test file (`test_desk_tools.py`, `test_scheduler.py`).
 - `pyproject.toml`: dependencies are frozen by Wave 0 (`fastapi`, `httpx`, `numba`, `numpy`, `pyarrow`, `pydantic`, `tzdata`, `uvicorn`, `pytest`, `ruff`). If MCP team requires `mcp`, add via `uv add mcp`.
 - `src/vibedesk/ledger/store.py`: read-only reference for tools and API. Any schema migrations must be coordinated and append-only.
 - `data/`: ignored by git. Never commit `data/` or secrets.

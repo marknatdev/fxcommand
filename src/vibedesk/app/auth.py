@@ -11,7 +11,7 @@ The MCP server never possesses this cookie and gets HTTP 403 on owner actions.
 
 from __future__ import annotations
 
-from fastapi import Cookie, HTTPException, Request, Response
+from fastapi import Cookie, HTTPException, Response
 
 OWNER_COOKIE_NAME = "vibedesk_owner"
 OWNER_COOKIE_VALUE = "1"
@@ -30,15 +30,13 @@ def set_owner_cookie(response: Response) -> None:
 
 
 def require_owner(
-    request: Request,
     owner: str | None = Cookie(default=None, alias=OWNER_COOKIE_NAME),
 ) -> bool:
     """FastAPI dependency requiring the owner cookie (spec §8.1).
 
     Raises HTTP 403 Forbidden if the owner cookie is missing or invalid.
     """
-    cookie_val = owner or request.cookies.get(OWNER_COOKIE_NAME)
-    if not cookie_val:
+    if owner != OWNER_COOKIE_VALUE:
         raise HTTPException(
             status_code=403,
             detail="Owner action required: owner cookie missing or invalid",
