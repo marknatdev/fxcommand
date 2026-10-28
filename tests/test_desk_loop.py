@@ -611,3 +611,31 @@ def test_grounding_rule_refuses_ambiguous_spec_param_and_retries():
         second_call = llm.calls[1]
         user_msgs = [m for m in second_call if m["role"] == "user"]
         assert any("unresolved placeholder" in m["content"] for m in user_msgs)
+
+
+def test_grounding_rule_renders_spec_combinations():
+    """Verify that {{spec:ID.combinations}} renders the concrete parameter grid size."""
+    from vibedesk.desk.tools import DeskContext, build_desk_tools
+    from vibedesk.ledger import Ledger
+
+    with Ledger(":memory:") as ledger:
+        family_id = ledger.create_family("Combinations test")
+        hyp_id = ledger.register_hypothesis(family_id, EXAMPLE)
+        ctx = DeskContext(ledger=ledger, market=None, family_id=family_id)
+        tools = build_desk_tools(ctx)
+
+        # EXAMPLE has 8 concrete combinations
+        llm = ScriptedLLM(
+            Turn(
+                content=(
+                    f"The strategy spec has {{{{spec:{hyp_id}.combinations}}}} combinations "
+                    f"on {{{{hyp:{hyp_id}.symbol}}}}."
+                )
+            )
+        )
+
+        events = list(desk_loop(llm, "Check combinations", tools=tools))
+        assert len(events) == 1
+        assert events[0].event == "message"
+        assert events[0].data["content"] == "The strategy spec has 8 combinations on GOLD."
+        assert not events[0].data.get("grounding_withheld")

@@ -5,6 +5,7 @@ prose, capped at 12 tool calls per message. Streams Server-Sent Events (`message
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import inspect
 import json
@@ -23,9 +24,12 @@ from vibedesk.app.llm import (
     ToolCall,
     Turn,
 )
-from vibedesk.app.research import system_prompt
+from vibedesk.app.research import normalize, system_prompt
+from vibedesk.blocks.spec import SpecInvalid, expand_grid
+from vibedesk.blocks.spec import validate as validate_spec
 from vibedesk.desk.budget import TokenBudget
 from vibedesk.desk.grounding import GroundingError, render, validate
+from vibedesk.ledger import NotFound
 
 MAX_TOOL_CALLS = 12
 EVENT_TYPES = ("message", "tool_started", "trial_progress", "verdict")
@@ -399,18 +403,8 @@ def desk_loop(
                     if field_name in s and field_name not in ("entry", "filters", "exit", "sizing"):
                         matches.append(s[field_name])
                     elif field_name == "combinations":
-                        try:
-                            from vibedesk.blocks.spec import (
-                                expand_grid,
-                                normalize,
-                            )
-                            from vibedesk.blocks.spec import (
-                                validate as validate_spec,
-                            )
-
+                        with contextlib.suppress(ValueError, TypeError, KeyError, SpecInvalid):
                             matches.append(len(expand_grid(validate_spec(normalize(s)))))
-                        except Exception:
-                            pass
 
                     # Nested block parameters (collect from entry, filters, exit, sizing)
                     def _collect_params(data: Any, key: str) -> None:
@@ -434,7 +428,7 @@ def desk_loop(
                     if len(matches) == 1:
                         return _format_lookup_value(field_name, matches[0])
                     return None
-                except Exception:
+                except (ValueError, TypeError, KeyError, SpecInvalid, NotFound):
                     return None
             return None
 
