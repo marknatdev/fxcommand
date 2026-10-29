@@ -34,6 +34,19 @@ from vibedesk.mcp.client import VibeDeskMcpClient
 DEFAULT_BASE_URL = "http://127.0.0.1:8765"
 
 
+def resolve_base_url(base_url: str | None = None) -> str:
+    """Resolve the effective API base URL.
+
+    Precedence: explicit base_url argument > VIBEDESK_API_URL env var > DEFAULT_BASE_URL.
+    """
+    if base_url and str(base_url).strip():
+        return str(base_url).strip().rstrip("/")
+    env_url = os.environ.get("VIBEDESK_API_URL", "").strip()
+    if env_url:
+        return env_url.rstrip("/")
+    return DEFAULT_BASE_URL
+
+
 def create_mcp_server(
     base_url: str | None = None,
     client: httpx.AsyncClient | None = None,
@@ -47,7 +60,7 @@ def create_mcp_server(
         client: Optional pre-configured httpx.AsyncClient (e.g. ASGITransport).
         api_client: Optional pre-configured VibeDeskMcpClient.
     """
-    effective_url = base_url or os.environ.get("VIBEDESK_API_URL", DEFAULT_BASE_URL)
+    effective_url = resolve_base_url(base_url)
     backend = api_client or VibeDeskMcpClient(base_url=effective_url, client=client)
 
     server = MCPServer(
@@ -67,17 +80,13 @@ def create_mcp_server(
         return await backend.list_ideas()
 
     @server.tool()
-    async def get_verdict(trial_id: int | None = None, id: int | None = None) -> dict[str, Any]:
+    async def get_verdict(trial_id: int) -> dict[str, Any]:
         """Get the verdict and summary for a completed Trial.
 
         Args:
-            trial_id: The ID of the Trial (also accepts id).
-            id: Alias for trial_id.
+            trial_id: The ID of the Trial to retrieve.
         """
-        tid = trial_id if trial_id is not None else id
-        if tid is None:
-            raise ToolError("trial_id (or id) is required")
-        return await backend.get_verdict(tid)
+        return await backend.get_verdict(trial_id)
 
     @server.tool()
     async def get_ledger_stats() -> dict[str, Any]:
@@ -90,17 +99,13 @@ def create_mcp_server(
         return await backend.list_blocks()
 
     @server.tool()
-    async def get_trial(trial_id: int | None = None, id: int | None = None) -> dict[str, Any]:
+    async def get_trial(trial_id: int) -> dict[str, Any]:
         """Get a Trial's full summary and Verdict Card data.
 
         Args:
-            trial_id: The ID of the Trial (also accepts id).
-            id: Alias for trial_id.
+            trial_id: The ID of the Trial to retrieve.
         """
-        tid = trial_id if trial_id is not None else id
-        if tid is None:
-            raise ToolError("trial_id (or id) is required")
-        return await backend.get_trial(tid)
+        return await backend.get_trial(trial_id)
 
     # --- Act Tools (spec §8.2, counted in the Ledger) ---
 
@@ -117,39 +122,29 @@ def create_mcp_server(
 
     @server.tool()
     async def run_trial(
-        hypothesis_id: int | None = None,
-        id: int | None = None,
+        hypothesis_id: int,
         idea: str = "",
     ) -> dict[str, Any]:
         """Run the Gauntlet on a Hypothesis. Counts as 1 Trial in the Ledger.
 
         Args:
-            hypothesis_id: The ID of the Hypothesis to test (also accepts id).
-            id: Alias for hypothesis_id.
+            hypothesis_id: The ID of the Hypothesis to test.
             idea: Optional label or note for this trial run.
         """
-        hid = hypothesis_id if hypothesis_id is not None else id
-        if hid is None:
-            raise ToolError("hypothesis_id (or id) is required")
-        return await backend.run_trial(hid, idea=idea)
+        return await backend.run_trial(hypothesis_id, idea=idea)
 
     @server.tool()
     async def request_holdout(
-        hypothesis_id: int | None = None,
-        id: int | None = None,
+        hypothesis_id: int,
         reason: str = "",
     ) -> dict[str, Any]:
         """Submit a Holdout Request for a CANDIDATE Hypothesis through the gate in spec §6.3.
 
         Args:
-            hypothesis_id: The ID of the Hypothesis requesting Holdout (also accepts id).
-            id: Alias for hypothesis_id.
+            hypothesis_id: The ID of the Hypothesis requesting Holdout.
             reason: Optional explanation or note for the request.
         """
-        hid = hypothesis_id if hypothesis_id is not None else id
-        if hid is None:
-            raise ToolError("hypothesis_id (or id) is required")
-        return await backend.request_holdout(hid, reason=reason)
+        return await backend.request_holdout(hypothesis_id, reason=reason)
 
     return server
 
@@ -164,12 +159,6 @@ def main(argv: list[str] | None = None) -> None:
         "--base-url",
         default=None,
         help=f"Vibe Desk HTTP API base URL (default: {DEFAULT_BASE_URL} or $VIBEDESK_API_URL)",
-    )
-    parser.add_argument(
-        "--transport",
-        default="stdio",
-        choices=["stdio"],
-        help="Transport protocol (default: stdio)",
     )
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 

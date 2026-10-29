@@ -13,6 +13,7 @@ An AI research desk for one owner who trades GOLD and FX on MT5 (XM). The owner 
 ```bash
 uv run --extra mt5 vibedesk-web --open    # the app, by hand
 uv run python tests/demo_server.py        # the app on port 8766 with a canned AI and a throwaway Ledger
+uv run vibedesk-mcp                       # stdio MCP server (8 tools, spec §8.2)
 uv sync                                   # dependencies (add --extra mt5 for the live terminal)
 uv run pytest                             # default suite, 4 workers (~30 s)
 uv run pytest -m slow                     # known answers, benchmarks, 12-year import (~4 min)

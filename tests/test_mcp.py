@@ -41,7 +41,7 @@ from vibedesk.market.costs import CostMeasurement, record_cost
 from vibedesk.market.fake_mt5 import FakeMt5
 from vibedesk.market.synthetic import SyntheticBarSource
 from vibedesk.mcp.client import VibeDeskMcpClient
-from vibedesk.mcp.server import create_mcp_server
+from vibedesk.mcp.server import create_mcp_server, main, resolve_base_url
 from vibedesk.notify import (
     NoticeKind,
     RecordingNotifier,
@@ -58,15 +58,16 @@ class AlwaysTruthyRecordingNotifier(RecordingNotifier):
         return True
 
 
-def setup_test_cache(root: Path) -> None:
-    """Setup synthetic GOLD M15 and H1 bars with costs in root/bars."""
-    source = SyntheticBarSource(1, date(2013, 12, 1), date(2025, 1, 1))
+def _populate_year_chunks(root: Path, source: SyntheticBarSource) -> None:
     for timeframe in (Timeframe.M15, Timeframe.H1):
         bars = source.fetch("GOLD", timeframe)
         for year in range(2013, 2025):
             start = datetime(year, 1, 1, tzinfo=UTC).timestamp()
             end = datetime(year + 1, 1, 1, tzinfo=UTC).timestamp()
             write_chunk(root, bars.between(int(start), int(end)), year)
+
+
+def _record_gold_metadata(root: Path) -> None:
     record_import(root, "GOLD", datetime(2025, 1, 1, tzinfo=UTC))
     record_cost(
         root,
@@ -74,6 +75,13 @@ def setup_test_cache(root: Path) -> None:
             "GOLD", "2026-10-23T00:00:00+00:00", 0.01, 30.0, 35.0, 1000, -50.0, 10.0, 3
         ),
     )
+
+
+def setup_test_cache(root: Path) -> None:
+    """Setup synthetic GOLD M15 and H1 bars with costs in root/bars."""
+    source = SyntheticBarSource(1, date(2013, 12, 1), date(2025, 1, 1))
+    _populate_year_chunks(root, source)
+    _record_gold_metadata(root)
 
 
 def record_candidate_trial(desk: Desk, hypothesis_id: int) -> int:
@@ -114,19 +122,18 @@ def record_candidate_trial(desk: Desk, hypothesis_id: int) -> int:
     )
 
 
-@pytest.fixture
-def mcp_test_env(tmp_path: Path):
-    """Fixture providing FastAPI app, RecordingNotifier, Desk, and MCP server wiring."""
+def _init_test_dirs(tmp_path: Path) -> tuple[Path, Path]:
     data_dir = tmp_path / "data"
     settings_dir = tmp_path / "settings"
     data_dir.mkdir(parents=True, exist_ok=True)
     settings_dir.mkdir(parents=True, exist_ok=True)
     setup_test_cache(data_dir)
+    return data_dir, settings_dir
 
-    notifier = AlwaysTruthyRecordingNotifier()
+
+def _build_test_app(data_dir: Path, settings_dir: Path, notifier: RecordingNotifier):
     llm = ScriptedLLM(Turn(content="Breakout analysis on GOLD", usage={"total_tokens": 150}))
     fake_mt5 = FakeMt5(SyntheticBarSource(1, date(2013, 12, 1), date(2027, 1, 1)))
-
     app = create_app(
         root=data_dir,
         llm=llm,
@@ -135,24 +142,30 @@ def mcp_test_env(tmp_path: Path):
         mt5_api=fake_mt5,
         enable_scheduler=False,
     )
+    return app, llm
 
-    async_client = httpx.AsyncClient(
+
+@pytest.fixture
+async def mcp_test_env(tmp_path: Path):
+    """Fixture providing FastAPI app, RecordingNotifier, Desk, and MCP server wiring."""
+    data_dir, settings_dir = _init_test_dirs(tmp_path)
+    notifier = AlwaysTruthyRecordingNotifier()
+    app, llm = _build_test_app(data_dir, settings_dir, notifier)
+
+    async with httpx.AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://testserver",
-    )
-    mcp_server = create_mcp_server(client=async_client)
-    desk = app.state.desk
-
-    return {
-        "app": app,
-        "desk": desk,
-        "notifier": notifier,
-        "async_client": async_client,
-        "mcp_server": mcp_server,
-        "llm": llm,
-        "data_dir": data_dir,
-        "settings_dir": settings_dir,
-    }
+    ) as async_client:
+        yield {
+            "app": app,
+            "desk": app.state.desk,
+            "notifier": notifier,
+            "async_client": async_client,
+            "mcp_server": create_mcp_server(client=async_client),
+            "llm": llm,
+            "data_dir": data_dir,
+            "settings_dir": settings_dir,
+        }
 
 
 # --- CCC-58: MCP Tool Inventory & Exclusions ---
@@ -235,8 +248,7 @@ async def test_mcp_read_tools_against_api(mcp_test_env):
     assert t_data["trial_id"] == trial_id
     assert t_data["verdict"] in ("CANDIDATE", "REJECT")
 
-    # Alias `id` also supported
-    res_verdict = await server.call_tool("get_verdict", {"id": trial_id})
+    res_verdict = await server.call_tool("get_verdict", {"trial_id": trial_id})
     v_data = json.loads(res_verdict.content[0].text)
     assert v_data["trial_id"] == trial_id
     assert v_data["verdict"] in ("CANDIDATE", "REJECT")
@@ -251,7 +263,7 @@ async def test_mcp_act_tools_against_api(mcp_test_env):
     # 1. submit_idea creates an Idea Family
     res_sub = await server.call_tool("submit_idea", {"idea": "GOLD H1 Breakout"})
     fam_data = json.loads(res_sub.content[0].text)
-    assert fam_data["id"] > 0
+    assert fam_data["id"] == 1
     assert fam_data["idea"] == "GOLD H1 Breakout"
     assert fam_data["budget"] == 25
     assert fam_data["trial_count"] == 0
@@ -263,20 +275,22 @@ async def test_mcp_act_tools_against_api(mcp_test_env):
     res_run = await server.call_tool("run_trial", {"hypothesis_id": hyp_id, "idea": "Run #1"})
     run_data = json.loads(res_run.content[0].text)
     assert run_data["hypothesis_id"] == hyp_id
-    assert run_data["verdict"] in ("CANDIDATE", "REJECT")
-    assert run_data["trial_id"] > 0
+    assert run_data["trial_id"] == 1
+    assert run_data["verdict"] == "REJECT"
+    assert run_data["closest_miss"]["check"] == "stress_profit_factor"
 
     # Verify Ledger counted 1 trial
     assert desk.ledger.trial_count(fam_data["id"]) == 1
 
     # 3. request_holdout submits holdout request
-    # Since run_data was REJECT or CANDIDATE, request_holdout endpoint handles gate
+    # Since run_data was REJECT, request_holdout is refused (NOT_CANDIDATE)
     res_holdout = await server.call_tool(
         "request_holdout", {"hypothesis_id": hyp_id, "reason": "Edge confirmed"}
     )
     h_data = json.loads(res_holdout.content[0].text)
     assert h_data["hypothesis_id"] == hyp_id
-    assert h_data["status"] in ("pending", "refused")
+    assert h_data["status"] == "refused"
+    assert h_data["refusal_reason"].startswith("NOT_CANDIDATE")
 
 
 # --- CCC-60: Owner-Only Refusals & MCP Isolation ---
@@ -327,6 +341,80 @@ async def test_owner_only_endpoints_refused_and_unreachable_by_mcp(mcp_test_env)
 # --- CCC-60: Notices in RecordingNotifier Through the API ---
 
 
+async def _trigger_candidate_notice(
+    async_client: httpx.AsyncClient,
+    desk: Desk,
+    fam_id: int,
+    hyp_id: int,
+    notifier: RecordingNotifier,
+) -> None:
+    original_run_hypothesis = desk.run_hypothesis
+    desk.run_hypothesis = lambda hid, idea="": {
+        "trial_id": 42,
+        "hypothesis_id": hid,
+        "family_id": fam_id,
+        "verdict": "CANDIDATE",
+        "label": "Candidate test",
+        "created_at": datetime.now(UTC).isoformat(),
+        "spec": EXAMPLE,
+        "summary": {"profit_factor": 1.4, "trades": 120},
+    }
+    try:
+        res = await async_client.post(f"/api/hypotheses/{hyp_id}/trials", json={"idea": "run"})
+        assert res.status_code == 200
+        assert res.json()["verdict"] == "CANDIDATE"
+    finally:
+        desk.run_hypothesis = original_run_hypothesis
+
+    cand = notifier.by_kind(NoticeKind.CANDIDATE)
+    assert len(cand) == 1
+    assert cand[0].data["trial_id"] == 42
+    assert "CANDIDATE" in cand[0].text
+
+
+async def _trigger_holdout_request_notice(
+    async_client: httpx.AsyncClient, desk: Desk, hyp_id: int, notifier: RecordingNotifier
+) -> None:
+    record_candidate_trial(desk, hyp_id)
+    res = await async_client.post(
+        f"/api/hypotheses/{hyp_id}/holdout-requests",
+        json={"reason": "Candidate ready for holdout"},
+    )
+    assert res.status_code == 200
+    assert res.json()["status"] == "pending"
+
+    holdout = notifier.by_kind(NoticeKind.HOLDOUT_REQUEST)
+    assert len(holdout) == 1
+    assert holdout[0].data["hypothesis_id"] == hyp_id
+    assert "awaiting owner approval" in holdout[0].text
+
+
+async def _trigger_token_warning_notice(
+    async_client: httpx.AsyncClient, llm: ScriptedLLM, fam_id: int, notifier: RecordingNotifier
+) -> None:
+    llm.steps = [Turn(content="Analyze momentum filter", usage={"total_tokens": 85_000})]
+    res = await async_client.post(
+        f"/api/families/{fam_id}/chat",
+        json={"message": "Analyze momentum filter"},
+    )
+    assert res.status_code == 200
+    await res.aread()
+
+    tokens = notifier.by_kind(NoticeKind.TOKEN_WARNING)
+    assert len(tokens) == 1
+    assert tokens[0].data["used"] >= 80_000
+    assert "80%" in tokens[0].text
+
+
+def _verify_pass_and_fail_notices(notifier: RecordingNotifier, hyp_id: int) -> None:
+    n_pass = pass_notice("Hypothesis passed holdout validation", data={"hypothesis_id": hyp_id})
+    n_fail = holdout_fail_notice("Hypothesis failed holdout checks", data={"hypothesis_id": hyp_id})
+    assert notifier.send(n_pass) is True
+    assert notifier.send(n_fail) is True
+    assert len(notifier.by_kind(NoticeKind.PASS)) == 1
+    assert len(notifier.by_kind(NoticeKind.HOLDOUT_FAIL)) == 1
+
+
 @pytest.mark.anyio
 async def test_notices_arrive_in_recording_notifier_through_api(mcp_test_env):
     """Verify notices arrive in RecordingNotifier when triggered through API (CCC-60)."""
@@ -335,77 +423,13 @@ async def test_notices_arrive_in_recording_notifier_through_api(mcp_test_env):
     desk = mcp_test_env["desk"]
     notifier.clear()
 
-    # 1. CANDIDATE notice when trial achieves CANDIDATE verdict
     fam_id = desk.ledger.create_family("Candidate Notice Family")
     hyp_id = desk.ledger.register_hypothesis(fam_id, EXAMPLE)
 
-    # Monkeypatch desk.run_hypothesis to return CANDIDATE verdict
-    def fake_run_hypothesis(hypothesis_id: int, idea: str = "") -> dict[str, Any]:
-        return {
-            "trial_id": 42,
-            "hypothesis_id": hypothesis_id,
-            "family_id": fam_id,
-            "verdict": "CANDIDATE",
-            "label": "Candidate test",
-            "created_at": datetime.now(UTC).isoformat(),
-            "spec": EXAMPLE,
-            "summary": {"profit_factor": 1.4, "trades": 120},
-        }
-
-    original_run_hypothesis = desk.run_hypothesis
-    desk.run_hypothesis = fake_run_hypothesis
-    try:
-        res_trial = await async_client.post(
-            f"/api/hypotheses/{hyp_id}/trials", json={"idea": "run"}
-        )
-        assert res_trial.status_code == 200
-        assert res_trial.json()["verdict"] == "CANDIDATE"
-    finally:
-        desk.run_hypothesis = original_run_hypothesis
-
-    cand_notices = notifier.by_kind(NoticeKind.CANDIDATE)
-    assert len(cand_notices) == 1
-    assert cand_notices[0].data["trial_id"] == 42
-    assert "CANDIDATE" in cand_notices[0].text
-
-    # 2. HOLDOUT_REQUEST notice when valid CANDIDATE hypothesis requests holdout
-    record_candidate_trial(desk, hyp_id)
-    res_h = await async_client.post(
-        f"/api/hypotheses/{hyp_id}/holdout-requests",
-        json={"reason": "Candidate ready for holdout"},
-    )
-    assert res_h.status_code == 200
-    assert res_h.json()["status"] == "pending"
-
-    holdout_notices = notifier.by_kind(NoticeKind.HOLDOUT_REQUEST)
-    assert len(holdout_notices) == 1
-    assert holdout_notices[0].data["hypothesis_id"] == hyp_id
-    assert "awaiting owner approval" in holdout_notices[0].text
-
-    # 3. TOKEN_WARNING notice when chat triggers 80% daily token cap
-    # LLM returns usage of 85,000 against 100,000 cap
-    mcp_test_env["llm"].steps = [
-        Turn(content="Analyze momentum filter", usage={"total_tokens": 85_000})
-    ]
-    res_chat = await async_client.post(
-        f"/api/families/{fam_id}/chat",
-        json={"message": "Analyze momentum filter"},
-    )
-    assert res_chat.status_code == 200
-    await res_chat.aread()
-
-    token_notices = notifier.by_kind(NoticeKind.TOKEN_WARNING)
-    assert len(token_notices) == 1
-    assert token_notices[0].data["used"] >= 80_000
-    assert "80%" in token_notices[0].text
-
-    # 4. Verify PASS and HOLDOUT FAIL notices format and record in RecordingNotifier
-    n_pass = pass_notice("Hypothesis passed holdout validation", data={"hypothesis_id": hyp_id})
-    n_fail = holdout_fail_notice("Hypothesis failed holdout checks", data={"hypothesis_id": hyp_id})
-    assert notifier.send(n_pass) is True
-    assert notifier.send(n_fail) is True
-    assert len(notifier.by_kind(NoticeKind.PASS)) == 1
-    assert len(notifier.by_kind(NoticeKind.HOLDOUT_FAIL)) == 1
+    await _trigger_candidate_notice(async_client, desk, fam_id, hyp_id, notifier)
+    await _trigger_holdout_request_notice(async_client, desk, hyp_id, notifier)
+    await _trigger_token_warning_notice(async_client, mcp_test_env["llm"], fam_id, notifier)
+    _verify_pass_and_fail_notices(notifier, hyp_id)
 
 
 # --- Full MCP JSON-RPC Protocol Test via In-Memory ClientSession ---
@@ -496,18 +520,43 @@ async def test_mcp_error_handling(mcp_test_env):
         await server.call_tool("run_trial", {})
 
 
-def test_mcp_client_base_url_config(monkeypatch):
+@pytest.mark.anyio
+async def test_mcp_connect_error_handling():
+    """Verify httpx.ConnectError raises ToolError indicating Vibe Desk is not running."""
+    client = VibeDeskMcpClient(base_url="http://127.0.0.1:54321")
+    with pytest.raises(ToolError, match=r"Vibe Desk is not running on http://127.0.0.1:54321"):
+        await client.list_ideas()
+
+
+def test_resolve_base_url_precedence(monkeypatch):
     """Verify base URL precedence: explicit argument > env var > default."""
     # 1. Default base URL
     monkeypatch.delenv("VIBEDESK_API_URL", raising=False)
-    client_default = VibeDeskMcpClient()
-    assert client_default.base_url == "http://127.0.0.1:8765"
+    assert resolve_base_url() == "http://127.0.0.1:8765"
+    assert resolve_base_url(None) == "http://127.0.0.1:8765"
 
-    # 2. Environment variable
+    # 2. Environment variable VIBEDESK_API_URL
     monkeypatch.setenv("VIBEDESK_API_URL", "http://10.0.0.1:9000/")
-    server_env = create_mcp_server()
-    assert server_env.name == "vibedesk-mcp"
+    assert resolve_base_url() == "http://10.0.0.1:9000"
 
-    # 3. Explicit parameter overrides env var
-    client_explicit = VibeDeskMcpClient(base_url="http://192.168.1.50:8765/")
-    assert client_explicit.base_url == "http://192.168.1.50:8765"
+    # 3. Explicit argument overrides environment variable
+    assert resolve_base_url("http://192.168.1.50:8765/") == "http://192.168.1.50:8765"
+
+
+def test_main_cli_base_url(monkeypatch):
+    """Verify main CLI entry point parses --base-url and passes to create_mcp_server."""
+    captured: dict[str, Any] = {}
+
+    def fake_create_mcp_server(base_url: str | None = None) -> Any:
+        captured["base_url"] = base_url
+
+        class FakeServer:
+            def run(self, transport: str = "stdio") -> None:
+                captured["transport"] = transport
+
+        return FakeServer()
+
+    monkeypatch.setattr("vibedesk.mcp.server.create_mcp_server", fake_create_mcp_server)
+    main(["--base-url", "http://10.0.0.1:9000"])
+    assert captured["base_url"] == "http://10.0.0.1:9000"
+    assert captured["transport"] == "stdio"

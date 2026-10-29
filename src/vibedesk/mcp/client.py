@@ -39,23 +39,26 @@ class VibeDeskMcpClient:
         # Strip leading slash to join cleanly with base_url
         endpoint = path if path.startswith("/") else f"/{path}"
 
-        if self._client is not None:
-            resp = await self._client.request(
-                method,
-                endpoint,
-                json=json,
-                params=params,
-            )
-            return self._handle_response(resp)
+        try:
+            if self._client is not None:
+                resp = await self._client.request(
+                    method,
+                    endpoint,
+                    json=json,
+                    params=params,
+                )
+                return self._handle_response(resp)
 
-        async with httpx.AsyncClient(base_url=self.base_url) as client:
-            resp = await client.request(
-                method,
-                endpoint,
-                json=json,
-                params=params,
-            )
-            return self._handle_response(resp)
+            async with httpx.AsyncClient(base_url=self.base_url) as client:
+                resp = await client.request(
+                    method,
+                    endpoint,
+                    json=json,
+                    params=params,
+                )
+                return self._handle_response(resp)
+        except httpx.ConnectError as err:
+            raise ToolError(f"Vibe Desk is not running on {self.base_url}") from err
 
     def _handle_response(self, resp: httpx.Response) -> Any:
         if resp.is_error:

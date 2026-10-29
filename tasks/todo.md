@@ -634,7 +634,7 @@ In Claude Desktop configuration (`%APPDATA%\Claude\claude_desktop_config.json` o
       "command": "uv",
       "args": [
         "--directory",
-        "C:\\Users\\Administrator\\.ao\\data\\worktrees\\fxcommand\\fxcommand-16",
+        "D:\\millmaker\\fxcommand",
         "run",
         "vibedesk-mcp"
       ],
