@@ -51,13 +51,6 @@ from vibedesk.notify import (
 from vibedesk.rules import RULES_VERSION
 
 
-class AlwaysTruthyRecordingNotifier(RecordingNotifier):
-    """RecordingNotifier that always evaluates to True in boolean contexts (e.g. `if notifier:`)."""
-
-    def __bool__(self) -> bool:
-        return True
-
-
 def _populate_year_chunks(root: Path, source: SyntheticBarSource) -> None:
     for timeframe in (Timeframe.M15, Timeframe.H1):
         bars = source.fetch("GOLD", timeframe)
@@ -149,7 +142,7 @@ def _build_test_app(data_dir: Path, settings_dir: Path, notifier: RecordingNotif
 async def mcp_test_env(tmp_path: Path):
     """Fixture providing FastAPI app, RecordingNotifier, Desk, and MCP server wiring."""
     data_dir, settings_dir = _init_test_dirs(tmp_path)
-    notifier = AlwaysTruthyRecordingNotifier()
+    notifier = RecordingNotifier()
     app, llm = _build_test_app(data_dir, settings_dir, notifier)
 
     async with httpx.AsyncClient(
