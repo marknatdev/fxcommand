@@ -34,5 +34,11 @@ class CannedLlm:
 if __name__ == "__main__":
     scratch = Path(tempfile.mkdtemp(prefix="vibedesk-demo-"))
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8766
-    app = create_app(DATA, llm=CannedLlm(), db=scratch / "desk.db", settings_root=scratch)
+    app = create_app(
+        DATA,
+        llm=CannedLlm(),
+        db=scratch / "desk.db",
+        settings_root=scratch,
+        enable_scheduler=False,
+    )
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

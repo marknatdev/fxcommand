@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # --- Request and Response Models ---
 
@@ -56,6 +56,8 @@ class RunTrialIn(BaseModel):
 
 
 class TrialSummaryOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     trial_id: int
     hypothesis_id: int
     family_id: int

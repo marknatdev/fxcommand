@@ -157,6 +157,10 @@ MIGRATIONS: tuple[str, ...] = (
     WHEN NEW.rules_version IS NULL
     BEGIN SELECT RAISE(ABORT, 'a Trial names the rules version it ran under'); END;
     """,
+    # 3: bind Holdout Requests to the Trial ID that earned them (spec §6.3, CCC-55).
+    """
+    ALTER TABLE holdout_requests ADD COLUMN trial_id INTEGER REFERENCES trials (id);
+    """,
 )
 
 
@@ -263,6 +267,7 @@ class HoldoutRequest:
     id: int
     hypothesis_id: int
     created_at: str
+    trial_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,7 +516,7 @@ class Ledger:
 
     # The Holdout (ADR 0002)
 
-    def request_holdout(self, hypothesis_id: int) -> int:
+    def request_holdout(self, hypothesis_id: int, trial_id: int | None = None) -> int:
         """Record a Holdout Request awaiting the owner; returns its id.
 
         It records only. The Gauntlet's gate (CANDIDATE, enough expected trades) runs before
@@ -521,8 +526,16 @@ class Ledger:
             family_id = self._hypothesis_row(db, hypothesis_id)["family_id"]
             if self._spent(db, family_id):
                 raise HoldoutSpent(family_id)
+            if trial_id is None:
+                row = db.execute(
+                    "SELECT id FROM trials WHERE hypothesis_id = ? ORDER BY id DESC LIMIT 1",
+                    (hypothesis_id,),
+                ).fetchone()
+                if row is not None:
+                    trial_id = int(row[0])
             return db.execute(
-                "INSERT INTO holdout_requests (hypothesis_id) VALUES (?)", (hypothesis_id,)
+                "INSERT INTO holdout_requests (hypothesis_id, trial_id) VALUES (?, ?)",
+                (hypothesis_id, trial_id),
             ).lastrowid
 
     def approve_holdout(self, request_id: int) -> HoldoutGrant:

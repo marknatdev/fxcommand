@@ -11,8 +11,16 @@ from pathlib import Path
 
 from vibedesk.app.research import normalize
 from vibedesk.blocks.spec import validate
-from vibedesk.gauntlet.trial import run_trial
+from vibedesk.gauntlet.trial import (
+    HoldoutRefused,
+    _current_candidate,
+    run_trial,
+)
+from vibedesk.gauntlet.trial import (
+    request_holdout as gauntlet_request_holdout,
+)
 from vibedesk.ledger import Ledger
+from vibedesk.ledger.store import HoldoutGrant
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.cache import CachedBarSource, CacheError, first_cached, read_meta
 from vibedesk.market.costs import CostError, current_cost, measure_cost, record_cost
@@ -23,6 +31,19 @@ FRIENDLY = {"CANDIDATE": "Looks real", "REJECT": "No edge"}
 MAX_POINTS = 800  # equity-curve points sent to the page
 
 
+MT5_LOCK = threading.Lock()
+_FAMILY_LOCKS: dict[int, threading.Lock] = {}
+_LOCKS_LOCK = threading.Lock()
+
+
+def family_lock(family_id: int) -> threading.Lock:
+    """Acquire or create a per-family lock to serialize Trial runs and freeze N (CCC-55)."""
+    with _LOCKS_LOCK:
+        if family_id not in _FAMILY_LOCKS:
+            _FAMILY_LOCKS[family_id] = threading.Lock()
+        return _FAMILY_LOCKS[family_id]
+
+
 class Desk:
     def __init__(self, root: Path, db: Path | None = None) -> None:
         self.root = Path(root)
@@ -31,6 +52,11 @@ class Desk:
         self.market = MarketData(CachedBarSource(self.root), self.ledger)
         self._trial_lock = threading.Lock()
         self.update = DataUpdate(self.root)
+        self.mt5_lock = MT5_LOCK
+
+    def family_lock(self, family_id: int) -> threading.Lock:
+        """Acquire or create a per-family lock to serialize Trial runs and freeze N (CCC-55)."""
+        return family_lock(family_id)
 
     def run(self, idea: str, spec: dict) -> dict:
         """Run one Trial of `spec` and return its summary for the page."""
@@ -41,17 +67,220 @@ class Desk:
             if family is None:
                 family = self.ledger.create_family(idea or frozen.name)
             hypothesis = self.ledger.register_hypothesis(family, frozen)
+
+        with self.family_lock(family):
             while self.ledger.trial_count(family) >= self.ledger.budget(family):
                 self.ledger.extend_budget(family)
-            result = run_trial(self.ledger, self.market, hypothesis, cost,
-                               use_m1=self._has(frozen.symbol, Timeframe.M1))  # fmt: skip
+            result = run_trial(
+                self.ledger,
+                self.market,
+                hypothesis,
+                cost,
+                use_m1=self._has(frozen.symbol, Timeframe.M1),
+            )
         return summarize(result.trial_id, result.record, idea, result.record["spec"])
+
+    def run_hypothesis(self, hypothesis_id: int, idea: str = "") -> dict:
+        """Run Gauntlet for a registered hypothesis under its family lock (CCC-50, CCC-55)."""
+        hyp = self.ledger.hypothesis(hypothesis_id)
+        cost = current_cost(self.root, hyp.symbol)
+        family = self.ledger.family(hyp.family_id)
+        idea_text = idea or family.idea
+        with self.family_lock(hyp.family_id):
+            result = run_trial(
+                self.ledger,
+                self.market,
+                hypothesis_id,
+                cost,
+                use_m1=self._has(hyp.symbol, Timeframe.M1),
+            )
+        spec = json.loads(hyp.spec_json)
+        summary = summarize(result.trial_id, result.record, idea_text, spec)
+        verdict = result.record["verdict"]
+        record_dict = self.ledger.trial(result.trial_id)
+        return {
+            "trial_id": result.trial_id,
+            "hypothesis_id": hypothesis_id,
+            "family_id": hyp.family_id,
+            "verdict": verdict,
+            "label": FRIENDLY.get(verdict, verdict),
+            "closest_miss": result.record.get("closest_miss"),
+            "created_at": record_dict.created_at,
+            "spec": spec,
+            "summary": summary,
+            **summary,
+        }
 
     def trial(self, trial_id: int) -> dict:
         record = self.ledger.trial(trial_id)
         result = json.loads(record.result_json)
         idea = self.ledger.family(result["family_id"]).idea
         return summarize(trial_id, result, idea, result["spec"])
+
+    def get_trial_detail(self, trial_id: int) -> dict:
+        record = self.ledger.trial(trial_id)
+        result = json.loads(record.result_json)
+        hyp = self.ledger.hypothesis(record.hypothesis_id)
+        family = self.ledger.family(hyp.family_id)
+        spec = json.loads(hyp.spec_json)
+        summary = summarize(trial_id, result, family.idea, spec)
+        verdict = record.verdict
+        return {
+            "trial_id": trial_id,
+            "hypothesis_id": hyp.id,
+            "family_id": hyp.family_id,
+            "verdict": verdict,
+            "label": FRIENDLY.get(verdict, verdict),
+            "closest_miss": record.closest_miss,
+            "created_at": record.created_at,
+            "spec": spec,
+            "summary": summary,
+            **summary,
+        }
+
+    def holdout_request_trial(self, request_id: int) -> int | None:
+        """Retrieve the Trial ID bound to a Holdout Request from Ledger (CCC-55)."""
+        req = self.ledger.holdout_request(request_id)
+        return req.trial_id
+
+    def request_holdout(self, hypothesis_id: int, now: datetime | None = None) -> int:
+        """Request holdout for candidate hypothesis under family lock (CCC-55)."""
+        hyp = self.ledger.hypothesis(hypothesis_id)
+        with self.family_lock(hyp.family_id):
+            _current_candidate(self.ledger, hypothesis_id)
+            return gauntlet_request_holdout(self.ledger, hypothesis_id, now=now)
+
+    def approve_holdout(self, request_id: int) -> HoldoutGrant:
+        """Approve a Holdout Request and issue a HoldoutGrant (owner-only action).
+
+        Refuses if the bound candidate Trial has been superseded by a newer Trial.
+        """
+        req = self.ledger.holdout_request(request_id)
+        hyp = self.ledger.hypothesis(req.hypothesis_id)
+        with self.family_lock(hyp.family_id):
+            if req.trial_id is not None:
+                candidate = _current_candidate(self.ledger, req.hypothesis_id)
+                if candidate.id != req.trial_id:
+                    raise HoldoutRefused(
+                        "SUPERSEDED_TRIAL",
+                        f"Holdout request was bound to Trial #{req.trial_id}, "
+                        f"but current candidate is Trial #{candidate.id}",
+                    )
+            return self.ledger.approve_holdout(request_id)
+
+    def extend_budget(self, family_id: int, amount: int = 25) -> int:
+        """Extend family trial budget (owner-only action)."""
+        return self.ledger.extend_budget(family_id, amount=amount)
+
+    def list_families(self) -> list[dict]:
+        with self.ledger._lock:
+            rows = self.ledger._db.execute(
+                """
+                SELECT f.id, f.idea, f.created_at,
+                       (SELECT COUNT(*) FROM hypotheses h
+                        WHERE h.family_id = f.id) as hypothesis_count,
+                       (SELECT COUNT(*) FROM trials t
+                        JOIN hypotheses h ON t.hypothesis_id = h.id
+                        WHERE h.family_id = f.id) as trial_count
+                FROM families f
+                ORDER BY f.id DESC
+                """
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_family(self, family_id: int) -> dict:
+        fam = self.ledger.family(family_id)
+        budget = self.ledger.budget(family_id)
+        trial_count = self.ledger.trial_count(family_id)
+        with self.ledger._lock:
+            hyp_rows = self.ledger._db.execute(
+                """
+                SELECT id, family_id, entry_block, symbol, timeframe, spec_json, created_at
+                FROM hypotheses
+                WHERE family_id = ?
+                ORDER BY id ASC
+                """,
+                (family_id,),
+            ).fetchall()
+            hypotheses = []
+            for h in hyp_rows:
+                t_ids = [
+                    row["id"]
+                    for row in self.ledger._db.execute(
+                        "SELECT id FROM trials WHERE hypothesis_id = ? ORDER BY id ASC",
+                        (h["id"],),
+                    ).fetchall()
+                ]
+                hypotheses.append(
+                    {
+                        "id": h["id"],
+                        "family_id": h["family_id"],
+                        "entry_block": h["entry_block"],
+                        "symbol": h["symbol"],
+                        "timeframe": h["timeframe"],
+                        "spec": json.loads(h["spec_json"]),
+                        "created_at": h["created_at"],
+                        "trial_ids": t_ids,
+                    }
+                )
+        return {
+            "id": fam.id,
+            "idea": fam.idea,
+            "created_at": fam.created_at,
+            "budget": budget,
+            "trial_count": trial_count,
+            "hypotheses": hypotheses,
+        }
+
+    def get_hypothesis(self, hypothesis_id: int) -> dict:
+        hyp = self.ledger.hypothesis(hypothesis_id)
+        with self.ledger._lock:
+            t_ids = [
+                row["id"]
+                for row in self.ledger._db.execute(
+                    "SELECT id FROM trials WHERE hypothesis_id = ? ORDER BY id ASC",
+                    (hypothesis_id,),
+                ).fetchall()
+            ]
+        return {
+            "id": hyp.id,
+            "family_id": hyp.family_id,
+            "entry_block": hyp.entry_block,
+            "symbol": hyp.symbol,
+            "timeframe": hyp.timeframe,
+            "spec": json.loads(hyp.spec_json),
+            "created_at": hyp.created_at,
+            "trial_ids": t_ids,
+        }
+
+    def ledger_stats(self) -> dict:
+        with self.ledger._lock:
+            desk_trials = self.ledger._db.execute(
+                "SELECT COUNT(*) as count FROM trials"
+            ).fetchone()["count"]
+            deflation_combos = self.ledger._db.execute(
+                "SELECT COUNT(*) as count FROM trial_combinations"
+            ).fetchone()["count"]
+            families = self.list_families()
+            fam_stats = []
+            for f in families:
+                fid = f["id"]
+                budget = self.ledger.budget(fid)
+                n_eval, _ = self.ledger.deflation_inputs(fid)
+                fam_stats.append(
+                    {
+                        "family_id": fid,
+                        "idea": f["idea"],
+                        "trials": f["trial_count"],
+                        "budget": budget,
+                        "combinations_evaluated": n_eval,
+                    }
+                )
+        return {
+            "desk_trial_count": desk_trials,
+            "current_deflation_combinations": deflation_combos,
+            "families": fam_stats,
+        }
 
     def history(self, limit: int = 50) -> list[dict]:
         rows = self.ledger.recent_trials(limit)
@@ -104,6 +333,7 @@ class DataUpdate:
         self.root = root
         self.running = False
         self.log: list[str] = []
+        self.last_ok: bool | None = None
         self._lock = threading.Lock()
 
     def start(self, symbols=SYMBOLS) -> bool:
@@ -124,39 +354,44 @@ class DataUpdate:
         from vibedesk.market.importer import import_history, refresh
         from vibedesk.market.mt5_api import real_api
 
-        try:
-            api = real_api()
-            for symbol in symbols:
-                self._say(f"{symbol}: reading history ...")
-                try:
-                    known = read_meta(self.root, symbol).last_import is not None
-                except CacheError:
-                    known = False
-                run = refresh if known else import_history
-                report = run(api, self.root, symbols=(symbol,))
-                [one] = report.symbols
-                self._say(f"{symbol}: {report.bars:,} bars, judged through {one.judged_through}")
-            self._say("measuring spreads and swaps ...")
-            if not api.initialize():
-                raise RuntimeError(f"MT5 initialize failed: {api.last_error()}")
+        with MT5_LOCK:
             try:
-                now = datetime.now(UTC)
+                api = real_api()
                 for symbol in symbols:
-                    api.symbol_select(symbol, True)
+                    self._say(f"{symbol}: reading history ...")
                     try:
-                        cost = measure_cost(api, symbol, now)
-                        record_cost(self.root, cost)
-                        self._say(f"{symbol}: spread floor {cost.spread_floor_points:g} points")
-                    except CostError as error:
-                        self._say(f"{symbol}: {error}")
+                        known = read_meta(self.root, symbol).last_import is not None
+                    except CacheError:
+                        known = False
+                    run = refresh if known else import_history
+                    report = run(api, self.root, symbols=(symbol,))
+                    [one] = report.symbols
+                    self._say(
+                        f"{symbol}: {report.bars:,} bars, judged through {one.judged_through}"
+                    )
+                self._say("measuring spreads and swaps ...")
+                if not api.initialize():
+                    raise RuntimeError(f"MT5 initialize failed: {api.last_error()}")
+                try:
+                    now = datetime.now(UTC)
+                    for symbol in symbols:
+                        api.symbol_select(symbol, True)
+                        try:
+                            cost = measure_cost(api, symbol, now)
+                            record_cost(self.root, cost)
+                            self._say(f"{symbol}: spread floor {cost.spread_floor_points:g} points")
+                        except CostError as error:
+                            self._say(f"{symbol}: {error}")
+                finally:
+                    api.shutdown()
+                self._say("done")
+                self.last_ok = True
+            except Exception as error:  # shown on the page; the server keeps running
+                self.last_ok = False
+                self._say(f"FAILED: {error}")
+                traceback.print_exc()
             finally:
-                api.shutdown()
-            self._say("done")
-        except Exception as error:  # shown on the page; the server keeps running
-            self._say(f"FAILED: {error}")
-            traceback.print_exc()
-        finally:
-            self.running = False
+                self.running = False
 
 
 def summarize(trial_id: int, record: dict, idea: str, spec: dict) -> dict:
