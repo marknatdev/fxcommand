@@ -604,3 +604,17 @@ def test_a_holdout_request_names_its_hypothesis(path):
         assert (found.id, found.hypothesis_id) == (request, hypothesis)
         with pytest.raises(NotFound):
             ledger.holdout_request(request + 1)
+
+
+def test_ledger_trial_counts(ledger):
+    assert ledger.trial_counts() == (0, 0)
+    family = ledger.create_family("Trend following")
+    hyp = ledger.register_hypothesis(family, make_spec())
+    record(ledger, hyp, verdict="CANDIDATE")
+    record(ledger, hyp, verdict="REJECT")
+    record(ledger, hyp, verdict="REJECT")
+    assert ledger.trial_counts() == (3, 2)
+    # Bounded query
+    assert ledger.trial_counts(since_utc="2099-01-01T00:00:00Z") == (0, 0)
+    assert ledger.trial_counts(until_utc="2000-01-01T00:00:00Z") == (0, 0)
+    assert ledger.trial_counts(since_utc="2000-01-01T00:00:00Z") == (3, 2)

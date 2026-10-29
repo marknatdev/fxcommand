@@ -717,6 +717,33 @@ class Ledger:
             created_at=row["created_at"],
         )
 
+    def trial_counts(
+        self,
+        since_utc: str | None = None,
+        until_utc: str | None = None,
+    ) -> tuple[int, int]:
+        """Return (trials_run, reject_count) between since_utc and until_utc (inclusive).
+
+        Used by the daily digest and reporting. If bounds are omitted, counts all trials.
+        """
+        query = (
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN verdict = 'REJECT' THEN 1 ELSE 0 END), 0) "
+            "FROM trials"
+        )
+        clauses: list[str] = []
+        params: list[str] = []
+        if since_utc is not None:
+            clauses.append("created_at >= ?")
+            params.append(since_utc)
+        if until_utc is not None:
+            clauses.append("created_at <= ?")
+            params.append(until_utc)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        with self._lock:
+            row = self._db.execute(query, params).fetchone()
+            return int(row[0]), int(row[1])
+
 
 def _require_finite(sharpes: Sequence[float]) -> None:
     # SQLite would store NaN as NULL, and V[SR] has no meaning with one in it.

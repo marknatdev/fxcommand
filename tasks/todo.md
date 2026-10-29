@@ -530,11 +530,11 @@
 ## Wave 1: Notify Team (M6 Part)
 
 ### CCC-59: Telegram notices and daily digest
-- [ ] Implement `TelegramNotifier.send` over httpx.
-- [ ] Format and push CANDIDATE, PASS, HOLDOUT FAIL, Holdout Request, and token warning notices.
-- [ ] Compile and push 21:00 Bangkok daily digest.
-- [ ] `scripts/setup-telegram.ps1` for interactive setup into `data/secrets.json`.
-- [ ] Verification: `uv run pytest tests/test_notify.py`
+- [x] Implement `TelegramNotifier.send` over httpx.
+- [x] Format and push CANDIDATE, PASS, HOLDOUT FAIL, Holdout Request, and token warning notices.
+- [x] Compile and push 21:00 Bangkok daily digest.
+- [x] `scripts/setup-telegram.ps1` for interactive setup into `data/secrets.json`.
+- [x] Verification: `uv run pytest tests/test_notify.py`
 
 ---
 
