@@ -357,7 +357,8 @@ def test_whole_app_journey(demo_server: dict[str, Any], page: Page):
     3. Ledger page counts it.
     4. Holdout Request appears in the pending list and the owner approves it.
     5. A notice lands in RecordingNotifier.
-    6. The MCP server (vibedesk-mcp against the same running API) lists the Idea and cannot approve.
+    6. The MCP server (vibedesk-mcp against the same running API) lists the Idea;
+       approval has no tool in MCP and returns 403 over HTTP without the owner cookie.
     """
     base_url = demo_server["base_url"]
     app = demo_server["app"]
@@ -372,6 +373,9 @@ def test_whole_app_journey(demo_server: dict[str, Any], page: Page):
     fam_cand = desk.ledger.create_family("Pre-seeded Candidate for Holdout Flow")
     hyp_cand = desk.ledger.register_hypothesis(fam_cand, cand_spec)
     record_candidate_trial(desk, hyp_cand)
+
+    # Record initial trial count before the chat trial runs
+    initial_trials = desk.ledger_stats()["desk_trial_count"]
 
     # -------------------------------------------------------------------------
     # 1. Idea in Desk chat -> Spec -> Hypothesis -> Trial -> Verdict Card
@@ -422,7 +426,7 @@ def test_whole_app_journey(demo_server: dict[str, Any], page: Page):
     expect(page.locator("#viewLedger")).to_be_visible()
     expect(page.locator("#statDeskTrials")).to_be_visible()
     desk_trials_str = page.locator("#statDeskTrials").inner_text()
-    assert int(desk_trials_str) >= 2  # pre-seeded + chat trial
+    assert int(desk_trials_str) == initial_trials + 1  # exactly 1 new chat trial counted
 
     # -------------------------------------------------------------------------
     # 4. Holdout Request appears in pending list and owner approves it

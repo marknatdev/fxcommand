@@ -11,16 +11,12 @@ An AI research desk for one owner who trades GOLD and FX on MT5 (XM). The owner 
 **Start the app:** double-click `Start Vibe Desk.bat` (or the desktop shortcut "Vibe Desk"). It opens the SSH tunnel to OmniRoute on the Ubuntu server, starts the server on http://127.0.0.1:8765 and opens the browser. The OmniRoute key goes in the app's Settings (saved to `data/settings.json`) or in `.env` (see `.env.example`). "Update data" imports or refreshes every symbol from MT5 (read-only) and re-measures spreads.
 
 ```bash
-
 uv sync                                   # dependencies (add --extra mt5 for the live terminal)
 uv run --extra mt5 vibedesk-web --open    # the app, by hand (port 8765)
 uv run python tests/demo_server.py        # the app on port 8766 with canned AI and throwaway Ledger/settings
 uv run pytest                             # default fast suite, 4 workers, excludes slow & e2e (~30 s)
 uv run playwright install chromium        # install Chromium for the Playwright E2E suite
 uv run pytest -m e2e -n 0                 # Playwright E2E suite on deterministic fakes (~25 s)
-
-
-
 uv run pytest -m slow                     # known answers, benchmarks, 12-year import (~4 min)
 uv run pytest -n 0 tests/test_x.py        # one file, one process
 uv run ruff check src tests
@@ -77,7 +73,7 @@ The stdio MCP server (`vibedesk-mcp`) exposes 8 tools (5 read, 3 act; spec §8.2
 
 ## Layout
 
-- `src/vibedesk/app/`: the web app: `server.py` (FastAPI and 15 endpoints), `static/index.html` (4-page app: Desk, Ideas, Ledger, Settings), `research.py` (Idea to Spec through AI), `llm.py` (OmniRoute client), `desk.py` (Trials, history, data updates), `settings.py`, `scheduler.py` (nightly refresh, weekly floors, daily digest).
+- `src/vibedesk/app/`: the web app: `server.py` (FastAPI), `static/index.html` (4-page app: Desk, Ideas, Ledger, Settings), `research.py` (Idea to Spec through AI), `llm.py` (OmniRoute client), `desk.py` (Trials, history, data updates), `settings.py`, `scheduler.py` (nightly refresh, weekly floors, daily digest).
 - `src/vibedesk/desk/`: Research Desk: `loop.py` (SSE desk loop), `tools.py` (7 desk tools), `grounding.py` (Grounding Rule validator & placeholder renderer), `budget.py` (daily token budget).
 - `src/vibedesk/mcp/`: stdio MCP server (`server.py`, `client.py` over HTTP API).
 - `src/vibedesk/notify/`: Telegram push notifications and 21:00 Bangkok daily digest (`RecordingNotifier`, `TelegramNotifier`).
