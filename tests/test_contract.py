@@ -134,7 +134,10 @@ def test_token_budget_resets_on_bangkok_day_boundary():
 
 
 def test_desk_tools_registry_and_schemas():
-    ctx = DeskContext(ledger=None, market=None, family_id=1)
+    # When unconfigured, only context-free tools are exposed
+    assert {t.name for t in build_desk_tools().all()} == {"list_blocks", "draft_spec"}
+
+    ctx = DeskContext(ledger=object(), market=object(), family_id=1)
     tools = build_desk_tools(ctx)
 
     expected_tools = {
@@ -160,7 +163,7 @@ def test_desk_tools_registry_and_schemas():
     bad_spec = ds_tool.fn({"name": "incomplete"})
     assert bad_spec["valid"] is False
 
-    # Unimplemented tools raise NotImplementedError for Wave 1 Desk team
+    # Tools are registered for Wave 1 Desk team (CCC-44)
     for name in (
         "describe_data",
         "register_hypothesis",
@@ -170,13 +173,7 @@ def test_desk_tools_registry_and_schemas():
     ):
         tool = tools.get(name)
         assert tool is not None
-        with pytest.raises(NotImplementedError, match="CCC-44"):
-            if name in ("run_trial", "get_trial", "request_holdout"):
-                tool.fn(1)
-            elif name == "describe_data":
-                tool.fn("GOLD", "M15")
-            elif name == "register_hypothesis":
-                tool.fn({})
+        assert callable(tool.fn)
 
 
 # --- Auth Tests ---

@@ -12,16 +12,32 @@ Tools exposed to the Research Desk LLM loop:
 
 from __future__ import annotations
 
+import contextlib
+import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from vibedesk.app.research import normalize
+from vibedesk.blocks.indicators import atr
 from vibedesk.blocks.registry import LIBRARY
 from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.desk.loop import ToolRegistry
+from vibedesk.engine.costs import CostSnapshot
+from vibedesk.gauntlet.trial import (
+    request_holdout as gauntlet_request_holdout,
+)
+from vibedesk.gauntlet.trial import (
+    run_trial as gauntlet_run_trial,
+)
 from vibedesk.market.bars import Timeframe
+from vibedesk.market.costs import CostError, current_cost
+from vibedesk.market.grant import HOLDOUT_START, RESEARCH_START
 from vibedesk.market.universe import SYMBOLS
+from vibedesk.notify import Notice, NoticeKind
 
 
 @dataclass
@@ -34,6 +50,8 @@ class DeskContext:
     budget: Any | None = None  # TokenBudget
     notifier: Any | None = None  # Notifier
     root: Path | None = None
+    cost: CostSnapshot | None = None  # Optional override cost snapshot
+    use_m1: bool | None = None  # Optional override for M1 conflict resolution
 
 
 # Tool parameter schemas per spec §7.2
@@ -119,8 +137,39 @@ REQUEST_HOLDOUT_SCHEMA: dict[str, Any] = {
 }
 
 
-def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
-    """Build the ToolRegistry containing all 7 Research Desk tools (spec §7.2, CCC-44)."""
+def _compact_trial_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """Extract compact summary for LLM consumption, keeping full record in Ledger."""
+    wf = record.get("walk_forward", {})
+    metrics = wf.get("metrics", {})
+    checks = record.get("checks", [])
+    compact_checks = [
+        {
+            "name": c.get("name"),
+            "status": c.get("status"),
+            "value": c.get("value"),
+            "threshold": c.get("threshold"),
+            "at_most": c.get("at_most"),
+        }
+        for c in checks
+    ]
+    return {
+        "trades": metrics.get("trades"),
+        "net_r": metrics.get("net_r"),
+        "profit_factor": metrics.get("profit_factor"),
+        "win_rate": metrics.get("win_rate"),
+        "max_drawdown_r": metrics.get("max_drawdown_r"),
+        "expectancy_r": metrics.get("expectancy_r"),
+        "checks": compact_checks,
+    }
+
+
+def build_desk_tools(ctx: DeskContext | None = None) -> ToolRegistry:
+    """Build the ToolRegistry containing Research Desk tools (spec §7.2, CCC-44).
+
+    When no ctx is given (or ctx.ledger/market is None), registers only the context-free
+    tools (`list_blocks`, `draft_spec`). When full context (ledger and market) is provided,
+    registers all 7 tools.
+    """
     registry = ToolRegistry()
 
     @registry.register(
@@ -139,15 +188,6 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
                 for b in LIBRARY.all()
             ]
         }
-
-    @registry.register(
-        "describe_data",
-        description="Return statistics on the Research Window data for a symbol and timeframe.",
-        parameters=DESCRIBE_DATA_SCHEMA,
-    )
-    def describe_data(symbol: str, timeframe: str) -> dict[str, Any]:
-        """Wave 1 Desk team will implement full stats query in CCC-44."""
-        raise NotImplementedError("describe_data will be implemented in CCC-44")
 
     @registry.register(
         "draft_spec",
@@ -170,7 +210,58 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
                 "spec": spec,
                 "combinations": 0,
                 "errors": [str(error)],
+                "error": f"{error.__class__.__name__}: {error}",
             }
+
+    if ctx is None or ctx.ledger is None or ctx.market is None:
+        if ctx is not None:
+            registry.ctx = ctx  # type: ignore[attr-defined]
+        return registry
+
+    @registry.register(
+        "describe_data",
+        description="Return statistics on the Research Window data for a symbol and timeframe.",
+        parameters=DESCRIBE_DATA_SCHEMA,
+    )
+    def describe_data(symbol: str, timeframe: str) -> dict[str, Any]:
+        if symbol not in SYMBOLS:
+            raise ValueError(f"unknown symbol {symbol!r}; expected one of {SYMBOLS}")
+        tf = Timeframe(timeframe)
+        if tf == Timeframe.M1:
+            raise ValueError("describe_data only queries trading timeframes (M15, H1, H4, D1)")
+
+        # Query the Research Window only: RESEARCH_START to HOLDOUT_START (spec §7.2, §4)
+        bars = ctx.market.bars(symbol, tf, RESEARCH_START, HOLDOUT_START)
+        count = len(bars.time)
+        start_date: str | None = None
+        end_date: str | None = None
+        atr_p50: float | None = None
+
+        if count > 0:
+            start_date = datetime.fromtimestamp(int(bars.time[0]), tz=UTC).date().isoformat()
+            end_date = datetime.fromtimestamp(int(bars.time[-1]), tz=UTC).date().isoformat()
+            if count >= 14:
+                atr_series = atr(bars.high, bars.low, bars.close, 14)
+                valid = atr_series[~np.isnan(atr_series)]
+                if len(valid) > 0:
+                    atr_p50 = round(float(np.median(valid)), bars.digits)
+
+        floor: float | None = None
+        if ctx.cost is not None:
+            floor = ctx.cost.spread_floor_points
+        elif ctx.root is not None:
+            with contextlib.suppress(CostError):
+                floor = current_cost(ctx.root, symbol).spread_floor_points
+
+        return {
+            "symbol": symbol,
+            "timeframe": tf.value,
+            "bar_count": count,
+            "start_date": start_date,
+            "end_date": end_date,
+            "spread_floor": floor,
+            "atr_p50": atr_p50,
+        }
 
     @registry.register(
         "register_hypothesis",
@@ -178,8 +269,29 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
         parameters=REGISTER_HYPOTHESIS_SCHEMA,
     )
     def register_hypothesis(spec: dict[str, Any], family_id: int | None = None) -> dict[str, Any]:
-        """Wave 1 Desk team will implement full Ledger registration in CCC-44."""
-        raise NotImplementedError("register_hypothesis will be implemented in CCC-44")
+        if ctx.ledger is None:
+            raise ValueError("ledger is not configured in DeskContext")
+        validated = validate(normalize(spec))
+
+        # Anti-gaming rule (ADR 0003, spec §6.4): check if (entry_block, symbol)
+        # already belongs to another Idea Family. If so, register there so counts cannot reset.
+        existing_family = ctx.ledger.family_for(validated.entry.block, validated.symbol)
+        target_family_id = family_id if family_id is not None else ctx.family_id
+        if existing_family is not None:
+            target_family_id = existing_family
+        elif target_family_id is None or target_family_id == 0:
+            target_family_id = ctx.ledger.create_family(validated.name)
+            ctx.family_id = target_family_id
+
+        hyp_id = ctx.ledger.register_hypothesis(target_family_id, validated.model_dump(mode="json"))
+        return {
+            "hypothesis_id": hyp_id,
+            "family_id": target_family_id,
+            "entry_block": validated.entry.block,
+            "symbol": validated.symbol,
+            "timeframe": validated.timeframe,
+            "combinations": len(expand_grid(validated)),
+        }
 
     @registry.register(
         "run_trial",
@@ -187,8 +299,67 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
         parameters=RUN_TRIAL_SCHEMA,
     )
     def run_trial(hypothesis_id: int) -> dict[str, Any]:
-        """Wave 1 Desk team will implement full trial execution in CCC-44."""
-        raise NotImplementedError("run_trial will be implemented in CCC-44")
+        if ctx.ledger is None:
+            raise ValueError("ledger is not configured in DeskContext")
+        if ctx.market is None:
+            raise ValueError("market is not configured in DeskContext")
+
+        hyp = ctx.ledger.hypothesis(hypothesis_id)
+        symbol = hyp.symbol
+
+        # Resolve cost snapshot: refuse instead of falling back to 0 spread floor (spec §5)
+        if ctx.cost is not None:
+            cost = ctx.cost
+        elif ctx.root is not None:
+            try:
+                cost = current_cost(ctx.root, symbol)
+            except CostError as err:
+                raise ValueError(
+                    f"no Spread Floor measured for {symbol}; run Update data first"
+                ) from err
+        else:
+            raise ValueError(f"no Spread Floor measured for {symbol}; run Update data first")
+
+        # Determine M1 usage
+        use_m1 = True
+        if ctx.use_m1 is not None:
+            use_m1 = ctx.use_m1
+        elif ctx.root is not None:
+            from vibedesk.market.cache import first_cached
+
+            use_m1 = first_cached(ctx.root, symbol, Timeframe.M1) is not None
+
+        trial_res = gauntlet_run_trial(
+            ctx.ledger,
+            ctx.market,
+            hypothesis_id,
+            cost,
+            use_m1=use_m1,
+        )
+
+        # Send CANDIDATE notice via notifier if present (spec §8.4)
+        if trial_res.verdict.verdict == "CANDIDATE" and ctx.notifier is not None:
+            ctx.notifier.send(
+                Notice(
+                    kind=NoticeKind.CANDIDATE,
+                    text=f"Hypothesis {hypothesis_id} ({symbol} {hyp.timeframe}) reached CANDIDATE",
+                    data={
+                        "trial_id": trial_res.trial_id,
+                        "hypothesis_id": hypothesis_id,
+                        "symbol": symbol,
+                        "timeframe": hyp.timeframe,
+                    },
+                )
+            )
+
+        summary = _compact_trial_summary(trial_res.record)
+        return {
+            "trial_id": trial_res.trial_id,
+            "hypothesis_id": hypothesis_id,
+            "verdict": trial_res.verdict.verdict,
+            "closest_miss": trial_res.verdict.closest_miss,
+            "summary": summary,
+        }
 
     @registry.register(
         "get_trial",
@@ -196,8 +367,21 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
         parameters=GET_TRIAL_SCHEMA,
     )
     def get_trial(trial_id: int) -> dict[str, Any]:
-        """Wave 1 Desk team will implement full trial retrieval in CCC-44."""
-        raise NotImplementedError("get_trial will be implemented in CCC-44")
+        if ctx.ledger is None:
+            raise ValueError("ledger is not configured in DeskContext")
+        tr = ctx.ledger.trial(trial_id)
+        result_record = json.loads(tr.result_json)
+        summary = _compact_trial_summary(result_record)
+        return {
+            "trial_id": tr.id,
+            "hypothesis_id": tr.hypothesis_id,
+            "verdict": tr.verdict,
+            "closest_miss": tr.closest_miss,
+            "cost": tr.cost.to_json(),
+            "created_at": tr.created_at,
+            "rules_version": tr.rules_version,
+            "summary": summary,
+        }
 
     @registry.register(
         "request_holdout",
@@ -205,9 +389,34 @@ def build_desk_tools(ctx: DeskContext) -> ToolRegistry:
         parameters=REQUEST_HOLDOUT_SCHEMA,
     )
     def request_holdout(hypothesis_id: int) -> dict[str, Any]:
-        """Wave 1 Desk team will implement Holdout Request gate check in CCC-44."""
-        raise NotImplementedError("request_holdout will be implemented in CCC-44")
+        if ctx.ledger is None:
+            raise ValueError("ledger is not configured in DeskContext")
 
+        # Run gate checks via gauntlet.trial.request_holdout (spec §6.3):
+        # verifies CANDIDATE, rules_version, Deflated Sharpe, expected trades >= 30.
+        req_id = gauntlet_request_holdout(ctx.ledger, hypothesis_id)
+
+        # Notify owner of pending Holdout Request (spec §8.4)
+        if ctx.notifier is not None:
+            ctx.notifier.send(
+                Notice(
+                    kind=NoticeKind.HOLDOUT_REQUEST,
+                    text=(
+                        f"Holdout Request {req_id} for Hypothesis {hypothesis_id} "
+                        "awaiting owner approval"
+                    ),
+                    data={"request_id": req_id, "hypothesis_id": hypothesis_id},
+                )
+            )
+
+        return {
+            "request_id": req_id,
+            "hypothesis_id": hypothesis_id,
+            "status": "awaiting_owner",
+        }
+
+    # Attach context to registry for easy retrieval in desk_loop
+    registry.ctx = ctx  # type: ignore[attr-defined]
     return registry
 
 
