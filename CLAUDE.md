@@ -37,7 +37,7 @@ The stdio MCP server (`vibedesk-mcp`) exposes 8 tools (5 read, 3 act; spec §8.2
 
 1. **Claude Code CLI:**
    ```bash
-   claude mcp add vibedesk -- uv --directory C:\Users\Administrator\.ao\data\worktrees\fxcommand\fxcommand-17 run vibedesk-mcp
+   claude mcp add vibedesk -- uv --directory D:\millmaker\fxcommand run vibedesk-mcp
    ```
    Or in project `.mcp.json`:
    ```json
@@ -63,7 +63,7 @@ The stdio MCP server (`vibedesk-mcp`) exposes 8 tools (5 read, 3 act; spec §8.2
          "command": "uv",
          "args": [
            "--directory",
-           "C:\\Users\\Administrator\\.ao\\data\\worktrees\\fxcommand\\fxcommand-17",
+           "D:\\millmaker\\fxcommand",
            "run",
            "vibedesk-mcp"
          ],
