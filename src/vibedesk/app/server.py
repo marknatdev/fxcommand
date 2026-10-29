@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import inspect
 import threading
 import webbrowser
 from contextlib import asynccontextmanager
@@ -123,22 +122,13 @@ def create_app(
         return OmniRoute(s.llm_url, s.llm_key, s.llm_model)
 
     def _run_desk_loop(llm_client: Llm, message: str, chat_tools: Any) -> Any:
-        kwargs: dict[str, Any] = {}
-        try:
-            sig = inspect.signature(desk_loop)
-            has_budget = "budget" in sig.parameters or any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-            )
-            if has_budget and budget is not None:
-                kwargs["budget"] = budget
-            has_notifier = "notifier" in sig.parameters or any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-            )
-            if has_notifier and notifier is not None:
-                kwargs["notifier"] = notifier
-        except (ValueError, TypeError):
-            pass
-        return desk_loop(llm_client, message, tools=chat_tools, **kwargs)
+        return desk_loop(
+            llm_client,
+            message,
+            tools=chat_tools,
+            budget=budget,
+            notifier=notifier,
+        )
 
     # --- UI Page (Sets owner cookie on 127.0.0.1:8765 per spec §8.1) ---
 

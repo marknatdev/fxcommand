@@ -421,3 +421,76 @@ def test_chat_stream_starter_and_desk_tools_wiring(app_env):
     res_put = client.put("/api/settings", json={"daily_token_cap": 300_000})
     assert res_put.status_code == 200
     assert client.app.state.budget.daily_cap == 300_000
+
+
+def test_e2e_m4_idea_to_verdict_via_family_chat(tmp_path: Path):
+    """End-to-end M4 done-when test (spec §10, CCC-44..CCC-55):
+    A scripted idea through POST /api/families/{id}/chat using ScriptedLLM,
+    FakeMt5, synthetic data, and RecordingNotifier registers a Hypothesis,
+    runs a Trial, and yields a verdict event. Asserts the Trial is recorded
+    in the Ledger and the TokenBudget recorded token usage.
+    """
+    from vibedesk.app.llm import ScriptedLLM, ToolCall, Turn
+    from vibedesk.market.fake_mt5 import FakeMt5
+
+    data_dir = tmp_path / "data"
+    settings_dir = tmp_path / "settings"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    setup_synthetic_gold_cache(data_dir)
+
+    fake_api = FakeMt5(SyntheticBarSource(1, date(2013, 12, 1), date(2027, 1, 1)))
+    notifier = RecordingNotifier()
+
+    desk = Desk(data_dir)
+    fam_id = desk.ledger.create_family("M4 E2E Family")
+    assert fam_id > 0
+
+    llm = ScriptedLLM(
+        Turn(
+            tool_calls=(ToolCall("register_hypothesis", {"spec": EXAMPLE, "family_id": fam_id}),),
+            usage={"total_tokens": 150},
+        ),
+        Turn(
+            tool_calls=(ToolCall("run_trial", {"hypothesis_id": 1}),),
+            usage={"total_tokens": 250},
+        ),
+        Turn(
+            content="The hypothesis was evaluated and rejected on the Research Window.",
+            usage={"total_tokens": 75},
+        ),
+    )
+
+    app = create_app(
+        root=data_dir,
+        llm=llm,
+        settings_root=settings_dir,
+        notifier=notifier,
+        mt5_api=fake_api,
+        enable_scheduler=False,
+    )
+    client = TestClient(app)
+
+    res = client.post(
+        f"/api/families/{fam_id}/chat",
+        json={"message": "Test a GOLD H1 breakout idea"},
+    )
+    assert res.status_code == 200
+    assert "text/event-stream" in res.headers["content-type"]
+    text = res.text
+
+    # Verify SSE events stream contained verdict event
+    assert "event: verdict" in text
+    assert "event: tool_started" in text
+
+    # Assert Trial is recorded in the Ledger
+    trials = desk.ledger.trials_for(1)
+    assert len(trials) == 1
+    trial = trials[0]
+    assert trial.hypothesis_id == 1
+    assert trial.verdict in ("CANDIDATE", "REJECT")
+
+    # Assert the TokenBudget recorded usage
+    budget = client.app.state.budget
+    assert budget.used > 0
+    assert budget.used == 150 + 250 + 75
