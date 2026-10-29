@@ -98,6 +98,15 @@ class HoldoutRequestIn(BaseModel):
     reason: str = ""
 
 
+class HoldoutRequestItemOut(BaseModel):
+    id: int
+    hypothesis_id: int
+    family_id: int
+    trial_id: int | None = None
+    status: str
+    created_at: str
+
+
 class HoldoutRequestOut(BaseModel):
     request_id: int
     hypothesis_id: int
@@ -237,6 +246,15 @@ ENDPOINT_TABLE: list[dict[str, Any]] = [
     },
     {
         "area": "Holdout",
+        "method": "GET",
+        "path": "/api/holdout-requests",
+        "owner_only": False,
+        "request": None,
+        "response": "list[HoldoutRequestItemOut]",
+        "description": "List Holdout Requests, optionally filtered by status.",
+    },
+    {
+        "area": "Holdout",
         "method": "POST",
         "path": "/api/hypotheses/{id}/holdout-requests",
         "owner_only": False,
@@ -327,6 +345,7 @@ __all__ = [
     "HealthOut",
     "HoldoutApproveOut",
     "HoldoutRequestIn",
+    "HoldoutRequestItemOut",
     "HoldoutRequestOut",
     "HypothesisDetailOut",
     "PublicSettingsOut",

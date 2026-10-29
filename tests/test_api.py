@@ -301,6 +301,30 @@ def test_holdout_request_workflow(app_env):
     client.cookies.set(OWNER_COOKIE_NAME, OWNER_COOKIE_VALUE)
     assert client.post("/api/holdout-requests/9999/approve").status_code == 404
 
+    # GET /api/holdout-requests: read-only, no owner cookie needed
+    # Lists requests with optional status filter
+    client.cookies.clear()
+    req_id = desk.ledger.request_holdout(hyp_id)
+    res_list = client.get("/api/holdout-requests")
+    assert res_list.status_code == 200
+    items = res_list.json()
+    assert isinstance(items, list)
+    item = next(x for x in items if x["id"] == req_id)
+    assert item["hypothesis_id"] == hyp_id
+    assert item["family_id"] == fam_id
+    assert item["status"] == "pending"
+    assert "trial_id" in item
+    assert "created_at" in item
+
+    # Filter by status=pending and status=approved
+    res_pending = client.get("/api/holdout-requests?status=pending")
+    assert res_pending.status_code == 200
+    assert any(x["id"] == req_id for x in res_pending.json())
+
+    res_approved = client.get("/api/holdout-requests?status=approved")
+    assert res_approved.status_code == 200
+    assert not any(x["id"] == req_id for x in res_approved.json())
+
 
 def test_settings_get_and_put(app_env):
     client, _, _, _ = app_env

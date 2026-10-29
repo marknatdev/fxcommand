@@ -271,6 +271,19 @@ class HoldoutRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class HoldoutRequestRow:
+    id: int
+    hypothesis_id: int
+    family_id: int
+    trial_id: int | None
+    status: str
+    created_at: str
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+
+@dataclass(frozen=True, slots=True)
 class HoldoutSpend:
     id: int
     family_id: int
@@ -621,6 +634,46 @@ class Ledger:
             if row is None:
                 raise NotFound(f"no Holdout Request {request_id}")
             return HoldoutRequest(**row)
+
+    def holdout_requests(self, status: str | None = None) -> list[HoldoutRequestRow]:
+        """List Holdout Requests with family_id and status ('pending', 'approved', 'spent')."""
+        base = (
+            "SELECT "
+            "    r.id, "
+            "    r.hypothesis_id, "
+            "    h.family_id, "
+            "    r.trial_id, "
+            "    CASE "
+            "        WHEN s.id IS NOT NULL THEN 'spent' "
+            "        WHEN a.id IS NOT NULL THEN 'approved' "
+            "        ELSE 'pending' "
+            "    END AS status, "
+            "    r.created_at "
+            "FROM holdout_requests r "
+            "JOIN hypotheses h ON h.id = r.hypothesis_id "
+            "LEFT JOIN holdout_approvals a ON a.request_id = r.id "
+            "LEFT JOIN holdout_spends s ON s.request_id = r.id"
+        )
+        params: list[Any] = []
+        if status is not None:
+            sql = f"SELECT * FROM ({base}) WHERE status = ? ORDER BY id ASC"
+            params.append(status.lower())
+        else:
+            sql = f"{base} ORDER BY r.id ASC"
+
+        with self._lock:
+            rows = self._db.execute(sql, params).fetchall()
+            return [
+                HoldoutRequestRow(
+                    id=row["id"],
+                    hypothesis_id=row["hypothesis_id"],
+                    family_id=row["family_id"],
+                    trial_id=row["trial_id"],
+                    status=row["status"],
+                    created_at=row["created_at"],
+                )
+                for row in rows
+            ]
 
     def holdout_spend(self, family_id: int) -> HoldoutSpend | None:
         with self._lock:

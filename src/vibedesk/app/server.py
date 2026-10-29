@@ -27,6 +27,7 @@ from vibedesk.app.api_spec import (
     HealthOut,
     HoldoutApproveOut,
     HoldoutRequestIn,
+    HoldoutRequestItemOut,
     HoldoutRequestOut,
     HypothesisDetailOut,
     LedgerStatsOut,
@@ -274,6 +275,24 @@ def create_app(
         return LedgerStatsOut(**desk.ledger_stats())
 
     # --- Holdout (spec §8.1, CCC-50, CCC-55) ---
+
+    @app.get(
+        "/api/holdout-requests",
+        response_model=list[HoldoutRequestItemOut],
+    )
+    def list_holdout_requests(status: str | None = None):
+        rows = desk.ledger.holdout_requests(status=status)
+        return [
+            HoldoutRequestItemOut(
+                id=r.id,
+                hypothesis_id=r.hypothesis_id,
+                family_id=r.family_id,
+                trial_id=r.trial_id,
+                status=r.status,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
 
     @app.post(
         "/api/hypotheses/{hypothesis_id}/holdout-requests",
