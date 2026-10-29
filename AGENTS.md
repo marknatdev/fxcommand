@@ -16,7 +16,8 @@ The owner wants fast answers about ideas, not more process. On 2026-10-23 they d
 | Real data | All 8 symbols imported from the owner's XM terminal, read-only, through 2026-10-22; spreads and swaps measured. |
 | AI (OmniRoute) | Configured by the owner (key, tailnet URL, model `agy/gemini-4-argon-high`); `/api/models` answers. **A real draft has not succeeded yet**: OmniRoute answers 503 `resource_pressure` because the shared server is out of memory (section 9). |
 | Test engine (Gauntlet, Ledger) | Done (milestones M1 to M3), about 1,240 tests green. |
-| Telegram alerts, MCP server, live trading | Not built. A live EA idea is parked in kanban.md (CCC-82). |
+| Telegram alerts, live trading | Telegram notifier built (CCC-57). Live EA parked in kanban.md (CCC-82). |
+| MCP server (`vibedesk-mcp`) | Built (CCC-58, CCC-60). Stdio MCP server calling HTTP API (127.0.0.1:8765) over httpx, 8 tools (5 read, 3 act), no owner cookie / no approve/budget/settings tools. |
 
 First real results: a GOLD H1 Donchian breakout was "No edge" (1,184 blind trades, profit factor 0.80, 7 of 8 years losing); an EURUSD H4 RSI bounce never traded (too few trades to pick settings).
 
@@ -37,6 +38,7 @@ uv run pytest -n 0 tests/test_app.py       # the app's tests
 uv run pytest -m slow                      # known answers, benchmarks, 12-year import (~4 min)
 uv run ruff check src tests && uv run ruff format --check src tests
 uv run desk smoke | import | refresh | floors | data-report   # read-only MT5 data commands
+uv run vibedesk-mcp                        # stdio MCP server for Claude Code / Claude Desktop
 ```
 
 `.claude/launch.json` defines `vibedesk-demo` (port 8766) and `vibedesk` (port 8765) for the desktop app's browser preview. Use the demo server for click-throughs so the owner's history stays clean.
@@ -61,6 +63,7 @@ On start, `restore_old_trials` gives every test that has no chat (run before cha
 
 ## 5. Code map
 
+- `src/vibedesk/mcp/`: the stdio MCP server (`vibedesk-mcp`). Exposes 8 tools (5 read: list_ideas, get_verdict, get_ledger_stats, list_blocks, get_trial; 3 act: submit_idea, run_trial, request_holdout). Never carries the owner cookie and has no approve, budget, or settings tools. Register in Claude Code via CLI (`claude mcp add vibedesk -- uv --directory D:\millmaker\fxcommand run vibedesk-mcp`) or project `.mcp.json`; for Claude Desktop register in `claude_desktop_config.json`.
 - `src/vibedesk/app/`: the app.
   - `server.py`: FastAPI, `create_app(root, llm=None, db=None, settings_root=None)` (tests pass a fake LLM and temp paths), `main()` for `vibedesk-web`.
   - `research.py`: Idea to Spec (`draft_spec`, `system_prompt`, `catalog`, `normalize`: the browser writes 2.0 as 2, and a param list mixing 1.5 and 2 is invalid, so numbers in a list are made one type).
@@ -116,7 +119,7 @@ Refresh with the app's "Update data" button or `uv run desk refresh` then `uv ru
 4. `desk import --start` mid-year: M1 starts at that month, other timeframes at 1 January, so that January is served without M1. The default start (2014-01-01) is fine.
 5. Owner decisions left as they are: the Holdout counts a trade still open at data end at its last price; `atr_target` ignores the stop distance it receives.
 6. ADR 0005 (the AI's prose has no digits) is not enforced by the simple app.
-7. Not built: a Holdout button, Telegram alerts and an MCP server (milestone M6), a Playwright end-to-end suite (M7), the live/demo Forward Arena (Layer B). A live EA with hard caps is parked as CCC-82; Claude Code's auto-mode safety check blocked work on it, so the owner must allow it before anyone builds it.
+7. Not built: a Holdout button, a Playwright end-to-end suite (M7), the live/demo Forward Arena (Layer B). (Telegram alerts and the MCP server are built in milestone M6). A live EA with hard caps is parked as CCC-82; Claude Code's auto-mode safety check blocked work on it, so the owner must allow it before anyone builds it.
 
 ## 10. The Vibe Kanban board (sunset)
 
