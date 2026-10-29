@@ -20,6 +20,7 @@ from vibedesk.gauntlet.trial import (
     request_holdout as gauntlet_request_holdout,
 )
 from vibedesk.ledger import Ledger
+from vibedesk.ledger.locks import family_lock
 from vibedesk.ledger.store import HoldoutGrant
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.cache import CachedBarSource, CacheError, first_cached, read_meta
@@ -32,16 +33,6 @@ MAX_POINTS = 800  # equity-curve points sent to the page
 
 
 MT5_LOCK = threading.Lock()
-_FAMILY_LOCKS: dict[int, threading.Lock] = {}
-_LOCKS_LOCK = threading.Lock()
-
-
-def family_lock(family_id: int) -> threading.Lock:
-    """Acquire or create a per-family lock to serialize Trial runs and freeze N (CCC-55)."""
-    with _LOCKS_LOCK:
-        if family_id not in _FAMILY_LOCKS:
-            _FAMILY_LOCKS[family_id] = threading.Lock()
-        return _FAMILY_LOCKS[family_id]
 
 
 class Desk:

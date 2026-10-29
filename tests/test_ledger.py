@@ -618,3 +618,12 @@ def test_ledger_trial_counts(ledger):
     assert ledger.trial_counts(since_utc="2099-01-01T00:00:00Z") == (0, 0)
     assert ledger.trial_counts(until_utc="2000-01-01T00:00:00Z") == (0, 0)
     assert ledger.trial_counts(since_utc="2000-01-01T00:00:00Z") == (3, 2)
+
+    # Half-open boundary test: (since_utc, until_utc]
+    first_trial = ledger.trials_for(hyp)[0]
+    # since_utc == created_at excludes the trial (> created_at)
+    trials_after_first, rejects_after_first = ledger.trial_counts(since_utc=first_trial.created_at)
+    assert trials_after_first == 2
+    # until_utc == created_at includes the first trial (<= created_at)
+    trials_up_to_first, _ = ledger.trial_counts(until_utc=first_trial.created_at)
+    assert trials_up_to_first == 1

@@ -735,7 +735,7 @@ class Ledger:
         since_utc: str | None = None,
         until_utc: str | None = None,
     ) -> tuple[int, int]:
-        """Return (trials_run, reject_count) between since_utc and until_utc (inclusive).
+        """Return (trials_run, reject_count) in the half-open window (since_utc, until_utc].
 
         Used by the daily digest and reporting. If bounds are omitted, counts all trials.
         """
@@ -746,7 +746,7 @@ class Ledger:
         clauses: list[str] = []
         params: list[str] = []
         if since_utc is not None:
-            clauses.append("created_at >= ?")
+            clauses.append("created_at > ?")
             params.append(since_utc)
         if until_utc is not None:
             clauses.append("created_at <= ?")

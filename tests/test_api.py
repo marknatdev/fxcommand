@@ -40,11 +40,13 @@ from vibedesk.app.api_spec import (
 from vibedesk.app.auth import OWNER_COOKIE_NAME, OWNER_COOKIE_VALUE, require_owner
 from vibedesk.app.chats import Chats
 from vibedesk.app.desk import Desk
+from vibedesk.app.llm import ToolCall, Turn
 from vibedesk.app.research import EXAMPLE
 from vibedesk.app.server import create_app
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.cache import record_import, write_chunk
 from vibedesk.market.costs import CostMeasurement, record_cost
+from vibedesk.market.fake_mt5 import FakeMt5
 from vibedesk.market.synthetic import SyntheticBarSource
 from vibedesk.notify import RecordingNotifier
 
@@ -423,53 +425,82 @@ def test_chat_stream_starter_and_desk_tools_wiring(app_env):
     assert client.app.state.budget.daily_cap == 300_000
 
 
-def test_e2e_m4_idea_to_verdict_via_family_chat(tmp_path: Path):
-    """End-to-end M4 done-when test (spec §10, CCC-44..CCC-55):
-    A scripted idea through POST /api/families/{id}/chat using ScriptedLLM,
-    FakeMt5, synthetic data, and RecordingNotifier registers a Hypothesis,
-    runs a Trial, and yields a verdict event. Asserts the Trial is recorded
-    in the Ledger and the TokenBudget recorded token usage.
-    """
-    from vibedesk.app.llm import ScriptedLLM, ToolCall, Turn
-    from vibedesk.market.fake_mt5 import FakeMt5
+def test_fresh_recording_notifier_preserved_in_create_app(tmp_path: Path):
+    """An empty RecordingNotifier (len == 0, falsy) passed to create_app must NOT be replaced."""
+    fresh_notifier = RecordingNotifier()
+    assert len(fresh_notifier) == 0
+    assert not fresh_notifier
 
+    app = create_app(
+        root=tmp_path / "data",
+        settings_root=tmp_path / "settings",
+        notifier=fresh_notifier,
+        enable_scheduler=True,
+    )
+    assert app.state.notifier is fresh_notifier
+    assert app.state.scheduler.notifier is fresh_notifier
+
+
+class _E2EDeskLLM:
+    """Scripted LLM for M4 E2E that extracts hypothesis_id from tool responses."""
+
+    def __init__(self, family_id: int) -> None:
+        self.family_id = family_id
+        self.step = 0
+        self.recorded_hyp_id: int | None = None
+
+    def complete(self, messages: list[dict], tools: list[dict] | None = None) -> Turn:
+        self.step += 1
+        if self.step == 1:
+            return Turn(
+                tool_calls=(
+                    ToolCall("register_hypothesis", {"spec": EXAMPLE, "family_id": self.family_id}),
+                ),
+                usage={"total_tokens": 150},
+            )
+        if self.step == 2:
+            tool_msg = messages[-1]
+            data = json.loads(tool_msg["content"])
+            self.recorded_hyp_id = int(data["hypothesis_id"])
+            return Turn(
+                tool_calls=(ToolCall("run_trial", {"hypothesis_id": self.recorded_hyp_id}),),
+                usage={"total_tokens": 250},
+            )
+        return Turn(
+            content="The hypothesis was evaluated and rejected on the Research Window.",
+            usage={"total_tokens": 75},
+        )
+
+
+def _setup_e2e_harness(tmp_path: Path) -> tuple[Desk, int, TestClient, _E2EDeskLLM]:
     data_dir = tmp_path / "data"
     settings_dir = tmp_path / "settings"
     data_dir.mkdir(parents=True, exist_ok=True)
     settings_dir.mkdir(parents=True, exist_ok=True)
     setup_synthetic_gold_cache(data_dir)
 
-    fake_api = FakeMt5(SyntheticBarSource(1, date(2013, 12, 1), date(2027, 1, 1)))
-    notifier = RecordingNotifier()
-
     desk = Desk(data_dir)
     fam_id = desk.ledger.create_family("M4 E2E Family")
-    assert fam_id > 0
-
-    llm = ScriptedLLM(
-        Turn(
-            tool_calls=(ToolCall("register_hypothesis", {"spec": EXAMPLE, "family_id": fam_id}),),
-            usage={"total_tokens": 150},
-        ),
-        Turn(
-            tool_calls=(ToolCall("run_trial", {"hypothesis_id": 1}),),
-            usage={"total_tokens": 250},
-        ),
-        Turn(
-            content="The hypothesis was evaluated and rejected on the Research Window.",
-            usage={"total_tokens": 75},
-        ),
-    )
+    llm = _E2EDeskLLM(fam_id)
+    fake_api = FakeMt5(SyntheticBarSource(1, date(2013, 12, 1), date(2027, 1, 1)))
 
     app = create_app(
         root=data_dir,
         llm=llm,
         settings_root=settings_dir,
-        notifier=notifier,
+        notifier=RecordingNotifier(),
         mt5_api=fake_api,
         enable_scheduler=False,
     )
-    client = TestClient(app)
+    return desk, fam_id, TestClient(app), llm
+
+
+def test_e2e_m4_idea_to_verdict_via_family_chat(tmp_path: Path):
+    """End-to-end M4 done-when test (spec §10, CCC-44..CCC-55):
+    A scripted idea through POST /api/families/{id}/chat dynamically
+    registers a Hypothesis, runs a Trial, and yields a verdict event.
+    """
+    desk, fam_id, client, llm = _setup_e2e_harness(tmp_path)
 
     res = client.post(
         f"/api/families/{fam_id}/chat",
@@ -479,18 +510,15 @@ def test_e2e_m4_idea_to_verdict_via_family_chat(tmp_path: Path):
     assert "text/event-stream" in res.headers["content-type"]
     text = res.text
 
-    # Verify SSE events stream contained verdict event
     assert "event: verdict" in text
     assert "event: tool_started" in text
 
-    # Assert Trial is recorded in the Ledger
-    trials = desk.ledger.trials_for(1)
+    # Verify Trial recorded with the dynamically registered hypothesis_id
+    assert llm.recorded_hyp_id is not None
+    trials = desk.ledger.trials_for(llm.recorded_hyp_id)
     assert len(trials) == 1
-    trial = trials[0]
-    assert trial.hypothesis_id == 1
-    assert trial.verdict in ("CANDIDATE", "REJECT")
+    assert trials[0].hypothesis_id == llm.recorded_hyp_id
+    assert trials[0].verdict in ("CANDIDATE", "REJECT")
 
-    # Assert the TokenBudget recorded usage
-    budget = client.app.state.budget
-    assert budget.used > 0
-    assert budget.used == 150 + 250 + 75
+    # Verify token budget usage
+    assert client.app.state.budget.used == 150 + 250 + 75

@@ -94,8 +94,14 @@ def create_app(
     state = {"settings": config.load(settings_root)}
 
     # Budget & Notifier initialization
-    budget = budget or TokenBudget(daily_cap=state["settings"].daily_token_cap)
-    notifier = notifier or get_notifier(root=settings_root, settings=state["settings"])
+    budget = (
+        budget if budget is not None else TokenBudget(daily_cap=state["settings"].daily_token_cap)
+    )
+    notifier = (
+        notifier
+        if notifier is not None
+        else get_notifier(root=settings_root, settings=state["settings"])
+    )
     if scheduler is None and enable_scheduler:
         scheduler = Scheduler(root=root, desk=desk, notifier=notifier, budget=budget, api=mt5_api)
 
@@ -225,7 +231,7 @@ def create_app(
 
         try:
             res = desk.run_hypothesis(hypothesis_id, idea=body.idea)
-            if res.get("verdict") == "CANDIDATE" and notifier:
+            if res.get("verdict") == "CANDIDATE" and notifier is not None:
                 notifier.send(
                     Notice(
                         kind=NoticeKind.CANDIDATE,
@@ -282,7 +288,7 @@ def create_app(
         try:
             req_id = desk.request_holdout(hypothesis_id)
             req = desk.ledger.holdout_request(req_id)
-            if notifier:
+            if notifier is not None:
                 notifier.send(
                     Notice(
                         kind=NoticeKind.HOLDOUT_REQUEST,
