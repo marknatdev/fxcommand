@@ -108,34 +108,6 @@ def create_demo_app(
         enable_scheduler=False,
     )
 
-    @app.get("/api/holdout-requests")
-    def list_holdout_requests(status: str | None = None) -> list[dict[str, Any]]:
-        desk = app.state.desk
-        with desk.ledger._lock:
-            rows = desk.ledger._db.execute(
-                "SELECT r.id, r.hypothesis_id, h.family_id, r.trial_id, "
-                "CASE WHEN a.id IS NOT NULL THEN 'approved' ELSE 'pending' END AS status, "
-                "r.created_at "
-                "FROM holdout_requests r "
-                "JOIN hypotheses h ON h.id = r.hypothesis_id "
-                "LEFT JOIN holdout_approvals a ON a.request_id = r.id "
-                "WHERE (? IS NULL OR (CASE WHEN a.id IS NOT NULL THEN 'approved' "
-                "ELSE 'pending' END) = ?) "
-                "ORDER BY r.id DESC",
-                (status, status),
-            ).fetchall()
-            return [
-                {
-                    "id": row[0],
-                    "hypothesis_id": row[1],
-                    "family_id": row[2],
-                    "trial_id": row[3],
-                    "status": row[4],
-                    "created_at": row[5],
-                }
-                for row in rows
-            ]
-
     return app, data_dir, scratch
 
 
