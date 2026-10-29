@@ -587,12 +587,64 @@
 
 ## Wave 2: MCP Team (M6 Part)
 
-### CCC-58 & CCC-60: Stdio MCP Server and Refusal Tests
-- [ ] Build stdio MCP server calling HTTP API on `127.0.0.1:8765`.
-- [ ] Expose 5 read tools and 3 act tools per spec §8.2.
-- [ ] Omit all owner tools (no approve, no budget, no settings).
-- [ ] Automated tests asserting 403 refusals and RecordingNotifier capture.
-- [ ] Verification: `uv run pytest tests/test_mcp.py`
+### CCC-58: Stdio MCP Server (spec §8.2, api_spec.py)
+- [x] Stdio MCP server implemented in `src/vibedesk/mcp/` calling the HTTP API on `127.0.0.1:8765` over httpx (configurable base URL via `--base-url`, `$VIBEDESK_API_URL`, or constructor).
+- [x] Exposes 5 read tools: `list_ideas`, `get_verdict`, `get_ledger_stats`, `list_blocks`, `get_trial`.
+- [x] Exposes 3 act tools: `submit_idea`, `run_trial`, `request_holdout` (each act counted in the Ledger through the API).
+- [x] Omit all owner tools (no approve, no budget, no settings) and never send the owner cookie.
+- [x] Console script entry point `vibedesk-mcp = "vibedesk.mcp.server:main"` added to `pyproject.toml`.
+- [x] `mcp` dependency added via `uv add mcp`.
+
+### CCC-60: MCP Tools & Refusal Tests
+- [x] Automated tests in `tests/test_mcp.py` covering MCP tools against the FastAPI app via httpx ASGITransport (deterministic fakes only).
+- [x] Verified MCP tool list contains zero owner tools (no approve, budget, or settings tools).
+- [x] Verified owner-only API endpoints return HTTP 403 Forbidden without the cookie (`POST /api/holdout-requests/{id}/approve`, `POST /api/families/{id}/budget`, `PUT /api/settings`), and the MCP client cannot reach them.
+- [x] Verified notices (CANDIDATE, Holdout Request, Token Warning, PASS, HOLDOUT FAIL) arrive in `RecordingNotifier` when triggered through the API.
+- [x] Verified full MCP ClientSession JSON-RPC protocol execution over in-memory streams.
+- [x] Verification: `uv run pytest tests/test_mcp.py` (8 passed).
+
+### Registration with Claude Code / Claude Desktop
+
+#### 1. Claude Code
+Using the CLI:
+```bash
+claude mcp add vibedesk uv --directory /path/to/fxcommand run vibedesk-mcp
+```
+Or in `.claude/settings.json` (or `~/.claude/settings.json`):
+```json
+{
+  "mcpServers": {
+    "vibedesk": {
+      "command": "uv",
+      "args": ["run", "vibedesk-mcp"],
+      "env": {
+        "VIBEDESK_API_URL": "http://127.0.0.1:8765"
+      }
+    }
+  }
+}
+```
+
+#### 2. Claude Desktop
+In Claude Desktop configuration (`%APPDATA%\Claude\claude_desktop_config.json` on Windows or `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+```json
+{
+  "mcpServers": {
+    "vibedesk": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "C:\\Users\\Administrator\\.ao\\data\\worktrees\\fxcommand\\fxcommand-16",
+        "run",
+        "vibedesk-mcp"
+      ],
+      "env": {
+        "VIBEDESK_API_URL": "http://127.0.0.1:8765"
+      }
+    }
+  }
+}
+```
 
 ---
 
