@@ -50,7 +50,7 @@ from vibedesk.desk.tools import DeskContext, build_desk_tools
 from vibedesk.gauntlet.trial import HoldoutRefused
 from vibedesk.ledger.store import BudgetExhausted, HoldoutSpent, LedgerError, NotFound
 from vibedesk.market.costs import CostError
-from vibedesk.notify import Notice, NoticeKind, Notifier, get_notifier
+from vibedesk.notify import Notice, NoticeKind, Notifier, RecordingNotifier, get_notifier
 
 STATIC = Path(__file__).parent / "static"
 PORT = 8765
@@ -420,7 +420,8 @@ def create_app(
         state["settings"] = reloaded
         if budget is not None:
             budget.daily_cap = reloaded.daily_token_cap
-        notifier = get_notifier(root=settings_root, settings=reloaded)
+        if not isinstance(notifier, RecordingNotifier):
+            notifier = get_notifier(root=settings_root, settings=reloaded)
         app.state.budget = budget
         app.state.notifier = notifier
         if scheduler is not None:
@@ -440,7 +441,8 @@ def create_app(
         state["settings"] = reloaded
         if budget is not None:
             budget.daily_cap = reloaded.daily_token_cap
-        notifier = get_notifier(root=settings_root, settings=reloaded)
+        if not isinstance(notifier, RecordingNotifier):
+            notifier = get_notifier(root=settings_root, settings=reloaded)
         app.state.budget = budget
         app.state.notifier = notifier
         if scheduler is not None:

@@ -21,6 +21,7 @@ from vibedesk.market.bars import Timeframe
 from vibedesk.market.cache import record_import, write_chunk
 from vibedesk.market.costs import CostMeasurement, record_cost
 from vibedesk.market.synthetic import SyntheticBarSource
+from vibedesk.notify import RecordingNotifier
 
 RSI = {
     "name": "EURUSD H4 RSI bounce in quiet trends",
@@ -81,6 +82,7 @@ def create_demo_app(
     data_dir: Path | None = None,
     scratch: Path | None = None,
     llm: Any = None,
+    notifier: Any = None,
 ) -> tuple[FastAPI, Path, Path]:
     """Create a configured demo app with canned LLM and throwaway ledger/settings."""
     if scratch is None:
@@ -106,6 +108,7 @@ def create_demo_app(
         db=scratch / "desk.db",
         settings_root=scratch,
         enable_scheduler=False,
+        notifier=notifier if notifier is not None else RecordingNotifier(),
     )
 
     return app, data_dir, scratch

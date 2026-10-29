@@ -16,6 +16,7 @@ Run with:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import socket
 import threading
@@ -23,6 +24,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 import uvicorn
@@ -33,6 +35,9 @@ from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.gauntlet.trial import CANDIDATE
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.costs import CostSnapshot
+from vibedesk.mcp.client import VibeDeskMcpClient
+from vibedesk.mcp.server import create_mcp_server
+from vibedesk.notify import NoticeKind, RecordingNotifier
 from vibedesk.rules import RULES_VERSION
 
 from demo_server import RSI, create_demo_app
@@ -51,10 +56,11 @@ def record_candidate_trial(desk: Desk, hypothesis_id: int) -> int:
     import numpy as np
 
     hyp = desk.ledger.hypothesis(hypothesis_id)
-    cost = CostSnapshot("GOLD", 30.0, 0.01, 1.0, 0.0, 0.0, 3)
+    tf = Timeframe(hyp.timeframe)
+    cost = CostSnapshot(hyp.symbol, 30.0, 0.01, 1.0, 0.0, 0.0, 3)
     bars = desk.market.bars(
-        "GOLD",
-        Timeframe.H1,
+        hyp.symbol,
+        tf,
         datetime(2020, 1, 1, tzinfo=UTC),
         datetime(2024, 1, 1, tzinfo=UTC),
     )
@@ -342,3 +348,146 @@ def test_responsive_375px_no_horizontal_scroll(demo_server: dict[str, Any], page
     page.click("button[data-view='Settings']")
     expect(page.locator("#viewSettings")).to_be_visible()
     assert_no_horizontal_scroll("Settings Page")
+
+
+def test_whole_app_journey(demo_server: dict[str, Any], page: Page):
+    """CCC-62: One whole-app journey across the real server on deterministic fakes:
+    1. Idea in Desk chat -> Spec -> Hypothesis -> Trial -> Verdict Card.
+    2. Ideas page shows it with its Verdict.
+    3. Ledger page counts it.
+    4. Holdout Request appears in the pending list and the owner approves it.
+    5. A notice lands in RecordingNotifier.
+    6. The MCP server (vibedesk-mcp against the same running API) lists the Idea and cannot approve.
+    """
+    base_url = demo_server["base_url"]
+    app = demo_server["app"]
+    desk: Desk = app.state.desk
+    notifier: RecordingNotifier = app.state.notifier
+
+    # Clear previous notices
+    notifier.clear()
+
+    # Pre-seed a CANDIDATE trial so we can trigger a valid Holdout Request via UI/API
+    cand_spec = {**RSI, "symbol": "EURUSD", "timeframe": "H4"}
+    fam_cand = desk.ledger.create_family("Pre-seeded Candidate for Holdout Flow")
+    hyp_cand = desk.ledger.register_hypothesis(fam_cand, cand_spec)
+    record_candidate_trial(desk, hyp_cand)
+
+    # -------------------------------------------------------------------------
+    # 1. Idea in Desk chat -> Spec -> Hypothesis -> Trial -> Verdict Card
+    # -------------------------------------------------------------------------
+    page.goto(base_url)
+    expect(page.locator("#viewDesk")).to_be_visible()
+
+    chat_idea = "Buy and sell GOLD breakouts of the 20 bar high on H1, stop 2 ATR, target 2R"
+    page.fill("#input", chat_idea)
+    page.click("#send")
+
+    # Spec card appears
+    spec_card = page.locator(".card").first
+    expect(spec_card).to_be_visible(timeout=15000)
+    expect(spec_card.locator(".card-title")).to_contain_text("GOLD")
+
+    # Click Run test to execute Gauntlet walk-forward
+    run_btn = spec_card.locator("button.run")
+    expect(run_btn).to_be_visible()
+    run_btn.click()
+
+    # Inline Verdict Card appears
+    verdict_card = page.locator(".verdict-card").first
+    expect(verdict_card).to_be_visible(timeout=35000)
+    expect(verdict_card.locator(".verdict-badge")).to_be_visible()
+    expect(verdict_card.locator("svg.chart-equity")).to_be_visible()
+    expect(verdict_card.locator("svg.chart-folds")).to_be_visible()
+    expect(verdict_card.locator("svg.chart-baseline")).to_be_visible()
+    expect(verdict_card).to_contain_text("Win rate (shown only)")
+    expect(verdict_card.locator(".cost-snapshot")).to_be_visible()
+
+    # -------------------------------------------------------------------------
+    # 2. Ideas page shows it with its Verdict
+    # -------------------------------------------------------------------------
+    page.click("button[data-view='Ideas']")
+    expect(page.locator("#viewIdeas")).to_be_visible()
+    expect(page.locator("#ideasContainer")).to_be_visible()
+
+    # The family created from chat idea appears
+    chat_family_item = page.locator(".idea-item", has_text="Buy and sell GOLD breakouts")
+    expect(chat_family_item).to_be_visible(timeout=10000)
+    expect(chat_family_item.locator(".badge").first).to_be_visible()
+
+    # -------------------------------------------------------------------------
+    # 3. Ledger page counts it
+    # -------------------------------------------------------------------------
+    page.click("button[data-view='Ledger']")
+    expect(page.locator("#viewLedger")).to_be_visible()
+    expect(page.locator("#statDeskTrials")).to_be_visible()
+    desk_trials_str = page.locator("#statDeskTrials").inner_text()
+    assert int(desk_trials_str) >= 2  # pre-seeded + chat trial
+
+    # -------------------------------------------------------------------------
+    # 4. Holdout Request appears in pending list and owner approves it
+    # 5. A notice lands in RecordingNotifier
+    # -------------------------------------------------------------------------
+    # Return to Ideas page and request holdout on the CANDIDATE hypothesis
+    page.click("button[data-view='Ideas']")
+    cand_family_item = page.locator(f"#family-{fam_cand}")
+    expect(cand_family_item).to_be_visible(timeout=10000)
+    cand_family_item.locator("button:has-text('Holdout')").click()
+
+    # Banner confirms holdout requested
+    ideas_banner = page.locator("#ideasBanner")
+    expect(ideas_banner).to_be_visible(timeout=10000)
+    expect(ideas_banner).to_contain_text("Holdout requested!")
+
+    # Verify notice landed in RecordingNotifier immediately
+    holdout_notices = notifier.by_kind(NoticeKind.HOLDOUT_REQUEST)
+    assert len(holdout_notices) >= 1
+    req_notice = holdout_notices[-1]
+    assert req_notice.data["hypothesis_id"] == hyp_cand
+    req_id = req_notice.data["request_id"]
+
+    # Go to Ledger page to approve the pending request
+    page.click("button[data-view='Ledger']")
+    req_row = page.locator(f"#holdout-req-{req_id}")
+    expect(req_row).to_be_visible(timeout=10000)
+    approve_btn = req_row.locator(".btn-approve-holdout")
+    expect(approve_btn).to_be_visible()
+    approve_btn.click()
+
+    approve_msg = page.locator("#holdoutApproveMsg")
+    expect(approve_msg).to_be_visible(timeout=10000)
+    expect(approve_msg).to_contain_text("Approved!")
+
+    # -------------------------------------------------------------------------
+    # 6. The MCP server (vibedesk-mcp against the same running API)
+    #    lists the Idea and cannot approve
+    # -------------------------------------------------------------------------
+    # MCP client lists ideas without owner cookie
+    mcp_client = VibeDeskMcpClient(base_url=base_url)
+    mcp_server = create_mcp_server(base_url=base_url)
+    with concurrent.futures.ThreadPoolExecutor() as ex:
+        ideas = ex.submit(anyio.run, mcp_client.list_ideas).result()
+        tools = ex.submit(anyio.run, mcp_server.list_tools).result()
+    assert any("Buy and sell GOLD breakouts" in i.get("idea", "") for i in ideas)
+
+    # MCP server tool inventory: exactly 8 tools, zero owner-only tools
+
+    tool_names = {t.name for t in tools}
+    assert tool_names == {
+        "list_ideas",
+        "get_verdict",
+        "get_ledger_stats",
+        "list_blocks",
+        "get_trial",
+        "submit_idea",
+        "run_trial",
+        "request_holdout",
+    }
+    assert "approve_holdout" not in tool_names
+    assert "extend_budget" not in tool_names
+    assert "update_settings" not in tool_names
+
+    # Owner-only refusal: MCP client / non-owner HTTP call to approve returns 403
+    unauth_resp = httpx.post(f"{base_url}/api/holdout-requests/{req_id}/approve")
+    assert unauth_resp.status_code == 403
+    assert "owner cookie" in unauth_resp.json().get("detail", "").lower()
