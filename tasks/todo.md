@@ -566,11 +566,22 @@
 ## Wave 2: UI Team (M5 Frontend)
 
 ### CCC-52 & CCC-56: 4-page UI and Playwright E2E
-- [ ] Build Desk, Ideas, Ledger, and Settings in `src/vibedesk/app/static/index.html`.
-- [ ] Set `vibedesk_owner` cookie with SameSite=Strict on page load.
-- [ ] Responsive layout at 375 px phone width without horizontal scroll.
-- [ ] Playwright E2E suite on deterministic fakes.
-- [ ] Verification: Playwright test suite
+- [x] Build Desk, Ideas, Ledger, and Settings in `src/vibedesk/app/static/index.html` (spec §8.3):
+  - Desk: chat with live Trial progress and inline Verdict Cards rendered only from stored Gauntlet data (stitched equity SVG, per-fold bars SVG, baseline histogram with strategy marker SVG, Pass Bar checks table with Closest Miss highlighted, win rate shown not judged, Cost Snapshot).
+  - Ideas: every Idea Family, Hypothesis and Verdict with text/verdict/symbol/timeframe filters.
+  - Ledger: Trial counts per family and desk-wide, deflation combinations, budgets with +25 extend buttons, Holdout Requests with owner-only approve buttons.
+  - Settings: OmniRoute URL/model/token cap, read-only Spread Floors with measured dates, Telegram toggle/chat ID, data-refresh status and health indicators.
+- [x] Set `vibedesk_owner=1` cookie with `SameSite=Strict; path=/` on page load (auth.py); clear message on 403.
+- [x] Responsive layout at 375 px phone width without horizontal scroll (asserted in E2E).
+- [x] Playwright E2E suite on deterministic fakes (`tests/test_ui_playwright.py` using `tests/demo_server.py`):
+  - Drives each page (Desk, Ideas, Ledger, Settings).
+  - Drives an Idea to a complete Verdict Card with SVG charts and Pass Bar table.
+  - Drives an owner-only Holdout Request approval and asserts 403 refusal without cookie.
+  - Asserts no horizontal scroll (`scrollWidth <= clientWidth`) on mobile viewport (375x667).
+- [x] Verification:
+  - Playwright E2E: `uv run pytest -m e2e -n 0` (4 passed)
+  - Page syntax: `node --check` via `uv run pytest -k test_the_pages_script_parses` (passed)
+  - Ruff: `uv run ruff check src tests` and `uv run ruff format --check src tests` (clean)
 
 ---
 

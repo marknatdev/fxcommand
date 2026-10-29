@@ -28,6 +28,7 @@ vibedesk-web = "vibedesk.app.server:main"
 dev = [
     "hypothesis>=6.100",
     "pytest>=8.3",
+    "pytest-playwright>=0.10.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.8",
 ]
@@ -44,10 +45,11 @@ testpaths = ["tests"]
 # Slow tests (known answers, Trial benchmarks) run at checkpoints: uv run pytest -m slow
 # Four workers, one per physical core of the dev laptop: eight (one per logical core) ran slower
 # and pushed the timing tests over their budgets. -n 0 runs everything in one process.
-addopts = "-m 'not slow' -n 4 --dist loadfile"
+addopts = "-m 'not slow and not e2e' -n 4 --dist loadfile"
 markers = [
     "perf: performance benchmark",
     "slow: excluded from the default run; run with -m slow",
+    "e2e: Playwright end-to-end tests; run with pytest -m e2e",
 ]
 
 [tool.ruff]
@@ -59,4 +61,4 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["vibedesk"]
-known-local-folder = ["reference_engine"]
+known-local-folder = ["reference_engine", "demo_server"]
