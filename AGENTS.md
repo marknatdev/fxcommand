@@ -12,12 +12,13 @@ The owner wants fast answers about ideas, not more process. On 2026-10-23 they d
 
 | Area | State |
 |---|---|
-| Web app (chat, test, results, saved chats, claude.ai-like design) | Working, committed. Owner reviewing. |
+| Web app (4-page UI: Desk, Ideas, Ledger, Settings) | Built (CCC-52, CCC-56). Claude.ai-like design, live Verdict Cards with SVGs, owner-only auth cookie (`vibedesk_owner=1`), mobile-ready (375 px). Owner reviewing. |
 | Real data | All 8 symbols imported from the owner's XM terminal, read-only, through 2026-10-22; spreads and swaps measured. |
-| AI (OmniRoute) | Configured by the owner (key, tailnet URL, model `agy/gemini-4-argon-high`); `/api/models` answers. **A real draft has not succeeded yet**: OmniRoute answers 503 `resource_pressure` because the shared server is out of memory (section 9). |
-| Test engine (Gauntlet, Ledger) | Done (milestones M1 to M3), about 1,240 tests green. |
-| Telegram alerts, live trading | Telegram notifier built (CCC-57). Live EA parked in kanban.md (CCC-82). |
+| AI (OmniRoute) & Research Desk | Configured by the owner; desk loop with 7 desk tools (CCC-44), Grounding Rule validation and rendering (`desk/grounding.py`, CCC-45), and TokenBudget daily cap/warning (CCC-46). Real model calls await server memory restart (CCC-90). |
+| Test engine (Gauntlet, Ledger) | Done (M1 to M3), full test suite green (>1,480 tests passing). |
+| Telegram alerts, live trading | Telegram notifier built (CCC-57, CCC-59) with CANDIDATE, PASS, HOLDOUT FAIL notices and daily digest. Live EA parked in kanban.md (CCC-82). |
 | MCP server (`vibedesk-mcp`) | Built (CCC-58, CCC-60). Stdio MCP server calling HTTP API (127.0.0.1:8765) over httpx, 8 tools (5 read, 3 act), no owner cookie / no approve/budget/settings tools. |
+| Whole-app test suite (M7) | Complete (CCC-62, CCC-63, CCC-64). Playwright E2E whole-app journey green on fakes; exploratory click-through clean at desktop and 375 px mobile (0 errors, 0 overflow). Layer A fully built except owner-only items. |
 
 First real results: a GOLD H1 Donchian breakout was "No edge" (1,184 blind trades, profit factor 0.80, 7 of 8 years losing); an EURUSD H4 RSI bounce never traded (too few trades to pick settings).
 
@@ -118,8 +119,8 @@ Refresh with the app's "Update data" button or `uv run desk refresh` then `uv ru
 3. **The AI prompt is untested against the real model.** Watch for Specs with grids over 12 combinations, wrong param names, or prose that promises profit; tune `research.system_prompt`.
 4. `desk import --start` mid-year: M1 starts at that month, other timeframes at 1 January, so that January is served without M1. The default start (2014-01-01) is fine.
 5. Owner decisions left as they are: the Holdout counts a trade still open at data end at its last price; `atr_target` ignores the stop distance it receives.
-6. ADR 0005 (the AI's prose has no digits) is not enforced by the simple app.
-7. Not built: a Holdout button, a Playwright end-to-end suite (M7), the live/demo Forward Arena (Layer B). (Telegram alerts and the MCP server are built in milestone M6). A live EA with hard caps is parked as CCC-82; Claude Code's auto-mode safety check blocked work on it, so the owner must allow it before anyone builds it.
+6. **ADR 0005 (no digits in AI prose):** `src/vibedesk/desk/grounding.py` exposes `validate()` and `render()` (plus `GroundingError`); `src/vibedesk/desk/loop.py` validates prose, retries up to 2 times, then withholds the explanation (`grounding_withheld`) if ungrounded digits remain.
+7. **Layer A complete, Layer B next:** Layer A is fully built across M1–M7 (core engine, gauntlet, MT5 data seam, research desk with token budget, HTTP API with scheduler, 4-page UI, Telegram notifier, stdio MCP server, and whole-app Playwright E2E suite). Owner-only items remain open: CCC-41 (M3 review), CCC-48 (20 sample ideas validation), CCC-79/80 (architectural decisions), CCC-83/87 (simple app & redesign review), CCC-90 (OmniRoute service restart). The next layer on the roadmap is Layer B (Forward Arena, demo gate, live runner parked as CCC-82).
 
 ## 10. The Vibe Kanban board (sunset)
 

@@ -95,6 +95,7 @@ def create_app(
     state = {"settings": config.load(settings_root)}
 
     # Budget & Notifier initialization
+    notifier_injected = notifier is not None
     budget = (
         budget if budget is not None else TokenBudget(daily_cap=state["settings"].daily_token_cap)
     )
@@ -420,7 +421,8 @@ def create_app(
         state["settings"] = reloaded
         if budget is not None:
             budget.daily_cap = reloaded.daily_token_cap
-        notifier = get_notifier(root=settings_root, settings=reloaded)
+        if not notifier_injected:
+            notifier = get_notifier(root=settings_root, settings=reloaded)
         app.state.budget = budget
         app.state.notifier = notifier
         if scheduler is not None:
@@ -440,7 +442,8 @@ def create_app(
         state["settings"] = reloaded
         if budget is not None:
             budget.daily_cap = reloaded.daily_token_cap
-        notifier = get_notifier(root=settings_root, settings=reloaded)
+        if not notifier_injected:
+            notifier = get_notifier(root=settings_root, settings=reloaded)
         app.state.budget = budget
         app.state.notifier = notifier
         if scheduler is not None:

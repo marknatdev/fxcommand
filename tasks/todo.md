@@ -648,9 +648,82 @@ In Claude Desktop configuration (`%APPDATA%\Claude\claude_desktop_config.json` o
 
 ---
 
-## Wave 3: Whole-App Team (M7)
+## Wave 3: Whole-App Team (M7) [Done - PR #27]
 
-### CCC-61, CCC-62, CCC-63, CCC-64: Whole-app E2E and Click-through
-- [ ] Whole-app E2E on deterministic fakes.
-- [ ] Browser click-through with playwright-cli checking console errors and phone width.
-- [ ] Document commands in `CLAUDE.md`.
+### CCC-62: E2E on deterministic fakes [Done - PR #27]
+- [x] One whole-app journey across the real server (`tests/test_ui_playwright.py::test_whole_app_journey`):
+  - Step 1: Idea entered into Desk chat -> CannedLlm drafts Strategy Spec.
+  - Step 2: Desk runner registers Hypothesis and runs Gauntlet Trial -> Inline Verdict Card rendered with SVG charts and Pass Bar table.
+  - Step 3: Ideas page displays the Idea Family and Hypothesis with its Verdict badge.
+  - Step 4: Ledger page reflects the updated trial count and trial row.
+  - Step 5: Candidate hypothesis triggers a Holdout Request in the pending list; owner approves via UI -> status updates to approved.
+  - Step 6: RecordingNotifier receives CANDIDATE and Holdout Request notices.
+  - Step 7: Stdio MCP client (`vibedesk-mcp`) connected to the live API lists the Idea via `list_ideas`, confirms absence of owner tools, and verifies owner endpoints return HTTP 403 without the owner cookie.
+- [x] Verification: `uv run pytest -m e2e -n 0` (6 passed in ~28s).
+
+### CCC-63: Exploratory click-through [Done - PR #27]
+- [x] Drove running demo server (`tests/demo_server.py`) with Playwright across every view and control (Desk, Ideas, Ledger, Settings, sidebar toggle, detail panel).
+- [x] Console errors: 0. Unhandled exceptions: 0.
+- [x] Phone width (375 px) responsiveness: verified `scrollWidth <= clientWidth` (`375 == 375`) on all views with zero horizontal scroll overflow.
+- [x] 11 screenshots saved in git-ignored `screenshots/`:
+  - `01_desk_conversation_desktop.png` - Desk chat with message history
+  - `02_ideas_desktop.png` - Ideas page with family cards and filters
+  - `03_ledger_desktop.png` - Ledger page with trial table and holdout requests
+  - `04_settings_desktop.png` - Settings modal with live status indicators
+  - `05_desk_mobile_375px.png` - Desk page on 375px mobile viewport
+  - `06_desk_with_verdict_mobile_375px.png` - Inline Verdict Card on 375px mobile
+  - `07_ideas_mobile_375px.png` - Ideas page on 375px mobile
+  - `08_ledger_mobile_375px.png` - Ledger page on 375px mobile
+  - `09_settings_mobile_375px.png` - Settings page on 375px mobile
+  - `10_sidebar_mobile_375px.png` - Mobile sidebar slide-out menu
+  - `11_panel_mobile_375px.png` - Mobile slide-over trial result panel
+- [x] Findings and fixes:
+  - Fixed `RecordingNotifier` truthiness bug where `notifier or RecordingNotifier()` evaluated as falsy when empty (`len == 0`), causing a new instance to overwrite the passed notifier. Replaced with explicit `if notifier is not None:`.
+  - Preserved `RecordingNotifier` across settings updates in `src/vibedesk/app/server.py` (`if not isinstance(notifier, RecordingNotifier):`).
+  - Added `.first` to disambiguate badge element in ideas list under Playwright strict mode.
+  - Used topbar navigation buttons (`button[data-view='...']`) to ensure accessibility regardless of collapsible sidebar state (`side-closed`).
+
+### CCC-64: CLAUDE.md run and test commands for the whole app [Done - PR #27]
+- [x] Updated Commands block in `CLAUDE.md` so every command works as written:
+  - App by hand: `uv run --extra mt5 vibedesk-web --open`
+  - Demo server: `uv run python tests/demo_server.py 8766`
+  - Default fast test suite: `uv run pytest` (1,479 passed)
+  - Playwright browser install: `uv run playwright install chromium`
+  - Playwright E2E suite: `uv run pytest -m e2e -n 0` (6 passed)
+  - Slow suite: `uv run pytest -m slow`
+  - MCP server test: `uv run vibedesk-mcp --help`
+  - Telegram setup script: `powershell -File scripts/setup-telegram.ps1`
+  - Ruff formatting and linting: `uv run ruff check src tests && uv run ruff format --check src tests`
+- [x] Added detailed MCP registration guide for Claude Code CLI, project `.mcp.json`, and Claude Desktop configuration.
+- [x] Updated repo layout section in `CLAUDE.md` documenting `desk/`, `mcp/`, `notify/`, `scheduler.py`, and `test_ui_playwright.py`.
+
+---
+
+## Layer A Completion Summary
+
+Layer A (The Verdict Engine, Research Desk, API, UI, Notifier, and MCP Server) is complete. All automated cards from M1 through M7 have been delivered, verified with deterministic fakes, and merged:
+
+| Milestone | Scope | Key Deliverables | Status |
+|---|---|---|---|
+| **M1: Core Engine** | Blocks & Fill Engine | 6 Entries, 5 Filters, 6 Exits, full Cost Model, R metrics, look-ahead tests | **Done** (PR #1-#8) |
+| **M2: Gauntlet & Ledger** | Validation & Store | Walk-forward folds, Coin-Flip Baseline, Prosecutor, Pass Bar, SQLite Ledger | **Done** (PR #9-#12) |
+| **M3: MT5 Market Data** | Read-Only Data | ReadOnlyMt5 seam, Parquet cache, data mask, server clock to UTC, Spread Floors | **Done** (PR #13, #16) |
+| **M4: Research Desk** | AI Loop & Grounding | Desk loop, 7 desk tools, Grounding Rule validator (ADR 0005), TokenBudget cap/warning | **Done** (PR #15, #19, #22) |
+| **M5: API & Web UI** | HTTP API & 4-Page UI | 15 endpoints, owner-only auth, Scheduler, carry-forwards, 4-page UI (Desk, Ideas, Ledger, Settings) | **Done** (PR #23, #24, #25) |
+| **M6: Notifier & MCP** | Telegram & Stdio MCP | Telegram alerts & daily digest, stdio MCP server (`vibedesk-mcp`) with 8 tools & refusal tests | **Done** (PR #21, #26) |
+| **M7: Whole-App Test** | E2E & Verification | Whole-app journey test across real server, mobile 375px exploratory click-through, CLAUDE.md docs | **Done** (PR #27) |
+
+### Test Suite Totals
+- **Default fast suite:** 1,479 passed, 1 skipped (~2.5 min)
+- **Playwright E2E suite:** 6 passed (~28 s)
+- **Ruff linter and formatter:** 100% clean
+- **Safety checks:** Zero MT5 order/position calls in `src/`, read-only seam verified, no real network calls in tests
+
+### Open Owner-Only Items
+The following items remain open for the owner:
+- **CCC-41:** Checkpoint C owner review on real MT5 data
+- **CCC-48:** Validate 20 sample ideas against live OmniRoute model
+- **CCC-79 / CCC-80:** Architectural decisions (Holdout trade close price / atr_target stop distance)
+- **CCC-83 / CCC-87:** Legacy review cards for initial web app and styling
+- **CCC-90:** Restart `omniroute.service` on server with raised memory limits (503 fix)
+

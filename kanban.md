@@ -5,10 +5,10 @@ The project's task list now that the Vibe Kanban board was sunset on 2026-10-28;
 | Status | Cards |
 |---|---|
 | In review | 5 |
-| In progress | 6 |
+| In progress | 0 |
 | To do | 2 |
-| Backlog | 26 |
-| Done | 48 |
+| Backlog | 17 |
+| Done | 63 |
 | **Total** | **87** |
 
 **Note.** Some M4 and M5 cards describe the original, fuller plan, and the simple app (CCC-83) already covers them in a simpler form. CCC-47, CCC-51 and CCC-54 are now closed as covered; CCC-52 (partly) and CCC-63 remain open:
@@ -18,47 +18,33 @@ The project's task list now that the Vibe Kanban board was sunset on 2026-10-28;
 - CCC-54 (closed), one-click start: `Start Vibe Desk.bat` and the desktop shortcut;
 - CCC-63 (open), a click-through of the app: done in the browser, not as a whole-app suite.
 
-**Layer A team effort (2026-10-28).** Layer A is being finished by AO worker teams in waves:
+**Layer A team effort (2026-10-28 / 2026-10-29).** Layer A is complete across Waves 0–3:
 - Wave 0: the Vibe Kanban board was sunset (PR #18), and the shared team contract and file ownership went into tasks/plan.md (PR #17).
-- Wave 1 is in progress: the Desk team (CCC-44, CCC-46, Grounding Rule wiring), the API team (CCC-50, CCC-53, CCC-55) and the Notify team (CCC-59).
-- Next come Wave 2 (the UI team, CCC-52/56; the MCP team, CCC-58/60) and Wave 3 (M7, CCC-62/63/64).
-- Owner-only items: CCC-41, CCC-48, CCC-79, CCC-80, CCC-83, CCC-87 and CCC-90.
+- Wave 1: Desk team (CCC-44, CCC-46, PR #22), API team (CCC-50, CCC-53, CCC-55, PR #23), Notify team (CCC-59, PR #21), Wave 1 integration (PR #24).
+- Wave 2: UI team (CCC-52, CCC-56, PR #25), MCP team (CCC-58, CCC-60, PR #26).
+- Wave 3: Whole-app test team (CCC-62, CCC-63, CCC-64, PR #27).
+- Owner-only items stay open: CCC-41, CCC-48, CCC-79, CCC-80, CCC-83, CCC-87 and CCC-90.
 
 ## Not done yet
 
 ### In review (5)
 
-- [ ] **CCC-42** Roadmap · Layer A · M4 Research Desk (LLM)
-- [ ] **CCC-49** Roadmap · Layer A · M5 API and web UI
+- [ ] **CCC-42** Roadmap · Layer A · M4 Research Desk (LLM) (5 of 6 done; CCC-48 owner-only)
+- [ ] **CCC-49** Roadmap · Layer A · M5 API and web UI (8 of 10 done; CCC-83, CCC-87 owner-only)
 - [ ] **CCC-83** M5 · Simple web app: chat an idea, AI writes the Spec, test on real XM data (under CCC-49)
 - [ ] **CCC-87** M5 · Redesign the app in a claude.ai-like style (design only) (under CCC-49)
 - [ ] **CCC-90** Issue · OmniRoute answers 503 resource_pressure: the shared server is out of memory (PR #14)
 
-### In progress (6)
+### In progress (0)
 
-- [ ] **CCC-44** M4 · Desk tools: list_blocks, describe_data, draft_spec, register_hypothesis, run_trial, get_trial, request_holdout (under CCC-42)
-- [ ] **CCC-46** M4 · Token budget: daily cap from OmniRoute usage, 80% warning, pause at 100% (under CCC-42)
-- [ ] **CCC-50** M5 · HTTP API with owner-only actions (owner cookie, SameSite=Strict) (under CCC-49)
-- [ ] **CCC-53** M5 · Scheduler: nightly data refresh and weekly Spread Floors (under CCC-49)
-- [ ] **CCC-55** M5 · Holdout and Trial carry-forwards (under CCC-49)
-- [ ] **CCC-59** M6 · Telegram notices and daily digest (push-only) (under CCC-57)
+*(None)*
 
 ### To do (2)
 
 - [ ] **CCC-41** M3 · Checkpoint C: M3 done, owner reviews (under CCC-29)
 - [ ] **CCC-48** M4 · Validate: 20 sample ideas → valid Strategy Specs, and the Block Library covers the owner's last 15 ideas (under CCC-42)
 
-### Backlog (26)
-
-- [ ] **CCC-52** M5 · Ideas, Ledger and Settings pages (under CCC-49)
-- [ ] **CCC-56** M5 · Playwright E2E on the fakes; layout at 375 px (under CCC-49)
-- [ ] **CCC-57** Roadmap · Layer A · M6 MCP server and Telegram
-- [ ] **CCC-58** M6 · MCP server (stdio, calls the API): read and act tools, no owner tools (under CCC-57)
-- [ ] **CCC-60** M6 · Test the owner-only refusals and the RecordingNotifier (under CCC-57)
-- [ ] **CCC-61** Roadmap · Layer A · M7 Whole-app test
-- [ ] **CCC-62** M7 · E2E on deterministic fakes (under CCC-61)
-- [ ] **CCC-63** M7 · Exploratory click-through: every page, console errors, phone width (under CCC-61)
-- [ ] **CCC-64** M7 · CLAUDE.md run and test commands for the whole app (under CCC-61)
+### Backlog (17)
 - [ ] **CCC-65** Roadmap · Layer B · Forward Proof (paper → demo → owner-gated live)
 - [ ] **CCC-66** Layer B · Forward Arena: virtual paper accounts on the live feed, no orders (under CCC-65)
 - [ ] **CCC-67** Layer B · Leaderboard of forward results (under CCC-65)
@@ -129,45 +115,45 @@ CCC-29 · *Done* · 11 of 12 done
 
 ### Layer A · M4 Research Desk (LLM)
 
-CCC-42 · *In review* · 3 of 6 done
+CCC-42 · *In review* · 5 of 6 done (CCC-48 owner-only)
 
 - [x] **CCC-43** M4 · Desk loop with ScriptedLLM: tool calls, SSE events, ≤ 12 tool calls per message (PR #15) · *Done*
-- [ ] **CCC-44** M4 · Desk tools: list_blocks, describe_data, draft_spec, register_hypothesis, run_trial, get_trial, request_holdout · *In progress*
+- [x] **CCC-44** M4 · Desk tools: list_blocks, describe_data, draft_spec, register_hypothesis, run_trial, get_trial, request_holdout (PR #22) · *Done*
 - [x] **CCC-45** M4 · Grounding Rule validator: no digits in prose, placeholders rendered from stored data (PR #19) · *Done*
-- [ ] **CCC-46** M4 · Token budget: daily cap from OmniRoute usage, 80% warning, pause at 100% · *In progress*
+- [x] **CCC-46** M4 · Token budget: daily cap from OmniRoute usage, 80% warning, pause at 100% (PR #22) · *Done*
 - [x] **CCC-47** M4 · OmniRouteLLM adapter (OpenAI-compatible, combo vibe-desk) · *Done*
 - [ ] **CCC-48** M4 · Validate: 20 sample ideas → valid Strategy Specs, and the Block Library covers the owner's last 15 ideas · *To do*
 
 ### Layer A · M5 API and web UI
 
-CCC-49 · *In review* · 3 of 10 done
+CCC-49 · *In review* · 8 of 10 done (CCC-83, CCC-87 owner-only)
 
-- [ ] **CCC-50** M5 · HTTP API with owner-only actions (owner cookie, SameSite=Strict) · *In progress*
+- [x] **CCC-50** M5 · HTTP API with owner-only actions (owner cookie, SameSite=Strict) (PR #23) · *Done*
 - [x] **CCC-51** M5 · Desk page: chat, live Trial progress, Verdict Cards · *Done*
-- [ ] **CCC-52** M5 · Ideas, Ledger and Settings pages · *Backlog*
-- [ ] **CCC-53** M5 · Scheduler: nightly data refresh and weekly Spread Floors · *In progress*
+- [x] **CCC-52** M5 · Ideas, Ledger and Settings pages (PR #25) · *Done*
+- [x] **CCC-53** M5 · Scheduler: nightly data refresh and weekly Spread Floors (PR #23) · *Done*
 - [x] **CCC-54** M5 · One-click start: double-click sets up and opens the app · *Done*
-- [ ] **CCC-55** M5 · Holdout and Trial carry-forwards · *In progress*
-- [ ] **CCC-56** M5 · Playwright E2E on the fakes; layout at 375 px · *Backlog*
+- [x] **CCC-55** M5 · Holdout and Trial carry-forwards (PR #23, PR #24) · *Done*
+- [x] **CCC-56** M5 · Playwright E2E on the fakes; layout at 375 px (PR #25) · *Done*
 - [ ] **CCC-83** M5 · Simple web app: chat an idea, AI writes the Spec, test on real XM data · *In review*
 - [ ] **CCC-87** M5 · Redesign the app in a claude.ai-like style (design only) · *In review*
 - [x] **CCC-88** Bug · Old chats didn't load: save chats and open them again · *Done*
 
 ### Layer A · M6 MCP server and Telegram
 
-CCC-57 · *Backlog* · 0 of 3 done
+CCC-57 · *Done* · 3 of 3 done
 
-- [ ] **CCC-58** M6 · MCP server (stdio, calls the API): read and act tools, no owner tools · *Backlog*
-- [ ] **CCC-59** M6 · Telegram notices and daily digest (push-only) · *In progress*
-- [ ] **CCC-60** M6 · Test the owner-only refusals and the RecordingNotifier · *Backlog*
+- [x] **CCC-58** M6 · MCP server (stdio, calls the API): read and act tools, no owner tools (PR #26) · *Done*
+- [x] **CCC-59** M6 · Telegram notices and daily digest (push-only) (PR #21) · *Done*
+- [x] **CCC-60** M6 · Test the owner-only refusals and the RecordingNotifier (PR #26) · *Done*
 
 ### Layer A · M7 Whole-app test
 
-CCC-61 · *Backlog* · 0 of 3 done
+CCC-61 · *Done* · 3 of 3 done
 
-- [ ] **CCC-62** M7 · E2E on deterministic fakes · *Backlog*
-- [ ] **CCC-63** M7 · Exploratory click-through: every page, console errors, phone width · *Backlog*
-- [ ] **CCC-64** M7 · CLAUDE.md run and test commands for the whole app · *Backlog*
+- [x] **CCC-62** M7 · E2E on deterministic fakes (PR #27) · *Done*
+- [x] **CCC-63** M7 · Exploratory click-through: every page, console errors, phone width (PR #27) · *Done*
+- [x] **CCC-64** M7 · CLAUDE.md run and test commands for the whole app (PR #27) · *Done*
 
 ### Layer B · Forward Proof (paper → demo → owner-gated live)
 
