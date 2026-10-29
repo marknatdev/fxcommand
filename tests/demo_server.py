@@ -47,6 +47,25 @@ class CannedLlm:
         return Turn(content=self.chat(messages))
 
 
+def _write_symbol_bars(root: Path, source: SyntheticBarSource, symbol: str) -> None:
+    for tf in (Timeframe.M15, Timeframe.H1, Timeframe.H4):
+        bars = source.fetch(symbol, tf)
+        for year in range(2013, 2025):
+            start = datetime(year, 1, 1, tzinfo=UTC).timestamp()
+            end = datetime(year + 1, 1, 1, tzinfo=UTC).timestamp()
+            write_chunk(root, bars.between(int(start), int(end)), year)
+
+
+def _record_demo_metadata(root: Path, symbol: str) -> None:
+    record_import(root, symbol, datetime(2025, 1, 1, tzinfo=UTC))
+    record_cost(
+        root,
+        CostMeasurement(
+            symbol, "2026-10-23T00:00:00+00:00", 0.01, 30.0, 35.0, 1000, -50.0, 10.0, 3
+        ),
+    )
+
+
 def populate_demo_cache(root: Path) -> None:
     """Populate synthetic GOLD and EURUSD bars if bar cache is empty."""
     bars_dir = root / "bars"
@@ -54,19 +73,8 @@ def populate_demo_cache(root: Path) -> None:
         return
     source = SyntheticBarSource(1, date(2013, 12, 1), date(2025, 1, 1))
     for symbol in ("GOLD", "EURUSD"):
-        for tf in (Timeframe.M15, Timeframe.H1, Timeframe.H4):
-            bars = source.fetch(symbol, tf)
-            for year in range(2013, 2025):
-                start = datetime(year, 1, 1, tzinfo=UTC).timestamp()
-                end = datetime(year + 1, 1, 1, tzinfo=UTC).timestamp()
-                write_chunk(root, bars.between(int(start), int(end)), year)
-        record_import(root, symbol, datetime(2025, 1, 1, tzinfo=UTC))
-        record_cost(
-            root,
-            CostMeasurement(
-                symbol, "2026-10-23T00:00:00+00:00", 0.01, 30.0, 35.0, 1000, -50.0, 10.0, 3
-            ),
-        )
+        _write_symbol_bars(root, source, symbol)
+        _record_demo_metadata(root, symbol)
 
 
 def create_demo_app(
@@ -89,6 +97,7 @@ def create_demo_app(
             data_dir.mkdir(parents=True, exist_ok=True)
             populate_demo_cache(data_dir)
     else:
+        data_dir.mkdir(parents=True, exist_ok=True)
         populate_demo_cache(data_dir)
 
     app = create_app(
@@ -98,6 +107,35 @@ def create_demo_app(
         settings_root=scratch,
         enable_scheduler=False,
     )
+
+    @app.get("/api/holdout-requests")
+    def list_holdout_requests(status: str | None = None) -> list[dict[str, Any]]:
+        desk = app.state.desk
+        with desk.ledger._lock:
+            rows = desk.ledger._db.execute(
+                "SELECT r.id, r.hypothesis_id, h.family_id, r.trial_id, "
+                "CASE WHEN a.id IS NOT NULL THEN 'approved' ELSE 'pending' END AS status, "
+                "r.created_at "
+                "FROM holdout_requests r "
+                "JOIN hypotheses h ON h.id = r.hypothesis_id "
+                "LEFT JOIN holdout_approvals a ON a.request_id = r.id "
+                "WHERE (? IS NULL OR (CASE WHEN a.id IS NOT NULL THEN 'approved' "
+                "ELSE 'pending' END) = ?) "
+                "ORDER BY r.id DESC",
+                (status, status),
+            ).fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "hypothesis_id": row[1],
+                    "family_id": row[2],
+                    "trial_id": row[3],
+                    "status": row[4],
+                    "created_at": row[5],
+                }
+                for row in rows
+            ]
+
     return app, data_dir, scratch
 
 

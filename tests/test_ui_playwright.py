@@ -16,18 +16,24 @@ Run with:
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import pytest
 import uvicorn
 from playwright.sync_api import Page, expect
-from test_carry_forwards import record_dummy_trial
 
+from vibedesk.app.desk import Desk
+from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.gauntlet.trial import CANDIDATE
+from vibedesk.market.bars import Timeframe
+from vibedesk.market.costs import CostSnapshot
+from vibedesk.rules import RULES_VERSION
 
 from demo_server import RSI, create_demo_app
 
@@ -40,16 +46,67 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def record_candidate_trial(desk: Desk, hypothesis_id: int) -> int:
+    """Helper to record a valid CANDIDATE trial directly into Ledger with full summary fields."""
+    import numpy as np
+
+    hyp = desk.ledger.hypothesis(hypothesis_id)
+    cost = CostSnapshot("GOLD", 30.0, 0.01, 1.0, 0.0, 0.0, 3)
+    bars = desk.market.bars(
+        "GOLD",
+        Timeframe.H1,
+        datetime(2020, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    combos = expand_grid(validate(hyp.spec_json))
+    combinations = [(c, 1.5) for c in combos]
+
+    np.random.seed(42)
+    daily_r_list = np.random.normal(0.2, 0.5, 1000).tolist()
+    trade_exit_times = [1700000000 + i * 3600 for i in range(len(daily_r_list))]
+
+    result_data = {
+        "verdict": CANDIDATE,
+        "closest_miss": None,
+        "checks": [],
+        "cost": {"spread_floor_points": 30.0, "slippage_points": 1.0},
+        "baseline": {"p95": 10.0, "percentile": 99.0, "strategy_net_r": 25.0},
+        "walk_forward": {
+            "metrics": {"profit_factor": 1.5, "trades": 120, "win_rate": 0.55},
+            "trade_list": {"exit_time": trade_exit_times, "r": daily_r_list},
+            "stress_metrics": {},
+            "years": [2023],
+            "fold_net_r": [25.0],
+            "combinations": list(range(len(combinations))),
+            "daily_r": {"day_start": list(range(1000)), "r": daily_r_list},
+            "holdout_choice": 0,
+        },
+        "holdout": {"rate_per_year": 50.0},
+    }
+    return desk.ledger.record_trial(
+        hypothesis_id,
+        combinations=combinations,
+        verdict=CANDIDATE,
+        closest_miss=None,
+        cost=cost,
+        bars=bars,
+        rules_version=RULES_VERSION,
+        result_json=json.dumps(result_data),
+    )
+
+
 @pytest.fixture(scope="module")
-def demo_server():
+def demo_server(tmp_path_factory):
     port = find_free_port()
-    app, data_dir, scratch = create_demo_app()
+    data_dir = tmp_path_factory.mktemp("data")
+    scratch = tmp_path_factory.mktemp("scratch")
+    app, data_dir, scratch = create_demo_app(data_dir=data_dir, scratch=scratch)
 
     desk = app.state.desk
     rsi_gold = {**RSI, "symbol": "GOLD", "timeframe": "H1"}
     fam_id = desk.ledger.create_family("Pre-seeded Test Family for Holdout Approval")
     hyp_id = desk.ledger.register_hypothesis(fam_id, rsi_gold)
-    trial_id = record_dummy_trial(desk, hyp_id, verdict=CANDIDATE)
+    trial_id = record_candidate_trial(desk, hyp_id)
     preseeded_request_id = desk.request_holdout(hyp_id)
 
     config = uvicorn.Config(app=app, host="127.0.0.1", port=port, log_level="warning")
@@ -103,7 +160,7 @@ def test_drive_each_page(demo_server: dict[str, Any], page: Page):
     expect(page.locator("#viewLedger")).to_be_visible()
     expect(page.locator("#statDeskTrials")).to_be_visible()
     expect(page.locator("#familiesTable")).to_be_visible()
-    expect(page.locator("#holdoutRequestIdInput")).to_be_visible()
+    expect(page.locator("#holdoutRequestsTable")).to_be_visible()
 
     # 4. Settings Page
     page.click("#navSettings")
@@ -163,9 +220,12 @@ def test_owner_only_approve_and_403(demo_server: dict[str, Any], page: Page):
     page.click("#navLedger")
     expect(page.locator("#viewLedger")).to_be_visible()
 
-    # Enter the pre-seeded Holdout Request ID
-    page.fill("#holdoutRequestIdInput", str(req_id))
-    page.click("#btnApproveHoldout")
+    # The pre-seeded Holdout Request should be rendered in the table with an Approve button
+    req_row = page.locator(f"#holdout-req-{req_id}")
+    expect(req_row).to_be_visible(timeout=10000)
+    approve_btn = req_row.locator(".btn-approve-holdout")
+    expect(approve_btn).to_be_visible()
+    approve_btn.click()
 
     # With the default owner cookie set by the page, approval succeeds
     approve_msg = page.locator("#holdoutApproveMsg")
@@ -177,13 +237,70 @@ def test_owner_only_approve_and_403(demo_server: dict[str, Any], page: Page):
     page.context.clear_cookies()
 
     # Try an owner-only action: extend budget on Family #1
-    page.locator("#familiesTable button").first.click()
+    page.locator("#familiesTableBody button").first.click()
 
     # Verify a clear message is displayed for HTTP 403
     banner = page.locator("#ledgerBanner")
     expect(banner).to_be_visible(timeout=10000)
     expected_msg = "Owner action required: owner cookie missing or invalid (HTTP 403)"
     expect(banner).to_contain_text(expected_msg)
+
+
+def test_ideas_apostrophe_and_verdict_filter(demo_server: dict[str, Any], page: Page):
+    """Verify Idea with apostrophe and script tag is safe and Chat Idea works;
+    test filterVerdict."""
+    base_url = demo_server["base_url"]
+    page.goto(base_url)
+
+    # 1. Navigate to Ideas page
+    page.click("#navIdeas")
+    expect(page.locator("#viewIdeas")).to_be_visible()
+
+    # Create an Idea Family with an apostrophe and a <script> tag
+    tricky_idea = "GOLD's trend pullback <script>window.__injected_xss = true;</script>"
+    page.fill("#newFamilyInput", tricky_idea)
+    page.click("#btnCreateFamily")
+
+    # Verify family is created and displayed safely
+    family_item = page.locator(".idea-item", has_text="GOLD's trend pullback")
+    expect(family_item).to_be_visible(timeout=10000)
+
+    # Verify no XSS was executed
+    is_xss = page.evaluate("() => Boolean(window.__injected_xss)")
+    assert not is_xss, "XSS script should not execute"
+
+    # Click "Chat Idea" button on the family with tricky idea text
+    chat_btn = family_item.locator(".btn-chat-family")
+    expect(chat_btn).to_be_visible()
+    chat_btn.click()
+
+    # Should switch to Desk view with the idea text loaded into #input
+    expect(page.locator("#viewDesk")).to_be_visible()
+    input_val = page.locator("#input").input_value()
+    assert input_val == tricky_idea
+
+    # 2. Test filterVerdict
+    page.click("#navIdeas")
+    expect(page.locator("#viewIdeas")).to_be_visible()
+
+    # Pre-seeded family has a CANDIDATE trial
+    candidate_family = page.locator(
+        ".idea-item", has_text="Pre-seeded Test Family for Holdout Approval"
+    )
+    expect(candidate_family).to_be_visible()
+    expect(candidate_family.locator(".badge.good")).to_contain_text("CANDIDATE")
+
+    # Select CANDIDATE in filterVerdict dropdown
+    page.select_option("#filterVerdict", "CANDIDATE")
+    expect(candidate_family).to_be_visible()
+
+    # Select REJECT in filterVerdict dropdown (should hide candidate family)
+    page.select_option("#filterVerdict", "REJECT")
+    expect(candidate_family).not_to_be_visible()
+
+    # Reset filterVerdict to All Verdicts
+    page.select_option("#filterVerdict", "")
+    expect(candidate_family).to_be_visible()
 
 
 def test_responsive_375px_no_horizontal_scroll(demo_server: dict[str, Any], page: Page):

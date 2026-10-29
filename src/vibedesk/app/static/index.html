@@ -350,6 +350,8 @@ td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
           <p>Every Idea Family registered, its testable Hypotheses, and Gauntlet Verdicts.</p>
         </div>
 
+        <div id="ideasBanner" class="banner" style="display:none;margin-bottom:14px;"></div>
+
         <div class="section-card">
           <div class="section-title">New Idea Family</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -446,11 +448,24 @@ td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
         <div class="section-card">
           <div class="section-title">Holdout Requests (2025 to Today)</div>
           <p style="font-size:13px;color:var(--muted);margin-top:0;">Holdout data is locked and spent at most once per Idea Family. Only the owner can approve requests.</p>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
-            <input type="number" id="holdoutRequestIdInput" class="filter-input" placeholder="Holdout Request ID, e.g. 1" style="max-width:240px;">
-            <button class="btn primary" id="btnApproveHoldout">Approve (Owner)</button>
+          <div id="holdoutApproveMsg" class="banner" style="display:none;margin-bottom:12px;"></div>
+          <div class="table-wrap">
+            <table id="holdoutRequestsTable">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Family</th>
+                  <th>Hypothesis</th>
+                  <th>Trial</th>
+                  <th>Created</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="holdoutRequestsTableBody">
+                <tr><td colspan="6" style="text-align:center;color:var(--muted)">Loading pending requests…</td></tr>
+              </tbody>
+            </table>
           </div>
-          <div id="holdoutApproveMsg" class="fine" style="margin-bottom:12px;"></div>
         </div>
       </div>
     </div>
@@ -560,9 +575,6 @@ td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
 </div>
 
 <script>
-// Automatically set the owner cookie on load (spec §8.1, auth.py)
-document.cookie = "vibedesk_owner=1; SameSite=Strict; path=/";
-
 const $ = (id) => document.getElementById(id);
 const app = $("app");
 let currentChat = null;
@@ -614,7 +626,7 @@ async function api(path, options = {}) {
 }
 
 const fmt = (v, d = 2) => v === null || v === undefined || Number.isNaN(v) ? "–" : Number(v).toFixed(d);
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const statusOf = (c) => ({ pass: "PASS", fail: "FAIL" }[String(c.status).toLowerCase()] || "NA");
 const narrow = () => window.matchMedia("(max-width: 860px)").matches;
 
@@ -987,7 +999,7 @@ function buildVerdictCardHtml(r) {
       ${costSnapshot}
       <div class="card-actions" style="margin-top:12px;padding:0;">
         <button class="btn" onclick="openResult(${r.id || r.trial_id})">Open side panel</button>
-        ${good ? `<button class="btn primary" onclick="requestHoldout(${r.hypothesis_id || r.id})">Request Holdout</button>` : ''}
+        ${good && r.hypothesis_id ? `<button class="btn primary" onclick="requestHoldout(${r.hypothesis_id})">Request Holdout</button>` : ''}
       </div>
     </div>
   `;
@@ -1113,78 +1125,131 @@ function newIdea() {
 function grow() { const t = $("input"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 200) + "px"; }
 
 /* Ideas Page Logic */
-async function loadIdeas() {
-  const container = $("ideasContainer");
-  container.innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted)"><span class="spin"></span> Loading ideas…</div>';
-  try {
-    const families = await api("/api/families");
-    if (!families.length) {
-      container.innerHTML = '<div style="text-align:center;padding:30px;color:var(--faint)">No Idea Families registered yet. Type an idea above to start.</div>';
-      return;
-    }
-    const filterText = $("filterText").value.trim().toLowerCase();
-    const filterVerdict = $("filterVerdict").value;
-    const filterSymbol = $("filterSymbol").value;
-    const filterTf = $("filterTimeframe").value;
+let cachedIdeasData = null;
 
-    const fullDetails = await Promise.all(
-      families.map(async (f) => {
-        try { return await api("/api/families/" + f.id); } catch (_) { return { ...f, hypotheses: [] }; }
-      })
-    );
+function showIdeasBanner(msg, type = "ok") {
+  const b = $("ideasBanner");
+  b.className = `banner ${type === "err" ? "err" : "ok"}`;
+  b.style.display = "block";
+  b.innerHTML = esc(msg);
+}
 
-    const filtered = fullDetails.filter((fam) => {
-      if (filterText && !fam.idea.toLowerCase().includes(filterText)) return false;
-      if (filterSymbol || filterTf) {
-        const hasMatch = fam.hypotheses.some((h) => (!filterSymbol || h.symbol === filterSymbol) && (!filterTf || h.timeframe === filterTf));
-        if (!hasMatch) return false;
+async function fetchIdeasData() {
+  const families = await api("/api/families");
+  const fullDetails = await Promise.all(
+    families.map(async (fam) => {
+      try {
+        const detail = await api("/api/families/" + fam.id);
+        await Promise.all(
+          (detail.hypotheses || []).map(async (h) => {
+            if (h.trial_ids && h.trial_ids.length) {
+              const lastTid = h.trial_ids[h.trial_ids.length - 1];
+              if (!results[lastTid]) {
+                try {
+                  results[lastTid] = await api("/api/trials/" + lastTid);
+                } catch (_) {}
+              }
+              h.latest_verdict = results[lastTid] ? results[lastTid].verdict : null;
+            } else {
+              h.latest_verdict = null;
+            }
+          })
+        );
+        return detail;
+      } catch (_) {
+        return { ...fam, hypotheses: [] };
       }
-      return true;
-    });
+    })
+  );
+  cachedIdeasData = fullDetails;
+}
 
-    if (!filtered.length) {
-      container.innerHTML = '<div style="text-align:center;padding:30px;color:var(--faint)">No ideas match the current filters.</div>';
-      return;
+function renderFilteredIdeas() {
+  const container = $("ideasContainer");
+  if (!cachedIdeasData || !cachedIdeasData.length) {
+    container.innerHTML = '<div style="text-align:center;padding:30px;color:var(--faint)">No Idea Families registered yet. Type an idea above to start.</div>';
+    return;
+  }
+  const filterText = $("filterText").value.trim().toLowerCase();
+  const filterVerdict = $("filterVerdict").value;
+  const filterSymbol = $("filterSymbol").value;
+  const filterTf = $("filterTimeframe").value;
+
+  const filtered = cachedIdeasData.filter((fam) => {
+    if (filterText && !fam.idea.toLowerCase().includes(filterText)) return false;
+    if (filterSymbol || filterTf || filterVerdict) {
+      const hasMatch = (fam.hypotheses || []).some((h) => {
+        if (filterSymbol && h.symbol !== filterSymbol) return false;
+        if (filterTf && h.timeframe !== filterTf) return false;
+        if (filterVerdict && h.latest_verdict !== filterVerdict) return false;
+        return true;
+      });
+      if (!hasMatch) return false;
     }
+    return true;
+  });
 
-    container.innerHTML = filtered.map((fam) => {
-      const hypsHtml = fam.hypotheses.map((h) => {
-        const trialsPills = (h.trial_ids || []).map((tid) => {
-          return `<button class="btn" style="padding:2px 8px;font-size:11.5px;" onclick="openResult(${tid})">Trial #${tid}</button>`;
-        }).join(" ");
-        return `
-          <div class="hyp-item">
-            <div>
-              <strong>${esc(h.symbol)} ${esc(h.timeframe)}</strong> · <code>${esc(h.entry_block)}</code>
-              <span class="muted" style="margin-left:8px;">Hypothesis #${h.id}</span>
-            </div>
-            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-              ${trialsPills}
-              <button class="btn" style="padding:3px 8px;font-size:12px;" onclick="runHypothesisTrial(${h.id})">Run Gauntlet</button>
-              <button class="btn primary" style="padding:3px 8px;font-size:12px;" onclick="requestHoldout(${h.id})">Holdout</button>
-            </div>
-          </div>
-        `;
-      }).join("");
+  if (!filtered.length) {
+    container.innerHTML = '<div style="text-align:center;padding:30px;color:var(--faint)">No ideas match the current filters.</div>';
+    return;
+  }
+
+  container.innerHTML = filtered.map((fam) => {
+    const hypsHtml = (fam.hypotheses || []).map((h) => {
+      const trialsPills = (h.trial_ids || []).map((tid) => {
+        return `<button class="btn" style="padding:2px 8px;font-size:11.5px;" onclick="openResult(${tid})">Trial #${tid}</button>`;
+      }).join(" ");
+      const verdictBadge = h.latest_verdict
+        ? `<span class="badge ${h.latest_verdict === 'CANDIDATE' ? 'good' : (h.latest_verdict === 'REJECT' ? 'bad' : 'muted')}" style="margin-left:6px;font-size:11px;">${esc(h.latest_verdict)}</span>`
+        : '<span class="badge muted" style="margin-left:6px;font-size:11px;">No trials</span>';
 
       return `
-        <div class="idea-item" id="family-${fam.id}">
-          <div class="idea-item-head">
-            <div>
-              <div class="idea-item-title">${esc(fam.idea)}</div>
-              <div class="idea-item-meta">Family #${fam.id} · Budget: ${fam.trial_count}/${fam.budget} Trials · ${fam.created_at.slice(0, 10)}</div>
-            </div>
-            <button class="btn" onclick="startChatFromFamily(${fam.id}, '${esc(fam.idea)}')">Chat Idea</button>
+        <div class="hyp-item">
+          <div>
+            <strong>${esc(h.symbol)} ${esc(h.timeframe)}</strong> · <code>${esc(h.entry_block)}</code>
+            ${verdictBadge}
+            <span class="muted" style="margin-left:8px;font-size:11.5px;">Hypothesis #${h.id}</span>
           </div>
-          <div class="hyp-list">
-            ${fam.hypotheses.length ? hypsHtml : '<div style="color:var(--faint);font-size:12.5px;">No frozen Hypotheses yet.</div>'}
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            ${trialsPills}
+            <button class="btn" style="padding:3px 8px;font-size:12px;" onclick="runHypothesisTrial(${h.id})">Run Gauntlet</button>
+            <button class="btn primary" style="padding:3px 8px;font-size:12px;" onclick="requestHoldout(${h.id})">Holdout</button>
           </div>
         </div>
       `;
     }).join("");
-  } catch (e) {
-    container.innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
+
+    return `
+      <div class="idea-item" id="family-${fam.id}">
+        <div class="idea-item-head">
+          <div>
+            <div class="idea-item-title">${esc(fam.idea)}</div>
+            <div class="idea-item-meta">Family #${fam.id} · Budget: ${fam.trial_count}/${fam.budget} Trials · ${fam.created_at.slice(0, 10)}</div>
+          </div>
+          <button class="btn btn-chat-family" data-family-id="${fam.id}">Chat Idea</button>
+        </div>
+        <div class="hyp-list">
+          ${fam.hypotheses.length ? hypsHtml : '<div style="color:var(--faint);font-size:12.5px;">No frozen Hypotheses yet.</div>'}
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+async function loadIdeas(refresh = false) {
+  const banner = $("ideasBanner");
+  banner.style.display = "none";
+  if (refresh || !cachedIdeasData) {
+    const container = $("ideasContainer");
+    container.innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted)"><span class="spin"></span> Loading ideas…</div>';
+    try {
+      await fetchIdeasData();
+    } catch (e) {
+      container.innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
+      return;
+    }
   }
+  renderFilteredIdeas();
 }
 
 async function runHypothesisTrial(hypId) {
@@ -1193,9 +1258,9 @@ async function runHypothesisTrial(hypId) {
     const full = await api("/api/trials/" + res.trial_id);
     results[res.trial_id] = full;
     showResult(full);
-    loadIdeas();
+    await loadIdeas(true);
   } catch (e) {
-    alert("Trial run failed: " + e.message);
+    showIdeasBanner("Trial run failed: " + e.message, "err");
   }
 }
 
@@ -1203,12 +1268,12 @@ async function requestHoldout(hypId) {
   try {
     const res = await api(`/api/hypotheses/${hypId}/holdout-requests`, { method: "POST", body: JSON.stringify({}) });
     if (res.status === "pending") {
-      alert(`Holdout requested! Request #${res.request_id} created, awaiting owner approval in the Ledger.`);
+      showIdeasBanner(`Holdout requested! Request #${res.request_id} created, awaiting owner approval in the Ledger.`, "ok");
     } else {
-      alert(`Holdout request ${res.status}: ${res.refusal_reason || "Not eligible."}`);
+      showIdeasBanner(`Holdout request ${res.status}: ${res.refusal_reason || "Not eligible."}`, "err");
     }
   } catch (e) {
-    alert("Holdout request failed: " + e.message);
+    showIdeasBanner("Holdout request failed: " + e.message, "err");
   }
 }
 
@@ -1224,7 +1289,10 @@ async function loadLedger() {
   const banner = $("ledgerBanner");
   banner.style.display = "none";
   try {
-    const stats = await api("/api/ledger");
+    const [stats, holdoutReqs] = await Promise.all([
+      api("/api/ledger"),
+      api("/api/holdout-requests?status=pending").catch(() => []),
+    ]);
     $("statDeskTrials").textContent = stats.desk_trial_count ?? 0;
     $("statDeflationCombos").textContent = (stats.current_deflation_combinations ?? 0).toLocaleString();
     $("statFamiliesCount").textContent = (stats.families || []).length;
@@ -1232,19 +1300,37 @@ async function loadLedger() {
     const tbody = $("familiesTableBody");
     if (!stats.families || !stats.families.length) {
       tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--faint)">No families in Ledger yet.</td></tr>';
-      return;
+    } else {
+      tbody.innerHTML = stats.families.map((f) => `
+        <tr>
+          <td><strong>#${f.family_id}</strong></td>
+          <td>${esc(f.idea)}</td>
+          <td class="num">${f.trials} / ${f.budget}</td>
+          <td class="num">${(f.combinations_evaluated || 0).toLocaleString()}</td>
+          <td>
+            <button class="btn btn-extend-budget" data-family-id="${f.family_id}" style="padding:3px 9px;font-size:12px;">+25 Budget</button>
+          </td>
+        </tr>
+      `).join("");
     }
-    tbody.innerHTML = stats.families.map((f) => `
-      <tr>
-        <td><strong>#${f.family_id}</strong></td>
-        <td>${esc(f.idea)}</td>
-        <td class="num">${f.trials} / ${f.budget}</td>
-        <td class="num">${(f.combinations_evaluated || 0).toLocaleString()}</td>
-        <td>
-          <button class="btn" style="padding:3px 9px;font-size:12px;" onclick="extendBudget(${f.family_id})">+25 Budget</button>
-        </td>
-      </tr>
-    `).join("");
+
+    const hbody = $("holdoutRequestsTableBody");
+    if (!holdoutReqs || !holdoutReqs.length) {
+      hbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--faint)">No pending Holdout Requests awaiting approval.</td></tr>';
+    } else {
+      hbody.innerHTML = holdoutReqs.map((r) => `
+        <tr id="holdout-req-${r.id}">
+          <td><strong>#${r.id}</strong></td>
+          <td>Family #${r.family_id}</td>
+          <td>Hypothesis #${r.hypothesis_id}</td>
+          <td>${r.trial_id ? 'Trial #' + r.trial_id : '–'}</td>
+          <td>${esc((r.created_at || '').slice(0, 19).replace('T', ' '))}</td>
+          <td>
+            <button class="btn primary btn-approve-holdout" data-request-id="${r.id}" style="padding:3px 9px;font-size:12px;">Approve (Owner)</button>
+          </td>
+        </tr>
+      `).join("");
+    }
   } catch (e) {
     banner.className = "banner err";
     banner.style.display = "block";
@@ -1273,12 +1359,18 @@ async function extendBudget(familyId) {
 
 async function approveHoldout(requestId) {
   const msgEl = $("holdoutApproveMsg");
+  msgEl.className = "banner";
+  msgEl.style.display = "block";
   msgEl.innerHTML = '<span class="spin"></span> Submitting approval…';
   try {
     const res = await api(`/api/holdout-requests/${requestId}/approve`, { method: "POST" });
-    msgEl.innerHTML = `<span style="color:var(--good);font-weight:600;">Approved!</span> Grant issued for Family #${res.family_id} (Token: <code>${res.grant_token.slice(0, 12)}…</code>)`;
+    msgEl.className = "banner ok";
+    msgEl.innerHTML = `Approved! Grant issued for Request #${res.request_id} (Family #${res.family_id}, Token: <code>${esc(res.grant_token.slice(0, 12))}…</code>)`;
+    await loadLedger();
   } catch (e) {
-    msgEl.innerHTML = `<span style="color:var(--bad);font-weight:500;">${esc(e.message)}</span>`;
+    msgEl.className = "banner err";
+    msgEl.style.display = "block";
+    msgEl.innerHTML = esc(e.message);
   }
 }
 
@@ -1442,31 +1534,52 @@ if ($("btnUpdateDataSettings")) {
 }
 
 // Ideas page handlers
-$("btnRefreshIdeas").onclick = loadIdeas;
-$("filterText").oninput = loadIdeas;
-$("filterVerdict").onchange = loadIdeas;
-$("filterSymbol").onchange = loadIdeas;
-$("filterTimeframe").onchange = loadIdeas;
+$("btnRefreshIdeas").onclick = () => loadIdeas(true);
+$("filterText").oninput = renderFilteredIdeas;
+$("filterVerdict").onchange = renderFilteredIdeas;
+$("filterSymbol").onchange = renderFilteredIdeas;
+$("filterTimeframe").onchange = renderFilteredIdeas;
+
+$("ideasContainer").onclick = (e) => {
+  const chatBtn = e.target.closest(".btn-chat-family");
+  if (chatBtn) {
+    const fid = parseInt(chatBtn.dataset.familyId, 10);
+    const fam = (cachedIdeasData || []).find((f) => f.id === fid);
+    if (fam) {
+      startChatFromFamily(fam.id, fam.idea);
+    }
+  }
+};
+
 $("btnCreateFamily").onclick = async () => {
   const text = $("newFamilyInput").value.trim();
   if (!text) return;
   try {
     await api("/api/families", { method: "POST", body: JSON.stringify({ idea: text }) });
     $("newFamilyInput").value = "";
-    loadIdeas();
+    showIdeasBanner("Family created successfully.", "ok");
+    await loadIdeas(true);
   } catch (e) {
-    alert("Could not create family: " + e.message);
+    showIdeasBanner("Could not create family: " + e.message, "err");
   }
 };
 
 // Ledger page handlers
-$("btnApproveHoldout").onclick = () => {
-  const reqId = parseInt($("holdoutRequestIdInput").value);
-  if (!reqId) {
-    $("holdoutApproveMsg").innerHTML = '<span style="color:var(--bad)">Please enter a valid numeric Holdout Request ID.</span>';
-    return;
+if ($("btnRefreshLedger")) $("btnRefreshLedger").onclick = loadLedger;
+$("familiesTableBody").onclick = (e) => {
+  const btn = e.target.closest(".btn-extend-budget");
+  if (btn) {
+    const fid = parseInt(btn.dataset.familyId, 10);
+    if (fid) extendBudget(fid);
   }
-  approveHoldout(reqId);
+};
+
+$("holdoutRequestsTableBody").onclick = (e) => {
+  const btn = e.target.closest(".btn-approve-holdout");
+  if (btn) {
+    const reqId = parseInt(btn.dataset.requestId, 10);
+    if (reqId) approveHoldout(reqId);
+  }
 };
 
 // Settings page handlers
