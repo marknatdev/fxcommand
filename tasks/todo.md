@@ -481,9 +481,9 @@
 
 ---
 
-## Wave 1: Desk Team (M4)
+## Wave 1: Desk Team (M4) [Done - PR #19, PR #22]
 
-### CCC-44: Desk tools (list_blocks, describe_data, draft_spec, register_hypothesis, run_trial, get_trial, request_holdout)
+### CCC-44: Desk tools (list_blocks, describe_data, draft_spec, register_hypothesis, run_trial, get_trial, request_holdout) [Done - PR #22]
 - [x] Implement `describe_data` for Research Window stats (coverage, Spread Floor, ATR levels).
 - [x] Implement `register_hypothesis` to freeze Hypothesis in Ledger with anti-gaming checks.
 - [x] Implement `run_trial` executing Gauntlet, counting 1 Trial against family budget, raising BudgetExhausted when spent.
@@ -491,13 +491,13 @@
 - [x] Implement `request_holdout` checking §6.3 gate (CANDIDATE, Deflated Sharpe, trades >= 30).
 - [x] Verification: `uv run pytest tests/test_desk_tools.py` (9 passed).
 
-### CCC-45: Grounding Rule (wiring into desk loop)
+### CCC-45: Grounding Rule (wiring into desk loop) [Done - PR #19]
 - [x] Interface called by Desk team: `validate(prose, *, known_tokens=None) -> list[str]` and `render(prose, lookup) -> str` (resolving `{{trial:ID.metric}}`, `{{spec:ID.param}}`, `{{hyp:ID.field}}`, `{{date:ISO}}`).
 - [x] Built and tested by separate CCC-45 worker in `src/vibedesk/desk/grounding.py` and `tests/test_grounding.py` (PR #19).
 - [x] Wires into `desk/loop.py`: validates assistant prose, retries up to 2 times with a correction message, renders placeholders from stored data, or withholds explanation and sends verdict alone if retries fail. Re-exported in `src/vibedesk/desk/__init__.py`.
 - [x] Verification: `uv run pytest tests/test_grounding.py tests/test_desk_loop.py` (32 passed).
 
-### CCC-46: Token budget enforcement
+### CCC-46: Token budget enforcement [Done - PR #22]
 - [x] Count tokens from OmniRoute usage responses against daily cap.
 - [x] Send `token_warning` notice to Notifier at 80% of daily cap (once per day).
 - [x] Pause desk loop at 100% of daily cap with clear owner explanation while manual Trials remain permitted.
@@ -518,20 +518,20 @@
 
 ---
 
-## Wave 1: API Team (M5 Backend)
+## Wave 1: API Team (M5 Backend) [Done - PR #23]
 
-### CCC-50: HTTP API with owner-only actions
+### CCC-50: HTTP API with owner-only actions [Done - PR #23]
 - [x] Implement 15 endpoints in `ENDPOINT_TABLE`.
 - [x] Enforce `require_owner` on `approve_holdout`, `extend_budget`, `PUT /api/settings` (HTTP 403 on missing cookie).
 - [x] Wire `POST /api/families/{id}/chat` to SSE stream running `desk_loop` with `build_desk_tools`.
 - [x] Verification: `uv run pytest tests/test_api.py`
 
-### CCC-53: Scheduler
+### CCC-53: Scheduler [Done - PR #23]
 - [x] Background thread for nightly refresh (02:00 Bangkok), weekly floors (Sunday 00:00 Bangkok), daily digest (21:00 Bangkok).
 - [x] Manual trigger `run_job_now(name)`.
 - [x] Verification: `uv run pytest tests/test_scheduler.py`
 
-### CCC-55: Holdout and Trial carry-forwards
+### CCC-55: Holdout and Trial carry-forwards [Done - PR #23]
 - [x] Reusable Holdout grant until spend is recorded.
 - [x] Bind Holdout Request to Trial ID.
 - [x] Per-family trial lock to freeze N during execution.
@@ -550,14 +550,16 @@
 
 ---
 
-## Wave 1: Notify Team (M6 Part)
+## Wave 1: Notify Team (M6 Part) [Done - PR #21]
 
-### CCC-59: Telegram notices and daily digest
+### CCC-59: Telegram notices and daily digest [Done - PR #21]
 - [x] Implement `TelegramNotifier.send` over httpx.
 - [x] Format and push CANDIDATE, PASS, HOLDOUT FAIL, Holdout Request, and token warning notices.
 - [x] Compile and push 21:00 Bangkok daily digest.
 - [x] `scripts/setup-telegram.ps1` for interactive setup into `data/secrets.json`.
 - [x] Verification: `uv run pytest tests/test_notify.py`
+
+**Wave 1 complete:** All cards CCC-44 (PR #22), CCC-45 (PR #19), CCC-46 (PR #22), CCC-50 (PR #23), CCC-53 (PR #23), CCC-55 (PR #23), and CCC-59 (PR #21) merged to main. Wave 1 integration PR wires budget/notifier into chat, daily digest via `Ledger.trial_counts`, and M4 end-to-end test.
 
 ---
 

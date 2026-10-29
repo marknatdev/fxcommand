@@ -618,3 +618,43 @@ def test_ledger_trial_counts(ledger):
     assert ledger.trial_counts(since_utc="2099-01-01T00:00:00Z") == (0, 0)
     assert ledger.trial_counts(until_utc="2000-01-01T00:00:00Z") == (0, 0)
     assert ledger.trial_counts(since_utc="2000-01-01T00:00:00Z") == (3, 2)
+
+    # Half-open boundary test: (since_utc, until_utc]
+    first_trial = ledger.trials_for(hyp)[0]
+    # since_utc == created_at excludes the trial (> created_at)
+    trials_after_first, rejects_after_first = ledger.trial_counts(since_utc=first_trial.created_at)
+    assert trials_after_first == 2
+    # until_utc == created_at includes the first trial (<= created_at)
+    trials_up_to_first, _ = ledger.trial_counts(until_utc=first_trial.created_at)
+    assert trials_up_to_first == 1
+
+
+def test_ledger_holdout_requests(ledger):
+    family = ledger.create_family("Holdout List Family")
+    hyp = ledger.register_hypothesis(family, make_spec())
+
+    assert ledger.holdout_requests() == []
+
+    req1 = ledger.request_holdout(hyp)
+    req2 = ledger.request_holdout(hyp)
+    ledger.approve_holdout(req2)
+
+    all_reqs = ledger.holdout_requests()
+    assert len(all_reqs) == 2
+    assert all_reqs[0].id == req1
+    assert all_reqs[0].hypothesis_id == hyp
+    assert all_reqs[0].family_id == family
+    assert all_reqs[0].status == "pending"
+    assert all_reqs[1].id == req2
+    assert all_reqs[1].status == "approved"
+
+    pending = ledger.holdout_requests(status="pending")
+    assert len(pending) == 1
+    assert pending[0].id == req1
+
+    approved = ledger.holdout_requests(status="approved")
+    assert len(approved) == 1
+    assert approved[0].id == req2
+
+    spent = ledger.holdout_requests(status="spent")
+    assert len(spent) == 0

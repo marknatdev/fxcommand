@@ -385,3 +385,115 @@ def test_trial_tools_bound_content_size_for_llm_context(ledger, synthetic_market
     for c in get_checks:
         assert c["name"] is not None and len(c["name"]) > 0
         assert c["status"] in ("pass", "fail", "n/a")
+
+
+def test_chat_run_trial_blocks_while_family_lock_held(ledger, synthetic_market):
+    """Chat run_trial tool takes family_lock(hyp.family_id) and blocks until released (CCC-55)."""
+    import threading
+    import time
+
+    from vibedesk.ledger.locks import family_lock
+
+    fam_id = ledger.create_family("Chat Lock Test Family 1")
+    hyp_id = ledger.register_hypothesis(fam_id, SPEC)
+
+    ctx = DeskContext(
+        ledger=ledger,
+        market=synthetic_market,
+        family_id=fam_id,
+        cost=COST,
+        use_m1=False,
+    )
+    tools = build_desk_tools(ctx)
+    run_trial_tool = tools.get("run_trial")
+
+    lock = family_lock(fam_id)
+    acquired_by_holder = threading.Event()
+    release_holder = threading.Event()
+    tool_finished = threading.Event()
+    tool_result: dict = {}
+
+    def lock_holder():
+        with lock:
+            acquired_by_holder.set()
+            release_holder.wait(timeout=5.0)
+
+    def tool_runner():
+        res = run_trial_tool.fn(hyp_id)
+        tool_result["data"] = res
+        tool_finished.set()
+
+    t_holder = threading.Thread(target=lock_holder)
+    t_holder.start()
+    assert acquired_by_holder.wait(timeout=2.0), "Holder failed to acquire lock"
+
+    # Start the tool runner in another thread while lock is held
+    t_runner = threading.Thread(target=tool_runner)
+    t_runner.start()
+
+    # The tool runner must be blocked because the family lock is held
+    time.sleep(0.08)
+    assert not tool_finished.is_set(), "run_trial tool must block while family_lock is held"
+
+    # Now release the lock from holder
+    release_holder.set()
+    t_runner.join(timeout=25.0)
+    t_holder.join(timeout=5.0)
+
+    # Tool runner must have completed and produced a trial result
+    assert tool_finished.is_set(), "run_trial tool should finish after family_lock is released"
+    assert "verdict" in tool_result["data"]
+
+
+def test_chat_request_holdout_blocks_while_family_lock_held(ledger, synthetic_market):
+    """Chat request_holdout tool takes family_lock(hyp.family_id) and blocks (CCC-55)."""
+    import threading
+    import time
+
+    from vibedesk.ledger.locks import family_lock
+
+    fam_id = ledger.create_family("Holdout Lock Test Family 2")
+    hyp_id = ledger.register_hypothesis(fam_id, SPEC)
+
+    ctx = DeskContext(
+        ledger=ledger,
+        market=synthetic_market,
+        family_id=fam_id,
+        cost=COST,
+        use_m1=False,
+    )
+    tools = build_desk_tools(ctx)
+    req_tool = tools.get("request_holdout")
+
+    lock = family_lock(fam_id)
+    acquired_by_holder = threading.Event()
+    release_holder = threading.Event()
+    tool_finished = threading.Event()
+
+    def lock_holder():
+        with lock:
+            acquired_by_holder.set()
+            release_holder.wait(timeout=5.0)
+
+    def tool_runner():
+        try:
+            req_tool.fn(hyp_id)
+        except Exception:
+            pass
+        finally:
+            tool_finished.set()
+
+    t_holder = threading.Thread(target=lock_holder)
+    t_holder.start()
+    assert acquired_by_holder.wait(timeout=2.0)
+
+    t_runner = threading.Thread(target=tool_runner)
+    t_runner.start()
+
+    time.sleep(0.08)
+    assert not tool_finished.is_set(), "request_holdout tool must block while family_lock is held"
+
+    release_holder.set()
+    t_runner.join(timeout=5.0)
+    t_holder.join(timeout=5.0)
+    assert tool_finished.is_set()

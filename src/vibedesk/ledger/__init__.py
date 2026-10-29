@@ -1,5 +1,6 @@
 """The Ledger: append-only Idea Families, Hypotheses, Trials, Trial Budgets and the Holdout."""
 
+from vibedesk.ledger.locks import family_lock
 from vibedesk.ledger.store import (
     BUDGET_STEP,
     TRIAL_BUDGET,
@@ -8,6 +9,7 @@ from vibedesk.ledger.store import (
     Family,
     FamilyConflict,
     HoldoutRequest,
+    HoldoutRequestRow,
     HoldoutSpend,
     HoldoutSpent,
     Hypothesis,
@@ -24,7 +26,9 @@ __all__ = [
     "BudgetExhausted",
     "Family",
     "FamilyConflict",
+    "family_lock",
     "HoldoutRequest",
+    "HoldoutRequestRow",
     "HoldoutSpend",
     "HoldoutSpent",
     "Hypothesis",

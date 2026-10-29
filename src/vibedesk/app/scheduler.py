@@ -278,61 +278,15 @@ class Scheduler:
 
         until_utc = scheduled_bkk.astimezone(UTC)
 
-        try:
-            from vibedesk.notify import compile_daily_digest
-        except ImportError:
-            compile_daily_digest = None
+        from vibedesk.notify import compile_daily_digest
 
         ledger = getattr(self.desk, "ledger", None) if self.desk is not None else None
-        if compile_daily_digest is not None:
-            notice = compile_daily_digest(
-                ledger=ledger,
-                budget=self.budget,
-                until=until_utc,
-                now=self._clock,
-            )
-        else:
-            # Count REJECTs and Trials from the Ledger over window (until - 24h, until]
-            from vibedesk.notify import Notice, NoticeKind
-
-            since_utc = until_utc - timedelta(hours=24)
-            trials_count = 0
-            rejects = 0
-            if ledger is not None:
-                if hasattr(ledger, "trial_counts"):
-                    trials_count, rejects = ledger.trial_counts(since_utc, until_utc)
-                else:
-                    since_iso = since_utc.isoformat()
-                    until_iso = until_utc.isoformat()
-                    with getattr(ledger, "_lock", threading.Lock()):
-                        db = getattr(ledger, "_db", None)
-                        if db is not None:
-                            row = db.execute(
-                                "SELECT COUNT(*), "
-                                "COALESCE(SUM(CASE WHEN verdict = 'REJECT' THEN 1 ELSE 0 END), 0) "
-                                "FROM trials "
-                                "WHERE datetime(created_at) > datetime(?) "
-                                "AND datetime(created_at) <= datetime(?)",
-                                (since_iso, until_iso),
-                            ).fetchone()
-                            if row:
-                                trials_count, rejects = int(row[0]), int(row[1])
-
-            tokens_used = self.budget.used if self.budget else 0
-            text = (
-                f"Daily Digest: {rejects} REJECTs, {trials_count} Trials run, "
-                f"{tokens_used:,} tokens used today."
-            )
-            notice = Notice(
-                kind=NoticeKind.DAILY_DIGEST,
-                text=text,
-                data={
-                    "reject_count": rejects,
-                    "trials_run": trials_count,
-                    "tokens_used": tokens_used,
-                    "until_utc": until_utc.isoformat(),
-                },
-            )
+        notice = compile_daily_digest(
+            ledger=ledger,
+            budget=self.budget,
+            until=until_utc,
+            now=self._clock,
+        )
 
         sent = False
         if self.notifier is not None:

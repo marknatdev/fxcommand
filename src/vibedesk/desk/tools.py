@@ -33,6 +33,7 @@ from vibedesk.gauntlet.trial import (
 from vibedesk.gauntlet.trial import (
     run_trial as gauntlet_run_trial,
 )
+from vibedesk.ledger.locks import family_lock
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.costs import CostError, current_cost
 from vibedesk.market.grant import HOLDOUT_START, RESEARCH_START
@@ -329,13 +330,14 @@ def build_desk_tools(ctx: DeskContext | None = None) -> ToolRegistry:
 
             use_m1 = first_cached(ctx.root, symbol, Timeframe.M1) is not None
 
-        trial_res = gauntlet_run_trial(
-            ctx.ledger,
-            ctx.market,
-            hypothesis_id,
-            cost,
-            use_m1=use_m1,
-        )
+        with family_lock(hyp.family_id):
+            trial_res = gauntlet_run_trial(
+                ctx.ledger,
+                ctx.market,
+                hypothesis_id,
+                cost,
+                use_m1=use_m1,
+            )
 
         # Send CANDIDATE notice via notifier if present (spec §8.4)
         if trial_res.verdict.verdict == "CANDIDATE" and ctx.notifier is not None:
@@ -394,7 +396,9 @@ def build_desk_tools(ctx: DeskContext | None = None) -> ToolRegistry:
 
         # Run gate checks via gauntlet.trial.request_holdout (spec §6.3):
         # verifies CANDIDATE, rules_version, Deflated Sharpe, expected trades >= 30.
-        req_id = gauntlet_request_holdout(ctx.ledger, hypothesis_id)
+        hyp = ctx.ledger.hypothesis(hypothesis_id)
+        with family_lock(hyp.family_id):
+            req_id = gauntlet_request_holdout(ctx.ledger, hypothesis_id)
 
         # Notify owner of pending Holdout Request (spec §8.4)
         if ctx.notifier is not None:

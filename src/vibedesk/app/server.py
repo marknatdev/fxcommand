@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import inspect
 import threading
 import webbrowser
 from contextlib import asynccontextmanager
@@ -28,6 +27,7 @@ from vibedesk.app.api_spec import (
     HealthOut,
     HoldoutApproveOut,
     HoldoutRequestIn,
+    HoldoutRequestItemOut,
     HoldoutRequestOut,
     HypothesisDetailOut,
     LedgerStatsOut,
@@ -95,8 +95,14 @@ def create_app(
     state = {"settings": config.load(settings_root)}
 
     # Budget & Notifier initialization
-    budget = budget or TokenBudget(daily_cap=state["settings"].daily_token_cap)
-    notifier = notifier or get_notifier(root=settings_root, settings=state["settings"])
+    budget = (
+        budget if budget is not None else TokenBudget(daily_cap=state["settings"].daily_token_cap)
+    )
+    notifier = (
+        notifier
+        if notifier is not None
+        else get_notifier(root=settings_root, settings=state["settings"])
+    )
     if scheduler is None and enable_scheduler:
         scheduler = Scheduler(root=root, desk=desk, notifier=notifier, budget=budget, api=mt5_api)
 
@@ -123,22 +129,13 @@ def create_app(
         return OmniRoute(s.llm_url, s.llm_key, s.llm_model)
 
     def _run_desk_loop(llm_client: Llm, message: str, chat_tools: Any) -> Any:
-        kwargs: dict[str, Any] = {}
-        try:
-            sig = inspect.signature(desk_loop)
-            has_budget = "budget" in sig.parameters or any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-            )
-            if has_budget and budget is not None:
-                kwargs["budget"] = budget
-            has_notifier = "notifier" in sig.parameters or any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-            )
-            if has_notifier and notifier is not None:
-                kwargs["notifier"] = notifier
-        except (ValueError, TypeError):
-            pass
-        return desk_loop(llm_client, message, tools=chat_tools, **kwargs)
+        return desk_loop(
+            llm_client,
+            message,
+            tools=chat_tools,
+            budget=budget,
+            notifier=notifier,
+        )
 
     # --- UI Page (Sets owner cookie on 127.0.0.1:8765 per spec §8.1) ---
 
@@ -235,7 +232,7 @@ def create_app(
 
         try:
             res = desk.run_hypothesis(hypothesis_id, idea=body.idea)
-            if res.get("verdict") == "CANDIDATE" and notifier:
+            if res.get("verdict") == "CANDIDATE" and notifier is not None:
                 notifier.send(
                     Notice(
                         kind=NoticeKind.CANDIDATE,
@@ -279,6 +276,24 @@ def create_app(
 
     # --- Holdout (spec §8.1, CCC-50, CCC-55) ---
 
+    @app.get(
+        "/api/holdout-requests",
+        response_model=list[HoldoutRequestItemOut],
+    )
+    def list_holdout_requests(status: str | None = None):
+        rows = desk.ledger.holdout_requests(status=status)
+        return [
+            HoldoutRequestItemOut(
+                id=r.id,
+                hypothesis_id=r.hypothesis_id,
+                family_id=r.family_id,
+                trial_id=r.trial_id,
+                status=r.status,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
+
     @app.post(
         "/api/hypotheses/{hypothesis_id}/holdout-requests",
         response_model=HoldoutRequestOut,
@@ -292,7 +307,7 @@ def create_app(
         try:
             req_id = desk.request_holdout(hypothesis_id)
             req = desk.ledger.holdout_request(req_id)
-            if notifier:
+            if notifier is not None:
                 notifier.send(
                     Notice(
                         kind=NoticeKind.HOLDOUT_REQUEST,

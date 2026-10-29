@@ -40,11 +40,13 @@ from vibedesk.app.api_spec import (
 from vibedesk.app.auth import OWNER_COOKIE_NAME, OWNER_COOKIE_VALUE, require_owner
 from vibedesk.app.chats import Chats
 from vibedesk.app.desk import Desk
+from vibedesk.app.llm import ToolCall, Turn
 from vibedesk.app.research import EXAMPLE
 from vibedesk.app.server import create_app
 from vibedesk.market.bars import Timeframe
 from vibedesk.market.cache import record_import, write_chunk
 from vibedesk.market.costs import CostMeasurement, record_cost
+from vibedesk.market.fake_mt5 import FakeMt5
 from vibedesk.market.synthetic import SyntheticBarSource
 from vibedesk.notify import RecordingNotifier
 
@@ -299,6 +301,30 @@ def test_holdout_request_workflow(app_env):
     client.cookies.set(OWNER_COOKIE_NAME, OWNER_COOKIE_VALUE)
     assert client.post("/api/holdout-requests/9999/approve").status_code == 404
 
+    # GET /api/holdout-requests: read-only, no owner cookie needed
+    # Lists requests with optional status filter
+    client.cookies.clear()
+    req_id = desk.ledger.request_holdout(hyp_id)
+    res_list = client.get("/api/holdout-requests")
+    assert res_list.status_code == 200
+    items = res_list.json()
+    assert isinstance(items, list)
+    item = next(x for x in items if x["id"] == req_id)
+    assert item["hypothesis_id"] == hyp_id
+    assert item["family_id"] == fam_id
+    assert item["status"] == "pending"
+    assert "trial_id" in item
+    assert "created_at" in item
+
+    # Filter by status=pending and status=approved
+    res_pending = client.get("/api/holdout-requests?status=pending")
+    assert res_pending.status_code == 200
+    assert any(x["id"] == req_id for x in res_pending.json())
+
+    res_approved = client.get("/api/holdout-requests?status=approved")
+    assert res_approved.status_code == 200
+    assert not any(x["id"] == req_id for x in res_approved.json())
+
 
 def test_settings_get_and_put(app_env):
     client, _, _, _ = app_env
@@ -421,3 +447,102 @@ def test_chat_stream_starter_and_desk_tools_wiring(app_env):
     res_put = client.put("/api/settings", json={"daily_token_cap": 300_000})
     assert res_put.status_code == 200
     assert client.app.state.budget.daily_cap == 300_000
+
+
+def test_fresh_recording_notifier_preserved_in_create_app(tmp_path: Path):
+    """An empty RecordingNotifier (len == 0, falsy) passed to create_app must NOT be replaced."""
+    fresh_notifier = RecordingNotifier()
+    assert len(fresh_notifier) == 0
+    assert not fresh_notifier
+
+    app = create_app(
+        root=tmp_path / "data",
+        settings_root=tmp_path / "settings",
+        notifier=fresh_notifier,
+        enable_scheduler=True,
+    )
+    assert app.state.notifier is fresh_notifier
+    assert app.state.scheduler.notifier is fresh_notifier
+
+
+class _E2EDeskLLM:
+    """Scripted LLM for M4 E2E that extracts hypothesis_id from tool responses."""
+
+    def __init__(self, family_id: int) -> None:
+        self.family_id = family_id
+        self.step = 0
+        self.recorded_hyp_id: int | None = None
+
+    def complete(self, messages: list[dict], tools: list[dict] | None = None) -> Turn:
+        self.step += 1
+        if self.step == 1:
+            return Turn(
+                tool_calls=(
+                    ToolCall("register_hypothesis", {"spec": EXAMPLE, "family_id": self.family_id}),
+                ),
+                usage={"total_tokens": 150},
+            )
+        if self.step == 2:
+            tool_msg = messages[-1]
+            data = json.loads(tool_msg["content"])
+            self.recorded_hyp_id = int(data["hypothesis_id"])
+            return Turn(
+                tool_calls=(ToolCall("run_trial", {"hypothesis_id": self.recorded_hyp_id}),),
+                usage={"total_tokens": 250},
+            )
+        return Turn(
+            content="The hypothesis was evaluated and rejected on the Research Window.",
+            usage={"total_tokens": 75},
+        )
+
+
+def _setup_e2e_harness(tmp_path: Path) -> tuple[Desk, int, TestClient, _E2EDeskLLM]:
+    data_dir = tmp_path / "data"
+    settings_dir = tmp_path / "settings"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    setup_synthetic_gold_cache(data_dir)
+
+    desk = Desk(data_dir)
+    fam_id = desk.ledger.create_family("M4 E2E Family")
+    llm = _E2EDeskLLM(fam_id)
+    fake_api = FakeMt5(SyntheticBarSource(1, date(2013, 12, 1), date(2027, 1, 1)))
+
+    app = create_app(
+        root=data_dir,
+        llm=llm,
+        settings_root=settings_dir,
+        notifier=RecordingNotifier(),
+        mt5_api=fake_api,
+        enable_scheduler=False,
+    )
+    return desk, fam_id, TestClient(app), llm
+
+
+def test_e2e_m4_idea_to_verdict_via_family_chat(tmp_path: Path):
+    """End-to-end M4 done-when test (spec §10, CCC-44..CCC-55):
+    A scripted idea through POST /api/families/{id}/chat dynamically
+    registers a Hypothesis, runs a Trial, and yields a verdict event.
+    """
+    desk, fam_id, client, llm = _setup_e2e_harness(tmp_path)
+
+    res = client.post(
+        f"/api/families/{fam_id}/chat",
+        json={"message": "Test a GOLD H1 breakout idea"},
+    )
+    assert res.status_code == 200
+    assert "text/event-stream" in res.headers["content-type"]
+    text = res.text
+
+    assert "event: verdict" in text
+    assert "event: tool_started" in text
+
+    # Verify Trial recorded with the dynamically registered hypothesis_id
+    assert llm.recorded_hyp_id is not None
+    trials = desk.ledger.trials_for(llm.recorded_hyp_id)
+    assert len(trials) == 1
+    assert trials[0].hypothesis_id == llm.recorded_hyp_id
+    assert trials[0].verdict in ("CANDIDATE", "REJECT")
+
+    # Verify token budget usage
+    assert client.app.state.budget.used == 150 + 250 + 75

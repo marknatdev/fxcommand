@@ -297,7 +297,8 @@ def test_daily_digest_counts_from_ledger_without_monkeypatch(tmp_path: Path):
     assert notice.data["trials_run"] == 2
     assert notice.data["reject_count"] == 1
     assert notice.data["tokens_used"] == 12_345
-    assert "1 REJECTs, 2 Trials run, 12,345 tokens used" in notice.text
+    assert "Trials run: 2" in notice.text
+    assert "REJECT count: 1" in notice.text
 
 
 def test_weekly_spread_floors_continues_on_symbol_cost_error(tmp_path: Path):
