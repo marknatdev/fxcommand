@@ -61,8 +61,8 @@ def record_candidate_trial(desk: Desk, hypothesis_id: int) -> int:
     combos = expand_grid(validate(hyp.spec_json))
     combinations = [(c, 1.5) for c in combos]
 
-    np.random.seed(42)
-    daily_r_list = np.random.normal(0.2, 0.5, 1000).tolist()
+    rng = np.random.default_rng(42)
+    daily_r_list = rng.normal(0.2, 0.5, 1000).tolist()
     trade_exit_times = [1700000000 + i * 3600 for i in range(len(daily_r_list))]
 
     result_data = {

@@ -579,7 +579,7 @@
   - Drives an owner-only Holdout Request approval and asserts 403 refusal without cookie.
   - Asserts no horizontal scroll (`scrollWidth <= clientWidth`) on mobile viewport (375x667).
 - [x] Verification:
-  - Playwright E2E: `uv run pytest -m e2e -n 0` (4 passed)
+  - Playwright E2E: `uv run pytest -m e2e -n 0` (5 passed)
   - Page syntax: `node --check` via `uv run pytest -k test_the_pages_script_parses` (passed)
   - Ruff: `uv run ruff check src tests` and `uv run ruff format --check src tests` (clean)
 
