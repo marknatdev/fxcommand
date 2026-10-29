@@ -523,9 +523,17 @@ async def test_mcp_error_handling(mcp_test_env):
 @pytest.mark.anyio
 async def test_mcp_connect_error_handling():
     """Verify httpx.ConnectError raises ToolError indicating Vibe Desk is not running."""
-    client = VibeDeskMcpClient(base_url="http://127.0.0.1:54321")
-    with pytest.raises(ToolError, match=r"Vibe Desk is not running on http://127.0.0.1:54321"):
-        await client.list_ideas()
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Connection refused", request=request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(mock_handler),
+        base_url="http://127.0.0.1:54321",
+    ) as client:
+        mcp_client = VibeDeskMcpClient(base_url="http://127.0.0.1:54321", client=client)
+        with pytest.raises(ToolError, match=r"Vibe Desk is not running on http://127.0.0.1:54321"):
+            await mcp_client.list_ideas()
 
 
 def test_resolve_base_url_precedence(monkeypatch):

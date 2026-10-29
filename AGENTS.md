@@ -63,7 +63,7 @@ On start, `restore_old_trials` gives every test that has no chat (run before cha
 
 ## 5. Code map
 
-- `src/vibedesk/mcp/`: the stdio MCP server (`vibedesk-mcp`). Exposes 8 tools (5 read: list_ideas, get_verdict, get_ledger_stats, list_blocks, get_trial; 3 act: submit_idea, run_trial, request_holdout). Never carries the owner cookie and has no approve, budget, or settings tools. Register in Claude Code via `~/.claude/config.json` or Claude Desktop via `claude_desktop_config.json`.
+- `src/vibedesk/mcp/`: the stdio MCP server (`vibedesk-mcp`). Exposes 8 tools (5 read: list_ideas, get_verdict, get_ledger_stats, list_blocks, get_trial; 3 act: submit_idea, run_trial, request_holdout). Never carries the owner cookie and has no approve, budget, or settings tools. Register in Claude Code via CLI (`claude mcp add vibedesk -- uv --directory D:\millmaker\fxcommand run vibedesk-mcp`) or project `.mcp.json`; for Claude Desktop register in `claude_desktop_config.json`.
 - `src/vibedesk/app/`: the app.
   - `server.py`: FastAPI, `create_app(root, llm=None, db=None, settings_root=None)` (tests pass a fake LLM and temp paths), `main()` for `vibedesk-web`.
   - `research.py`: Idea to Spec (`draft_spec`, `system_prompt`, `catalog`, `normalize`: the browser writes 2.0 as 2, and a param list mixing 1.5 and 2 is invalid, so numbers in a list are made one type).

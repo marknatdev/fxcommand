@@ -606,11 +606,11 @@
 ### Registration with Claude Code / Claude Desktop
 
 #### 1. Claude Code
-Using the CLI:
+Using the CLI (writes user-scope config to `~/.claude.json`):
 ```bash
-claude mcp add vibedesk uv --directory /path/to/fxcommand run vibedesk-mcp
+claude mcp add vibedesk -- uv --directory D:\millmaker\fxcommand run vibedesk-mcp
 ```
-Or in `.claude/settings.json` (or `~/.claude/settings.json`):
+Or in project `.mcp.json` at repository root:
 ```json
 {
   "mcpServers": {
