@@ -366,17 +366,137 @@ def test_health_endpoint(tmp_path: Path):
         llm=ScriptedLlm(reply(EXAMPLE)),
         settings_root=settings_dir,
         mt5_api=fake_api,
-        enable_scheduler=False,
+        enable_scheduler=True,
     )
-    client = TestClient(app)
+    with TestClient(app) as client:
+        res_health = client.get("/api/health")
+        assert res_health.status_code == 200
+        health = HealthOut(**res_health.json())
+        assert health.token_budget_state in ("ok", "warn", "paused")
+        assert isinstance(health.tokens_used_today, int)
+        assert isinstance(health.active_jobs, int)
+        assert health.mt5_connected is True
+        assert health.omniroute_connected is True
+
+
+def _seed_smoke_environment(tmp_path: Path) -> tuple[Path, Path, dict[str, int]]:
+    """Create temporary directories, populate synthetic bars, and seed Ledger entities."""
+    data_dir = tmp_path / "data"
+    settings_dir = tmp_path / "settings"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    setup_synthetic_gold_cache(data_dir)
+
+    desk = Desk(data_dir)
+    fam_id = desk.ledger.create_family("Real Launcher Smoke Family")
+    hyp_id = desk.ledger.register_hypothesis(fam_id, EXAMPLE)
+    trial_res = desk.run_hypothesis(hyp_id, idea="Smoke Trial")
+    trial_id = trial_res["trial_id"]
+    req_id = desk.ledger.request_holdout(hyp_id)
+
+    chats = Chats(data_dir / "chats.db")
+    chat_id = chats.create("Smoke Chat")
+    chats.append(chat_id, {"role": "user", "text": "hello"}, {"role": "assistant", "text": "hi"})
+
+    id_map = {
+        "families": fam_id,
+        "hypotheses": hyp_id,
+        "trials": trial_id,
+        "holdout_req": req_id,
+        "chat": chat_id,
+    }
+    return data_dir, settings_dir, id_map
+
+
+def _build_smoke_app(data_dir: Path, settings_dir: Path, with_mt5: bool = True):
+    """Build app the way the launcher does (Scheduler and TokenBudget enabled)."""
+    fake_api = (
+        FakeMt5(SyntheticBarSource(1, date(2013, 12, 1), date(2027, 1, 1))) if with_mt5 else None
+    )
+    return create_app(
+        root=data_dir,
+        db=data_dir / "desk.db",
+        settings_root=settings_dir,
+        llm=ScriptedLlm(reply(EXAMPLE)),
+        mt5_api=fake_api,
+        notifier=RecordingNotifier() if with_mt5 else None,
+    )
+
+
+def _verify_all_get_endpoints(client: TestClient, id_map: dict[str, int]) -> None:
+    """Exercise every GET endpoint and assert 200 (no 5xx)."""
+    # Static UI
+    res_ui = client.get("/")
+    assert res_ui.status_code == 200
+    assert "text/html" in res_ui.headers.get("content-type", "")
+    assert len(res_ui.text) > 0
+
+    # ENDPOINT_TABLE GET endpoints
+    get_endpoints = [entry for entry in ENDPOINT_TABLE if entry["method"] == "GET"]
+    assert len(get_endpoints) >= 8
+
+    for entry in get_endpoints:
+        endpoint_path = entry["path"]
+        for resource in ("families", "hypotheses", "trials"):
+            if f"/api/{resource}/{{id}}" == endpoint_path:
+                endpoint_path = f"/api/{resource}/{id_map[resource]}"
+                break
+        res = client.get(endpoint_path)
+        assert res.status_code < 500, f"{entry['path']} returned {res.status_code}: {res.text}"
+        assert res.status_code == 200, f"{entry['path']} expected 200, got {res.status_code}"
+
+    # Holdout requests endpoint includes seeded req_id
+    res_holdout = client.get("/api/holdout-requests")
+    assert any(x["id"] == id_map["holdout_req"] for x in res_holdout.json())
+
+    # Additional simple-app GET endpoints
+    chat_id = id_map["chat"]
+    for extra_path in (
+        "/api/status",
+        "/api/models",
+        "/api/chats",
+        f"/api/chats/{chat_id}",
+        "/api/trials",
+    ):
+        res = client.get(extra_path)
+        assert res.status_code < 500, f"{extra_path} returned {res.status_code}: {res.text}"
+        assert res.status_code == 200, f"{extra_path} expected 200, got {res.status_code}"
+
+    # Verify /api/health
     res_health = client.get("/api/health")
     assert res_health.status_code == 200
     health = HealthOut(**res_health.json())
-    assert health.token_budget_state in ("ok", "warn", "paused")
-    assert isinstance(health.tokens_used_today, int)
-    assert isinstance(health.active_jobs, int)
     assert health.mt5_connected is True
-    assert health.omniroute_connected is True
+    assert health.active_jobs >= 0
+
+
+def _verify_no_mt5_health(data_dir: Path, settings_dir: Path) -> None:
+    """Verify /api/health works without MT5 and without OmniRoute."""
+    app_no_mt5 = _build_smoke_app(data_dir, settings_dir, with_mt5=False)
+    with TestClient(app_no_mt5) as client:
+        assert app_no_mt5.state.scheduler.is_running is True
+        res_health = client.get("/api/health")
+        assert res_health.status_code == 200
+        health = HealthOut(**res_health.json())
+        assert health.token_budget_state in ("ok", "warn", "paused")
+
+
+def test_real_launcher_smoke_all_get_endpoints(tmp_path: Path):
+    """Smoke test matching the real launcher (create_app with real Scheduler, real TokenBudget,
+    lifespan active) calling every GET endpoint in ENDPOINT_TABLE + static UI, asserting no 5xx."""
+    from vibedesk.app.scheduler import Scheduler
+    from vibedesk.desk.budget import TokenBudget
+
+    data_dir, settings_dir, id_map = _seed_smoke_environment(tmp_path)
+    app = _build_smoke_app(data_dir, settings_dir, with_mt5=True)
+
+    with TestClient(app) as client:
+        assert isinstance(app.state.scheduler, Scheduler)
+        assert app.state.scheduler.is_running is True
+        assert isinstance(app.state.budget, TokenBudget)
+        _verify_all_get_endpoints(client, id_map)
+
+    _verify_no_mt5_health(data_dir, settings_dir)
 
 
 def test_all_15_endpoints_in_table_covered(app_env):
