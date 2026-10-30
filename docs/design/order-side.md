@@ -19,7 +19,7 @@ Vibe Desk is built on a strict separation between research and money. Layer A cr
 The order side governs what happens when a strategy proves itself forward:
 1. **Paper to Demo (CCC-68):** A strategy that earns the **Demo-ready badge** in the Forward Arena may graduate to live demo order routing on the XM Demo terminal.
 2. **Demo to Live (CCC-70):** A strategy that clears the **Live Gate** (CCC-69) across statistical trade counts per timeframe may be switched to live real-money execution **only by the owner**.
-3. **Emergency Halt (CCC-70):** A physical **Kill Switch** accessible via UI, API, and CLI flattens owned open positions and halts all order execution within one tick.
+3. **Emergency Halt (CCC-70):** A physical **Kill Switch** accessible via UI, API, and CLI flattens owned open positions and halts all order execution within $< 1,000\text{ ms}$.
 
 ### Core Architectural Invariants
 
@@ -124,7 +124,7 @@ When order execution is implemented, these guards must evolve into a **Quarantin
    - **Layer 1 (Import Restriction):** The single-importer check is updated to permit exactly two files to import `MetaTrader5`: `market/mt5_api.py` (read-only data seam) and `execution/seam.py` (order execution seam). Any other import of `MetaTrader5` (including by `importlib` string) across `src/` fails the test.
    - **Layer 2 (AST Function & Attribute Scan):** The AST scanner is partitioned:
      - All packages in `src/` outside `execution/` remain strictly restricted to `ALLOWED_CALLS`. Naming any order or position function (`order_send`, `order_check`, `positions_get`, `orders_get`, `history_deals_get`, `order_calc_margin`) outside `execution/` fails CI immediately.
-     - `execution/seam.py` is checked against an explicit `ALLOWED_ORDER_CALLS` allowlist: `frozenset({"order_send", "order_check", "positions_get", "orders_get", "history_orders_get", "history_deals_get", "order_calc_margin", "symbol_info", "symbol_info_tick", "initialize", "shutdown", "last_error"})`.
+     - Within `execution/`, other modules (`kill_switch.py`, `runner.py`, `reconcile.py`, `risk.py`) are forbidden from importing `MetaTrader5` directly; they may invoke order and position functions ONLY through the `OrderMt5` interface provided by `execution/seam.py` (or `FakeOrderMt5` in tests). `execution/seam.py` is the sole module checked against `ALLOWED_ORDER_CALLS`: `frozenset({"order_send", "order_check", "positions_get", "orders_get", "history_orders_get", "history_deals_get", "order_calc_margin", "symbol_info", "symbol_info_tick", "initialize", "shutdown", "last_error"})`.
    - **Layer 3 (Runtime Protection & Decoupled Permissions):**
      - `ReadOnlyMt5` in `market/mt5_api.py` remains 100% read-only and continues to refuse every non-allowed attribute.
      - `OrderMt5` in `execution/seam.py` wraps `MetaTrader5` and enforces decoupled, fail-safe order authorization:
@@ -414,7 +414,7 @@ Operating a trading runner on a local Windows machine introduces distinct physic
 |---|---|---|
 | **MT5 Disconnect / Network Drop** | Orders fail, price feed stops | Exponential backoff retry (1s, 2s, 4s, 8s, up to 30s). If disconnected $> 60\text{ s}$, trigger high-priority Telegram alert. Refuse all new order submissions until tick feed resumes. |
 | **Laptop Sleep / Power Loss** | Missed bar closes, unmonitored positions | **Prevention:** Live Runner calls Windows API `SetThreadExecutionState(ES_CONTINUOUS \| ES_SYSTEM_REQUIRED \| ES_AWAYMODE_REQUIRED)`.<br/>**Recovery on Boot:** Reconciler scans `positions_get()`, matches tickets to Ledger, checks `history_deals_get()` for missed stops/exits, and reconciles state. |
-| **Broker Requotes / Off-Quotes** | Order rejected during volatility | In MT5 `MqlTradeRequest`, `deviation` is in **points** (not pips). Tolerance is calibrated dynamically per symbol as a fraction of the measured `Spread Floor` (which is stored in points): `deviation = max(10, int(0.5 * spread_floor_points))` (e.g. EURUSD: 10 points = 1.0 pip; GOLD: 30 points = $0.30). If rejected with `TRADE_RETCODE_REQUOTE` (10004) or `TRADE_RETCODE_PRICE_OFF` (10021), abort the entry and log `REQUOTE_ABORT`. Never chase a moving market. |
+| **Broker Requotes / Off-Quotes** | Order rejected during volatility | In MT5 `MqlTradeRequest`, `deviation` is in **points** (not pips). Tolerance is proposed to be calibrated dynamically per symbol as a fraction of the measured `Spread Floor` (which is stored in points): *[Proposal: `deviation = max(10, int(0.5 * spread_floor_points))`]* (e.g., EURUSD: 10 points = 1.0 pip from 20-point floor; GOLD: 27 points = $0.27 from 55-point floor). If rejected with `TRADE_RETCODE_REQUOTE` (10004) or `TRADE_RETCODE_PRICE_OFF` (10021), abort the entry and log `REQUOTE_ABORT`. Never chase a moving market. |
 | **Partial Fills** | Position size smaller than calculated | Detect deal volume $< \text{order volume}$. Ledger records actual filled volume; stops and targets are calibrated to the actual filled lot size. |
 | **Server DST Shift (Mismatch Weeks)** | Bar times shift relative to NY sessions | Handled by `server_time.py` (European DST `Europe/Athens`). Session checks dynamically evaluate exchange-local hours against New York market week. |
 | **Order Send Timeout** | Uncertain order status | Query `orders_get(ticket=...)` and `positions_get(ticket=...)` before retrying. Never resend an unconfirmed order without verifying position existence. |
@@ -499,7 +499,7 @@ Before any code under `src/vibedesk/execution/` is written or unparked, the owne
 - [ ] **Decision 5: CCC-72 Fill Comparison Edge Erosion Threshold**
   - *[Proposal]* Confirm threshold for flagging `EXECUTION_EROSION` on the Leaderboard (proposed: Track 3 demo profit factor lagging Track 1 backtest model by $> 15\%$ over 30 trades).
 - [ ] **Decision 6: Guard Test Evolution Approval (test_guard.py and test_mt5_guard.py)**
-  - Approve updating both `tests/test_guard.py` (scoping order-call regex ban to exclude `execution/`) and `tests/test_mt5_guard.py` (allowing `execution/seam.py` as second importer, partitioned AST allowlist, and runtime `OrderAuthToken` verification). All other packages in `src/` remain permanently order-free.
+  - Approve updating both `tests/test_guard.py` (scoping order-call regex ban to exclude `execution/`) and `tests/test_mt5_guard.py` (allowing `execution/seam.py` as second importer, partitioned AST allowlist, and runtime durable `LiveGrant` verification with permission decoupling). All other packages in `src/` remain permanently order-free.
 - [ ] **Decision 7: Terminal Instance Segregation**
   - Confirm whether the XM Live account will run on a separate Windows user/terminal profile to prevent accidental contamination of demo history or data cache.
 - [ ] **Decision 8: Kill Switch Handling of Partial Broker Errors**
@@ -508,3 +508,5 @@ Before any code under `src/vibedesk/execution/` is written or unparked, the owne
   - Confirm the non-replayable human credential mechanism preventing local agents or scripts with `vibedesk_owner=1` from switching live or promoting to demo:
     - *Choice A:* Owner passphrase or PIN typed into the UI modal and verified against an OS-protected credential hash outside `data/settings.json` and the git repo.
     - *Choice B:* Restrict the Live Switch and Demo Promotion exclusively to an interactive local CLI command (`uv run desk live-switch <hypothesis_id>`) requiring keyboard input on the laptop.
+- [ ] **Decision 10: Broker Requote Slippage Tolerance (Deviation Formula)**
+  - *[Proposal]* Confirm the dynamic deviation tolerance formula based on Spread Floor: `deviation = max(10, int(0.5 * spread_floor_points))` (e.g., 10 points = 1.0 pip on EURUSD from 20-point floor, 27 points = $0.27 on GOLD from 55-point floor).
