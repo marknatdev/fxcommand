@@ -103,45 +103,55 @@ def test_arena_strategy_init_and_accounts():
     assert res.trades_opened == 0
 
 
-def test_paper_account_metrics():
+def _sample_trades() -> list[PaperTrade]:
+    return [
+        PaperTrade(
+            id=1,
+            symbol="GOLD",
+            direction=1,
+            entry_time=1000,
+            exit_time=2000,
+            entry_price=2000.0,
+            exit_price=2020.0,
+            size=1.0,
+            pnl=500.0,
+            r=2.0,
+            cost_paid=10.0,
+            exit_reason="target",
+        ),
+        PaperTrade(
+            id=2,
+            symbol="GOLD",
+            direction=1,
+            entry_time=2100,
+            exit_time=3000,
+            entry_price=2020.0,
+            exit_price=2010.0,
+            size=1.0,
+            pnl=-250.0,
+            r=-1.0,
+            cost_paid=10.0,
+            exit_reason="stop",
+        ),
+    ]
+
+
+def test_paper_account_empty_metrics():
     acct = PaperAccount(initial_balance=10_000.0, balance=10_000.0, equity=10_500.0)
     assert acct.net_r == 0.0
     assert acct.trades_count == 0
     assert acct.profit_factor == 0.0
     assert acct.max_drawdown == 0.0
 
-    # Add trades
-    t1 = PaperTrade(
-        id=1,
-        symbol="GOLD",
-        direction=1,
-        entry_time=1000,
-        exit_time=2000,
-        entry_price=2000.0,
-        exit_price=2020.0,
-        size=1.0,
-        pnl=500.0,
-        r=2.0,
-        cost_paid=10.0,
-        exit_reason="target",
-    )
-    t2 = PaperTrade(
-        id=2,
-        symbol="GOLD",
-        direction=1,
-        entry_time=2100,
-        exit_time=3000,
-        entry_price=2020.0,
-        exit_price=2010.0,
-        size=1.0,
-        pnl=-250.0,
-        r=-1.0,
-        cost_paid=10.0,
-        exit_reason="stop",
-    )
-    acct.closed_trades.extend([t1, t2])
+
+def test_paper_account_trade_returns():
+    acct = PaperAccount(closed_trades=_sample_trades())
     assert acct.net_r == 1.0
     assert acct.trades_count == 2
+
+
+def test_paper_account_trade_performance():
+    acct = PaperAccount(closed_trades=_sample_trades())
     assert acct.profit_factor == 2.0  # 500 / 250
     assert acct.win_rate == 0.5
 
