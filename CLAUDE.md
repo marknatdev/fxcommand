@@ -8,7 +8,7 @@ An AI research desk for one owner who trades GOLD and FX on MT5 (XM). The owner 
 
 ## Commands
 
-**Start the app:** double-click `Start Vibe Desk.bat` (or the desktop shortcut "Vibe Desk"). It opens the SSH tunnel to OmniRoute on the Ubuntu server, starts the server on http://127.0.0.1:8765 and opens the browser. The OmniRoute key goes in the app's Settings (saved to `data/settings.json`) or in `.env` (see `.env.example`). "Update data" imports or refreshes every symbol from MT5 (read-only) and re-measures spreads.
+**Start the app:** double-click `Start Vibe Desk.bat` (or the desktop shortcut "Vibe Desk"). It asks whether to start the OmniRoute SSH tunnel (defaults to Yes after 15 s), starts the server on http://127.0.0.1:8765 and opens the browser. The OmniRoute key goes in the app's Settings (saved to `data/settings.json`) or in `.env` (see `.env.example`). "Update data" imports or refreshes every symbol from MT5 (read-only) and re-measures spreads.
 
 ```bash
 uv sync                                   # dependencies (add --extra mt5 for the live terminal)

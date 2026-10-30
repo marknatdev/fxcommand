@@ -26,7 +26,7 @@ First real results: a GOLD H1 Donchian breakout was "No edge" (1,184 blind trade
 
 The owner double-clicks the desktop shortcut **"Vibe Desk"**, which runs `Start Vibe Desk.bat`:
 1. if the app already answers on port 8765, it only opens the browser;
-2. otherwise it opens an SSH tunnel to OmniRoute (only needed when the URL is `http://127.0.0.1:20128/v1`), starts the server and opens http://127.0.0.1:8765.
+2. otherwise it asks whether to start the OmniRoute SSH tunnel (defaulting to Yes after 15 s), starts the server and opens http://127.0.0.1:8765.
 
 **After changing Python code, restart the server**: the .bat reuses a running one. Stop the process listening on 8765 (and its parent `cmd` running the .bat), then start the .bat again. The page (`static/index.html`) is read on every request, so HTML/JS changes need only a browser reload.
 
