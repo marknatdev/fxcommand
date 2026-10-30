@@ -125,9 +125,12 @@ When order execution is implemented, these guards must evolve into a **Quarantin
    - **Layer 2 (AST Function & Attribute Scan):** The AST scanner is partitioned:
      - All packages in `src/` outside `execution/` remain strictly restricted to `ALLOWED_CALLS`. Naming any order or position function (`order_send`, `order_check`, `positions_get`, `orders_get`, `history_deals_get`, `order_calc_margin`) outside `execution/` fails CI immediately.
      - `execution/seam.py` is checked against an explicit `ALLOWED_ORDER_CALLS` allowlist: `frozenset({"order_send", "order_check", "positions_get", "orders_get", "history_orders_get", "history_deals_get", "order_calc_margin", "symbol_info", "symbol_info_tick", "initialize", "shutdown", "last_error"})`.
-   - **Layer 3 (Runtime Protection):**
+   - **Layer 3 (Runtime Protection & Decoupled Permissions):**
      - `ReadOnlyMt5` in `market/mt5_api.py` remains 100% read-only and continues to refuse every non-allowed attribute.
-     - `OrderMt5` in `execution/seam.py` wraps `MetaTrader5` behind an explicit authorization check. On every order call, it verifies an active, short-lived HMAC-SHA256 authorization token (`OrderAuthToken`, signed by the server's session secret and issued only when the owner cookie `vibedesk_owner=1` is present, with a sliding 15-minute expiry). If the token is missing, expired, or if the Kill Switch has latched `LIVE_RUNNER_STATE = "HALTED"`, `OrderMt5` raises `ExecutionPermissionError` before touching the underlying module.
+     - `OrderMt5` in `execution/seam.py` wraps `MetaTrader5` and enforces decoupled, fail-safe order authorization:
+       1. **New Entries (Opening Deals):** Opening a new position (`TRADE_ACTION_DEAL` in entry direction) or placing a pending entry order (`TRADE_ACTION_PENDING`) requires: (a) `LIVE_RUNNER_STATE != "HALTED"`, and (b) an active, durable `LiveGrant` recorded in the Ledger for that specific Hypothesis and symbol. If `HALTED` is active or no valid `LiveGrant` exists in the Ledger, `OrderMt5` raises `ExecutionPermissionError`.
+       2. **Exits & Cancellations (Closing Deals & Flatten):** Closing an existing owned position (`TRADE_ACTION_DEAL` closing an active ticket) or cancelling a pending order (`TRADE_ACTION_REMOVE`) is **always permitted**. It does NOT require an active `LiveGrant` and is NOT blocked by `LIVE_RUNNER_STATE == "HALTED"`. This invariant guarantees that triggering the Kill Switch, executing trailing stops, or running the CLI `uv run desk kill-switch` can always flatten owned positions immediately, even when `HALTED` is latched or when no browser session is active.
+       3. **Durable Live Grants vs. Browser Sessions:** Strategy live-switch authorization is granted per Hypothesis as an immutable, durable `LiveGrant` in `data/desk.db` (created when the owner activates the live switch via UI with the `vibedesk_owner=1` cookie). The live runner operates autonomously over bar closes for weeks by verifying this durable grant in the Ledger, completely independent of browser cookies or active web sessions.
 3. **In-Memory Simulator Isolation:**
    - `FakeOrderMt5` lives in `src/vibedesk/execution/fake_order_mt5.py` (importing `FakeMt5` from `vibedesk.market.fake_mt5`). It MUST NEVER reside in `market/` or anywhere else in `src/` outside `execution/`, ensuring the read-only core is not polluted with order mock state.
    - All automated unit and integration tests run exclusively against `FakeOrderMt5`. Zero network calls or real terminal connections occur in tests.
@@ -202,8 +205,9 @@ Transitioning a strategy from the XM Demo to real money is the highest-risk even
 
 1. **Authentication:** The Live Switch endpoint `POST /api/execution/live-switch` strictly requires the `vibedesk_owner=1` cookie (`SameSite=Strict`).
 2. **Two-Step Modal Confirmation:** The UI requires the owner to type the symbol name and family ID into a confirmation dialog before sending the activation payload.
-3. **Ledger Immutability:** The live activation is recorded in `data/desk.db` with the exact git commit hash, `RULES_VERSION`, and current account balance.
-4. **Account Quarantine:** Live trading MUST use a dedicated XM Live MT5 terminal instance. It must NEVER run on the terminal instance used for development, backtesting, or demo testing.
+3. **Durable Ledger Grant (`LiveGrant`):** Activation creates a durable, immutable `LiveGrant` record in the SQLite Ledger (`data/desk.db`), binding the Hypothesis ID, symbol, git commit hash, `RULES_VERSION`, and authorized sizing. The Live Runner runs autonomously over closed bars for weeks by verifying this durable grant against the Ledger; it does NOT depend on a continuous browser session or transient browser tokens.
+4. **Grant Revocation:** A `LiveGrant` is immediately revoked when the owner clicks "Pause Live" or when the Kill Switch is triggered.
+5. **Account Quarantine:** Live trading MUST use a dedicated XM Live MT5 terminal instance. It must NEVER run on the terminal instance used for development, backtesting, or demo testing.
 
 ---
 
@@ -246,15 +250,16 @@ sequenceDiagram
     KS->>Notify: Push Critical Telegram Alert
 ```
 
-1. **State Latch:** Immediately flips `LIVE_RUNNER_STATE = "HALTED"`. All scheduled bar-close triggers reject incoming signals.
-2. **Ownership Filtering (Ownership Protection Invariant):** The Kill Switch MUST NOT close positions or cancel orders it does not own. On the owner's account, flattening every position indiscriminately would destroy manual discretionary trades (placed directly in the MT5 terminal) or trades from other strategies. The Kill Switch queries `orders_get()` and `positions_get()`, strictly filtering by:
+1. **State Latch:** Immediately flips `LIVE_RUNNER_STATE = "HALTED"` and revokes/suspends active `LiveGrant`s. All scheduled bar-close triggers reject incoming new entries.
+2. **Permission Decoupling (Flattening Invariant):** While `HALTED` blocks all new entry orders, `OrderMt5` explicitly permits closing deals (`TRADE_ACTION_DEAL` opposite side) and cancellations (`TRADE_ACTION_REMOVE`). Latching `HALTED` never blocks the flatten sequence itself, and flattening requires no owner browser session (allowing CLI `uv run desk kill-switch` to operate autonomously).
+3. **Ownership Filtering (Ownership Protection Invariant):** The Kill Switch MUST NOT close positions or cancel orders it does not own. On the owner's account, flattening every position indiscriminately would destroy manual discretionary trades (placed directly in the MT5 terminal) or trades from other strategies. The Kill Switch queries `orders_get()` and `positions_get()`, strictly filtering by:
    - **Magic Number:** `order.magic` / `position.magic` matches a registered Vibe Desk strategy magic number (e.g., `VIBEDESK_MAGIC_BASE + hypothesis_id`). Any order or position with magic `0` (manual terminal order) or a foreign magic number is ignored.
    - **Symbol:** `order.symbol` / `position.symbol` matches the symbol registered to that Hypothesis.
    - All manual trades and foreign positions remain completely untouched.
-3. **Pending Order Cancellation:** Sends `TRADE_ACTION_REMOVE` strictly for matching Vibe Desk pending limit/stop orders.
-4. **Market Flatten:** Dispatches immediate market closing orders (`TRADE_ACTION_DEAL`) strictly for matching Vibe Desk open positions.
-5. **Audit Logging:** Logs the halt timestamp, triggering user/system, closed Vibe Desk tickets, exit prices, and count of foreign positions left open to the Ledger.
-6. **Telegram Dispatch:** Emits a high-priority alert to the owner's Telegram channel with exit prices, realized P&L, and confirmation of foreign positions preserved.
+4. **Pending Order Cancellation:** Sends `TRADE_ACTION_REMOVE` strictly for matching Vibe Desk pending limit/stop orders.
+5. **Market Flatten:** Dispatches immediate market closing orders (`TRADE_ACTION_DEAL`) strictly for matching Vibe Desk open positions.
+6. **Audit Logging:** Logs the halt timestamp, triggering user/system, closed Vibe Desk tickets, exit prices, and count of foreign positions left open to the Ledger.
+7. **Telegram Dispatch:** Emits a high-priority alert to the owner's Telegram channel with exit prices, realized P&L, and confirmation of foreign positions preserved.
 
 ### 5.2 Latency & Performance Targets
 
@@ -272,7 +277,8 @@ sequenceDiagram
 The Kill Switch must be verified in automated CI without contacting real brokers:
 - Driven by `FakeOrderMt5`, which populates mock positions and pending orders.
 - The test asserts that upon `kill_switch.trigger()`, all mock positions owned by Vibe Desk transition to closed, all Vibe Desk pending orders are purged, the runner state latches to `HALTED`, and the exact audit event is written to the test database.
-- It also asserts that any planted foreign or manual positions (`magic=0` or foreign ID) remain open and untouched.
+- **Permission Decoupling Assertion:** Asserts that the flatten sequence successfully dispatches and executes closing orders *after* `LIVE_RUNNER_STATE = "HALTED"` is latched, and works with zero owner browser session present (simulating CLI `uv run desk kill-switch` or background automated stop).
+- **Foreign Position Assertion:** Asserts that any planted foreign or manual positions (`magic=0` or foreign ID) remain open and untouched.
 
 ---
 
@@ -446,6 +452,7 @@ class FakeOrderMt5(FakeMt5):
    - Verify all mock open positions owned by Vibe Desk (matching magic number and symbol) are closed at current bid/ask within a single test execution pass.
    - Verify Vibe Desk pending orders are purged.
    - Verify execution state latches to `HALTED`.
+   - **Permission Decoupling Test:** Assert that `order_send` for position closing (`TRADE_ACTION_DEAL`) and pending order cancellation (`TRADE_ACTION_REMOVE`) succeeds *after* `LIVE_RUNNER_STATE == 'HALTED'` is latched and with zero owner session token/cookie, while any attempt to open a new position raises `ExecutionPermissionError`.
    - **Ownership Isolation Test:** Plant an open position and pending order with a foreign magic number (e.g., `magic=0` representing a manual terminal trade, or `magic=999999` from another system). Assert that after `trigger()`, the foreign position and order remain OPEN and untouched while all Vibe Desk positions are closed.
 3. **Fill-Bar Re-Check Suite:**
    - Server clock alignment: Server midnight corresponds to the 17:00 New York daily close (`market/server_time.py`). Friday trading closes at server 00:00 Saturday (17:00 New York Friday). FX markets reopen on Monday 00:00 server time (Sunday 17:00 NY), and GOLD reopens on Monday 01:00 server time (Sunday 18:00 NY) after its 1-hour daily break.
