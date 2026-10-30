@@ -347,3 +347,191 @@ flowchart TD
   - Verification across all pages, zero browser console errors, responsive layout at 375 px.
 - [ ] **CCC-64 CLAUDE.md commands**:
   - Update `CLAUDE.md` with complete whole-app execution, testing, and maintenance commands.
+
+---
+
+# Layer B/C Teams: Waves 0 to 3 Implementation Plan
+
+## 1. Overview and Architecture
+
+Following the owner's final decisions from the 2026-10-30 grill, the Layer B/C backlog is split across parallel teams.
+- **Strict Non-Negotiable Rule:** **No orders, ever.** Nothing in `src/` may call MT5 order or position functions. MT5 is reached only through `real_api()`, which wraps it in `ReadOnlyMt5`.
+- **Parked Order Cards:** The order-placing cards (CCC-68 demo gate, CCC-70 live/kill switch, CCC-82 live EA, the demo half of CCC-72, the live half of CCC-71) are **NOT built**; a separate worker writes their design specification in `docs/design/order-side.md`.
+- Teams build strictly order-free components: Forward Arena, two fill tracks, leaderboard & gates, fill-bar rule in backtest, uptime monitor & fill comparison, Night Shift, Regime Desk twins, and custom Blocks.
+
+## 2. Contract Summary (Wave 0)
+
+1. **`vibedesk.arena`** (spec §2, CCC-66):
+   - `ArenaStrategy`: CANDIDATE strategy executing on live closed MT5 bars.
+   - `PaperAccount`: Virtual $10,000 USD account sized by `fixed_risk` block.
+   - `FillTrackKind`: Primary `backtest_cost` (Spread Floor, swap, next-bar fill) and realistic `live_spread` (tick spread at signal).
+   - `step(bar, live_spread)`: evaluates closed bar $t$, checks fill bar $t+1$ against time filters, updates accounts.
+   - `catch_up(bars)`: replays missed closed bars upon host restart or reconnect.
+   - `ArenaControls`: owner-only controls (`pause`, `resume`, `remove`, `stop_arena`) audited in Ledger.
+2. **`vibedesk.arena.leaderboard` & gates** (spec §3, CCC-67, CCC-69, ADR 0009, ADR 0010):
+   - `compute_leaderboard(strategies, min_trades=10)`: ranks by forward net R, computes PF, max drawdown, trades, win rate, decay flag.
+   - `check_demo_ready(metrics)`: evaluates >= 4 weeks, >= 30 trades, PF >= 1.1, drawdown < 6%, no decay.
+   - `record_override(ledger, strategy_id, gate_type, reason)`: records owner override in Ledger table `arena_overrides`.
+   - `evaluate_live_gate(metrics, timeframe)`: per-TF trade counts (M15: 100, H1: 60, H4: 40, D1: 30), bootstrap PF lower bound > 1.0, drawdown < 6%. Computed and shown only.
+3. **`vibedesk.arena.fills_report`** (spec §5.2, CCC-72 order-free):
+   - `generate_fills_report(strategies)`: compares closed trades across both fill tracks, reporting net R divergence and spread delta.
+4. **`vibedesk.nightshift`** (spec §6, CCC-75, ADR 0011):
+   - `NightShiftConfig`: `max_trials=20`, `token_share=0.50`, `morning_brief_time="07:00"`.
+   - `NightShiftState`: tracks trials run, candidates found, tokens used, stopped reason.
+   - `run_night_shift(desk, budget, config)`: runs queued ideas and family mutations up to caps. Never spends Holdouts or promotes to Arena.
+   - `compile_morning_brief(state)`: formats and compiles 07:00 Bangkok Telegram brief.
+5. **`vibedesk.regime`** (spec §7, CCC-76):
+   - `RegimeFeatures` / `compute_daily_features`: daily volatility (ATR ratio) and trend (ADX / MA slope).
+   - `RegimeReason`: fixed menu (`HIGH_VOLATILITY`, `LOW_VOLATILITY`, `STRONG_TREND`, `CHOPPY`, `RANGE_BOUND`, `NORMAL`).
+   - `RegimeDecision` / `evaluate_regimes`: single typed LLM call returning ON/OFF per strategy.
+   - Twin execution: each strategy runs as two virtual twins (`standard` always-on vs `regime_gated`).
+6. **`vibedesk.blocks.custom`** (spec §8, CCC-77, ADR 0012):
+   - `CustomBlockRegistry`: registers unapproved blocks in `blocks/custom/{name}.py`, records approval in Ledger.
+   - `validate_custom_block_code`: syntax checks, forbids dangerous modules (`os`, `sys`, `subprocess`, `eval`).
+   - Look-ahead property test and owner UI approval required before use in Trials.
+7. **Engine Updates & Architectural Decisions** (spec §4, §9, CCC-71, CCC-79, CCC-80, ADR 0008, ADR 0013, ADR 0014):
+   - Fill-bar rule: time filter evaluated at fill bar $t+1$; if violated, skip fill.
+   - Bumps `RULES_VERSION = 4` in `rules.py` and updates pinned fingerprints in `test_rules_version.py`.
+   - CCC-79: open Holdout trades settled at final bar close with full transaction costs (Spread Floor + 1 pt slippage).
+   - CCC-80: remove unused stop distance argument from `atr_target`.
+8. **Settings & Endpoints**:
+   - Keys: `nightshift_trial_cap=20`, `nightshift_token_share=0.50`.
+   - 16 new endpoints in `ENDPOINT_TABLE` covering Arena, Leaderboard, Night Shift, Regime, and Custom Blocks.
+
+## 3. File Ownership Table
+
+Each team owns strictly disjoint files to eliminate merge conflicts during parallel execution across worktrees:
+
+| File / Directory | Owning Team | Milestone Card | Wave | Notes |
+|---|---|---|---|---|
+| `src/vibedesk/arena/strategy.py` | Arena Core Team | CCC-66 | Wave 1 | Implement `ArenaStrategy.step` & `catch_up` |
+| `src/vibedesk/arena/runtime.py` | Arena Core Team | CCC-66 | Wave 1 | Implement `ArenaRuntime.check_and_recover_gaps` |
+| `src/vibedesk/arena/account.py` | Arena Core Team | CCC-66 | Wave 1 | Full account equity, PnL, and trade lifecycle |
+| `src/vibedesk/arena/tracks.py` | Arena Core Team | CCC-66 | Wave 1 | Double fill track pricing execution |
+| `src/vibedesk/arena/controls.py` | Arena Core Team | CCC-66 | Wave 1 | Implement control wiring to Ledger |
+| `tests/test_arena_core.py` | Arena Core Team | CCC-66 | Wave 1 | Tests for closed bar ingestion, stepping, catch-up |
+| `src/vibedesk/engine/simulate.py` | Engine Team | CCC-71, CCC-79 | Wave 1 | Fill-bar rule at t+1; Holdout open trade close |
+| `src/vibedesk/blocks/exits.py` | Engine Team | CCC-80 | Wave 1 | Remove unused stop distance from `atr_target` |
+| `src/vibedesk/rules.py` | Engine Team | CCC-71 | Wave 1 | Bump `RULES_VERSION = 4` |
+| `tests/test_rules_version.py` | Engine Team | CCC-71 | Wave 1 | Re-pin fingerprints for RULES_VERSION 4 |
+| `tests/test_engine_fill_bar.py` | Engine Team | CCC-71, CCC-79, CCC-80 | Wave 1 | Tests for fill-bar rule, Holdout close, atr_target |
+| `src/vibedesk/nightshift/runner.py` | Night Shift Team | CCC-75 | Wave 1 | Implement `run_night_shift` loop & caps |
+| `src/vibedesk/nightshift/brief.py` | Night Shift Team | CCC-75 | Wave 1 | Format and compile 07:00 brief |
+| `tests/test_nightshift.py` | Night Shift Team | CCC-75 | Wave 1 | Tests for 20-trial cap, 50% token cap, brief |
+| `src/vibedesk/blocks/custom/` | Custom Blocks Team | CCC-77 | Wave 1 | Dynamic loader, property test runner, approval gate |
+| `tests/test_custom_blocks.py` | Custom Blocks Team | CCC-77 | Wave 1 | Tests for look-ahead property check and owner gate |
+| `src/vibedesk/arena/leaderboard.py` | Leaderboard & Gates Team | CCC-67 | Wave 2 | Full decay calculation against Gauntlet folds |
+| `src/vibedesk/arena/gates.py` | Leaderboard & Gates Team | CCC-69 | Wave 2 | Bootstrap PF lower bound calculation |
+| `tests/test_leaderboard_gates.py` | Leaderboard & Gates Team | CCC-67, CCC-69 | Wave 2 | Tests for ranking, demo badge, live gate |
+| `src/vibedesk/arena/fills_report.py`| Uptime & Report Team | CCC-72 | Wave 2 | Full fill comparison aggregation and report |
+| `src/vibedesk/market/health.py` | Uptime & Report Team | CCC-73 | Wave 2 | Health logging to `data/health.jsonl`, gap alerts |
+| `tests/test_uptime_report.py` | Uptime & Report Team | CCC-72, CCC-73 | Wave 2 | Tests for uptime logging, alert push, fill report |
+| `src/vibedesk/regime/features.py` | Regime Desk Team | CCC-76 | Wave 2 | Compute ATR ratio, ADX, MA slope |
+| `src/vibedesk/regime/desk.py` | Regime Desk Team | CCC-76 | Wave 2 | Typed LLM prompt and twin toggle execution |
+| `tests/test_regime_desk.py` | Regime Desk Team | CCC-76 | Wave 2 | Tests for daily features, LLM schema, twins |
+| `src/vibedesk/app/server.py` | Arena UI Team | CCC-52+ | Wave 2 | Wire new Layer B/C endpoints per API spec |
+| `src/vibedesk/app/static/index.html`| Arena UI Team | CCC-52+ | Wave 2 | Arena, Leaderboard, Night Shift, Custom Blocks pages |
+| `tests/test_arena_ui.py` | Arena UI Team | CCC-52+ | Wave 2 | Playwright E2E for Arena UI pages |
+| `tests/test_layer_bc_whole.py` | Integration & Docs Team | Layer B/C E2E | Wave 3 | Full journey test: Gauntlet -> Arena -> Night Shift |
+| `CLAUDE.md` | Integration & Docs Team | Documentation | Wave 3 | Update developer guides and commands |
+
+### Shared Files Rules
+- `src/vibedesk/app/server.py`: Owned exclusively by the **Arena UI Team** in Wave 2. Wave 1 teams build modules and test via unit tests without touching `server.py`.
+- `src/vibedesk/app/scheduler.py`: Owned by the **Arena Core Team** in Wave 1 to register the 10-second Arena closed-bar poll and the 07:00 morning brief.
+- `src/vibedesk/ledger/store.py`: Owned by the **Engine Team** in Wave 1 to add Migration 4 (`arena_strategies`, `arena_actions`, `arena_overrides`, `custom_blocks`, `custom_block_approvals`) and update `TAMPERING`. Other teams consume public ledger methods.
+- `src/vibedesk/app/static/index.html`: Owned exclusively by the **Arena UI Team** in Wave 2.
+- `src/vibedesk/app/settings.py`: Frozen by Wave 0. Settings keys (`nightshift_trial_cap`, `nightshift_token_share`) are already added.
+- `src/vibedesk/rules.py`: Owned exclusively by the **Engine Team** in Wave 1 (`RULES_VERSION` bump to 4).
+- `tests/test_layer_bc_contract.py`: Frozen after Wave 0. Teams implement their tests in dedicated test files (`test_arena_core.py`, `test_nightshift.py`, etc.).
+
+## 4. Wave Merge Order
+
+```mermaid
+flowchart TD
+    W0["Wave 0: Contract (this PR)"] --> W1_Arena["Wave 1: Arena Core<br/>CCC-66"]
+    W0 --> W1_Engine["Wave 1: Engine<br/>CCC-71, CCC-79, CCC-80"]
+    W0 --> W1_Night["Wave 1: Night Shift<br/>CCC-75"]
+    W0 --> W1_Custom["Wave 1: Custom Blocks<br/>CCC-77"]
+    W1_Arena --> M_W1["Merge Wave 1 into main"]
+    W1_Engine --> M_W1
+    W1_Night --> M_W1
+    W1_Custom --> M_W1
+    M_W1 --> W2_Leader["Wave 2: Leaderboard & Gates<br/>CCC-67, CCC-69"]
+    M_W1 --> W2_Uptime["Wave 2: Uptime & Fill Report<br/>CCC-72, CCC-73"]
+    M_W1 --> W2_Regime["Wave 2: Regime Desk<br/>CCC-76"]
+    M_W1 --> W2_UI["Wave 2: Arena UI & API<br/>Arena Pages & Endpoints"]
+    W2_Leader --> M_W2["Merge Wave 2 into main"]
+    W2_Uptime --> M_W2
+    W2_Regime --> M_W2
+    W2_UI --> M_W2
+    M_W2 --> W3["Wave 3: Integration E2E & Docs<br/>Full Suite & CLAUDE.md"]
+```
+
+## 5. Acceptance Checklists Per Team
+
+### Wave 1: Arena Core Team (CCC-66)
+- [ ] Implement `ArenaStrategy.step` consuming closed bars from MT5 read-only wrapper.
+- [ ] Evaluate time filters on fill bar $t+1$; skip fill if $t+1$ fails filter.
+- [ ] Track Backtest-Cost Track and Live-Spread Track in parallel on virtual $10,000 accounts.
+- [ ] Implement gap detection and `catch_up` replay from cache on startup.
+- [ ] Wire owner controls (pause, resume, remove, stop_arena) recording actions in Ledger.
+- [ ] Unit tests in `tests/test_arena_core.py` green on deterministic fakes.
+
+### Wave 1: Engine Team (CCC-71, CCC-79, CCC-80)
+- [ ] Update `simulate.py` to evaluate time filters on fill bar $t+1$, skipping entry if invalid.
+- [ ] Update `simulate.py` Holdout run: settle open trade at final bar close with full exit cost (Spread Floor + 1 pt slippage, CCC-79).
+- [ ] Remove unused `stop_distance` parameter from `atr_target` in `blocks/exits.py` (CCC-80).
+- [ ] Bump `RULES_VERSION` from 3 to 4 in `rules.py`.
+- [ ] Apply Ledger Migration 4 in `store.py` and update `test_ledger.py` `TAMPERING`.
+- [ ] Re-pin fingerprints in `tests/test_rules_version.py` (`uv run python tests/test_rules_version.py`).
+- [ ] All engine and gauntlet tests green.
+
+### Wave 1: Night Shift Team (CCC-75)
+- [ ] Implement `run_night_shift` loop reading queued ideas and family mutations.
+- [ ] Enforce max 20 Trials per night cap.
+- [ ] Enforce max 50% daily token cap.
+- [ ] Ensure Trials are charged to Ledger under family budgets.
+- [ ] Refuse Holdout spends or Arena promotions.
+- [ ] Format and dispatch 07:00 Bangkok Telegram brief.
+- [ ] Unit tests in `tests/test_nightshift.py` green.
+
+### Wave 1: Custom Blocks Team (CCC-77)
+- [ ] Implement custom block loader in `src/vibedesk/blocks/custom/`.
+- [ ] Automated look-ahead property test (`test_custom_block_lookahead`).
+- [ ] Disallow unapproved custom blocks in Strategy Specs and Trials.
+- [ ] Support owner approval action recording approval hash in Ledger.
+- [ ] Unit tests in `tests/test_custom_blocks.py` green.
+
+### Wave 2: Leaderboard & Gates Team (CCC-67, CCC-69)
+- [ ] Compute leaderboard ranked by forward net R with minimum 10-trade threshold.
+- [ ] Calculate decay flag comparing forward PF against bootstrap distribution of Gauntlet folds.
+- [ ] Evaluate Demo-Ready badge (4 weeks, 30 trades, PF >= 1.1, DD < 6%, no decay).
+- [ ] Wire owner override ("mark ready anyway") with mandatory reason in Ledger.
+- [ ] Compute Live Gate per timeframe with 95% bootstrap PF lower bound > 1.0 (display only).
+- [ ] Unit tests in `tests/test_leaderboard_gates.py` green.
+
+### Wave 2: Uptime & Fill Report Team (CCC-72, CCC-73)
+- [ ] Implement background health heartbeat to `data/health.jsonl`.
+- [ ] Emit Telegram warning on bar delay ($> 2 \times \text{timeframe}$) or MT5 disconnection.
+- [ ] Implement `generate_fills_report` comparing backtest vs live-spread fills.
+- [ ] Unit tests in `tests/test_uptime_report.py` green.
+
+### Wave 2: Regime Desk Team (CCC-76)
+- [ ] Implement daily feature computation (ATR ratio, ADX, MA slope).
+- [ ] Structured LLM call returning typed ON/OFF decision per strategy.
+- [ ] Step always-on twin and regime-gated twin in parallel.
+- [ ] Unit tests in `tests/test_regime_desk.py` green.
+
+### Wave 2: Arena UI Team (index.html & server.py)
+- [ ] Wire API endpoints in `src/vibedesk/app/server.py` per `api_spec.py`.
+- [ ] Add Arena page with active strategies, dual fill tracks, and controls.
+- [ ] Add Leaderboard page with ranks, metrics, Demo-Ready badges, and override buttons.
+- [ ] Add Night Shift view showing recent runs and morning briefs.
+- [ ] Add Custom Blocks review panel with code viewer and Approve button.
+- [ ] Responsive layout verified at 375 px mobile phone width.
+- [ ] Playwright E2E tests in `tests/test_arena_ui.py` green.
+
+### Wave 3: Integration & Docs Team
+- [ ] Whole-system E2E test in `tests/test_layer_bc_whole.py`.
+- [ ] Verify zero orders in `src/` (guard tests pass).
+- [ ] Update `CLAUDE.md` and user documentation.

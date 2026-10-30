@@ -727,3 +727,35 @@ The following items remain open for the owner:
 - **CCC-83 / CCC-87:** Legacy review cards for initial web app and styling
 - **CCC-90:** Restart `omniroute.service` on server with raised memory limits (503 fix)
 
+---
+
+# Layer B/C Tasks: Forward Proof and Autonomy
+
+- **Spec:** [docs/spec/layer-b-c.md](../docs/spec/layer-b-c.md)
+- **Plan and file ownership:** [plan.md](plan.md) (Layer B/C Teams section)
+- **Hard Rule:** Strictly no orders in `src/`. Order-placing cards (CCC-68, CCC-70, CCC-82, CCC-72-demo, CCC-71-live) are parked in [docs/design/order-side.md](../docs/design/order-side.md).
+
+## Wave 0: Contract, Spec and ADRs (Here)
+- [x] **W0-Spec:** `docs/spec/layer-b-c.md` order-free specification.
+- [x] **W0-ADR:** ADRs 0008–0014 (fill-bar rule, live gate, demo badge, night shift limits, custom blocks gate, CCC-79, CCC-80).
+- [x] **W0-Glossary:** Add Layer B/C terms to `CONTEXT.md`.
+- [x] **W0-Interfaces:** Code interfaces under `vibedesk.arena`, `vibedesk.nightshift`, `vibedesk.regime`, `vibedesk.blocks.custom`.
+- [x] **W0-Settings:** Add `nightshift_trial_cap` (20) and `nightshift_token_share` (0.50) to `Settings`.
+- [x] **W0-API:** Add 16 Layer B/C endpoints to `ENDPOINT_TABLE` in `api_spec.py`.
+- [x] **W0-Tests:** Contract unit tests in `tests/test_layer_bc_contract.py` green.
+
+## Wave 1: Core Engines and Isolation
+- [ ] **T-ArenaCore (CCC-66):** Forward Arena closed bar feed, dual fill tracks, gap replay catch-up, controls.
+- [ ] **T-Engine (CCC-71, CCC-79, CCC-80):** Fill-bar rule in `simulate.py`, Holdout trade close at last bar, remove unused `stop_distance` in `atr_target`, bump `RULES_VERSION = 4`, apply Migration 4 in `store.py`.
+- [ ] **T-NightShift (CCC-75):** Overnight research loop with 20-Trial and 50% token caps, 07:00 Bangkok brief.
+- [ ] **T-CustomBlocks (CCC-77):** Custom block dynamic loader, property tests, approval gate.
+
+## Wave 2: Analysis, Gates and UI
+- [ ] **T-Leaderboard (CCC-67, CCC-69):** Rank by net R, decay calculation, Demo-Ready badge with override, per-TF live gate.
+- [ ] **T-UptimeReport (CCC-72, CCC-73):** Health heartbeat logger, gap/disconnect alerts, fill comparison report.
+- [ ] **T-RegimeDesk (CCC-76):** Daily features (ATR ratio, ADX, MA slope), typed LLM ON/OFF decision, virtual twins.
+- [ ] **T-ArenaUI:** Web UI pages for Arena, Leaderboard, Night Shift, Custom Blocks in `static/index.html` and endpoints in `server.py`.
+
+## Wave 3: Integration and Docs
+- [ ] **T-Integration:** End-to-end multi-layer tests on deterministic fakes in `tests/test_layer_bc_whole.py`.
+- [ ] **T-Docs:** Update `CLAUDE.md` and user guides.

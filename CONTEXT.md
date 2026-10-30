@@ -104,3 +104,61 @@ _Avoid_: bot, assistant, copilot
 
 **Grounding Rule**:
 The Research Desk may not write numbers in its own words. Every figure it shows comes from a Trial result.
+
+## Forward Proof (Layer B)
+
+**Forward Arena**:
+The order-free runtime where CANDIDATE strategies run on live closed MT5 bars.
+_Avoid_: paper engine, incubator, sandbox
+
+**Paper Account**:
+A virtual 10,000 USD account assigned to one strategy in the Forward Arena, sized by fixed risk.
+_Avoid_: demo account, sub-account
+
+**Fill Tracks**:
+The two concurrent pricing methods evaluated for every Arena signal:
+- **Backtest-Cost Track**: priced at bar open with Spread Floor, swap, and 1 point slippage, matching the Gauntlet.
+- **Live-Spread Track**: priced at bar open with the live tick spread recorded at signal close.
+
+**Demo-Ready**:
+The qualification badge earned by an Arena strategy with at least 4 weeks, 30 trades, profit factor >= 1.1, drawdown < 6%, and no significant decay.
+_Avoid_: validated, certified
+
+**Owner Override**:
+An audited manual action in the Ledger where the owner marks a strategy Demo-Ready despite incomplete automated requirements.
+_Avoid_: force pass, bypass
+
+**Live Gate**:
+The statistical readiness threshold evaluated per timeframe (M15: 100, H1: 60, H4: 40, D1: 30 trades; bootstrap PF lower bound > 1.0; drawdown < 6%), computed and shown for observation only.
+_Avoid_: live trigger, live rule
+
+**Uptime Log**:
+The permanent log of bar arrival times, host health, and gap catch-up events.
+_Avoid_: sys log, monitor
+
+**Fill Comparison Report**:
+The statistical report comparing the Backtest-Cost Track against the Live-Spread Track to quantify real-market spread divergence.
+_Avoid_: execution report
+
+## Autonomy (Layer C)
+
+**Night Shift**:
+The autonomous overnight research loop that tests queued Ideas and family mutations within strict Trial and token caps.
+_Avoid_: auto researcher, night runner
+
+**Morning Brief**:
+The 07:00 Asia/Bangkok Telegram digest summarizing Night Shift Trials, CANDIDATE discoveries, and token spend.
+_Avoid_: daily report
+
+**Regime Desk**:
+The daily analysis component that computes volatility and trend features and prompts an LLM for an ON/OFF decision per strategy.
+_Avoid_: market state classifier
+
+**Twin**:
+One of two virtual executions of an Arena strategy running concurrently to A/B test Regime Desk gating:
+- **Standard Twin**: trades every signal continuously.
+- **Regime-Gated Twin**: trades only when the Regime Desk approves.
+
+**Custom Block**:
+An AI-authored block residing in blocks/custom/ that must pass look-ahead property tests and owner UI approval before use in Trials.
+_Avoid_: user script, plugin
