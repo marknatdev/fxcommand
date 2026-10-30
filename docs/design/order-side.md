@@ -124,13 +124,13 @@ When order execution is implemented, these guards must evolve into a **Quarantin
    - **Layer 1 (Import Restriction):** The single-importer check is updated to permit exactly two files to import `MetaTrader5`: `market/mt5_api.py` (read-only data seam) and `execution/seam.py` (order execution seam). Any other import of `MetaTrader5` (including by `importlib` string) across `src/` fails the test.
    - **Layer 2 (AST Function & Attribute Scan):** The AST scanner is partitioned:
      - All packages in `src/` outside `execution/` remain strictly restricted to `ALLOWED_CALLS`. Naming any order or position function (`order_send`, `order_check`, `positions_get`, `orders_get`, `history_deals_get`, `order_calc_margin`) outside `execution/` fails CI immediately.
-     - Within `execution/`, other modules (`kill_switch.py`, `runner.py`, `reconcile.py`, `risk.py`) are forbidden from importing `MetaTrader5` directly; they may invoke order and position functions ONLY through the `OrderMt5` interface provided by `execution/seam.py` (or `FakeOrderMt5` in tests). `execution/seam.py` is the sole module checked against `ALLOWED_ORDER_CALLS`: `frozenset({"order_send", "order_check", "positions_get", "orders_get", "history_orders_get", "history_deals_get", "order_calc_margin", "symbol_info", "symbol_info_tick", "initialize", "shutdown", "last_error"})`.
+     - Within `execution/`, other modules (`kill_switch.py`, `runner.py`, `reconcile.py`, `risk.py`) are forbidden from importing `MetaTrader5` directly; they may invoke order and position functions ONLY through the `OrderMt5` interface provided by `execution/seam.py` (or `FakeOrderMt5` in tests). `execution/seam.py` is the sole module checked against `ALLOWED_ORDER_CALLS`: `frozenset({"order_send", "order_check", "positions_get", "orders_get", "history_orders_get", "history_deals_get", "order_calc_margin", "account_info", "symbol_info", "symbol_info_tick", "initialize", "shutdown", "last_error"})`.
    - **Layer 3 (Runtime Protection & Decoupled Permissions):**
      - `ReadOnlyMt5` in `market/mt5_api.py` remains 100% read-only and continues to refuse every non-allowed attribute.
      - `OrderMt5` in `execution/seam.py` wraps `MetaTrader5` and enforces decoupled, fail-safe order authorization:
-       1. **New Entries (Opening Deals):** Opening a new position (`TRADE_ACTION_DEAL` in entry direction) or placing a pending entry order (`TRADE_ACTION_PENDING`) requires: (a) `LIVE_RUNNER_STATE != "HALTED"`, and (b) an active, durable `LiveGrant` recorded in the Ledger for that specific Hypothesis and symbol. If `HALTED` is active or no valid `LiveGrant` exists in the Ledger, `OrderMt5` raises `ExecutionPermissionError`.
-       2. **Exits & Cancellations (Closing Deals & Flatten):** Closing an existing owned position (`TRADE_ACTION_DEAL` closing an active ticket) or cancelling a pending order (`TRADE_ACTION_REMOVE`) is **always permitted**. It does NOT require an active `LiveGrant` and is NOT blocked by `LIVE_RUNNER_STATE == "HALTED"`. This invariant guarantees that triggering the Kill Switch, executing trailing stops, or running the CLI `uv run desk kill-switch` can always flatten owned positions immediately, even when `HALTED` is latched or when no browser session is active.
-       3. **Durable Live Grants vs. Browser Sessions:** Strategy live-switch authorization is granted per Hypothesis as an immutable, durable `LiveGrant` in `data/desk.db` (created when the owner activates the live switch via UI with the `vibedesk_owner=1` cookie). The live runner operates autonomously over bar closes for weeks by verifying this durable grant in the Ledger, completely independent of browser cookies or active web sessions.
+       1. **New Entries (Opening Deals):** Opening a new position (`TRADE_ACTION_DEAL` in entry direction) or placing a pending entry order (`TRADE_ACTION_PENDING`) requires: (a) `LIVE_RUNNER_STATE != "HALTED"`, (b) an active, durable `ExecutionGrant` recorded in the Ledger for that specific Hypothesis and symbol, and (c) `OrderMt5` queries `account_info()` before every opening deal to assert that the connected terminal's account scope (`trade_mode`, `login`, and `server`) strictly matches the grant. If `HALTED` is active, no valid grant exists, or account scope mismatches (preventing any demo-promoted strategy from ever opening an order on a live terminal), `OrderMt5` raises `ExecutionPermissionError` or `AccountScopeMismatchError`.
+       2. **Exits & Cancellations (Closing Deals & Flatten):** Closing an existing owned position (`TRADE_ACTION_DEAL` closing an active ticket) or cancelling a pending order (`TRADE_ACTION_REMOVE`) is **always permitted**. It does NOT require an active `ExecutionGrant` and is NOT blocked by `LIVE_RUNNER_STATE == "HALTED"`. This invariant guarantees that triggering the Kill Switch, executing trailing stops, or running the CLI `uv run desk kill-switch` can always flatten owned positions immediately, even when `HALTED` is latched or when no browser session is active.
+       3. **Durable Execution Grants vs. Browser Sessions:** Strategy execution authorization (both demo promotion and live switch) is granted per Hypothesis as an immutable, durable `ExecutionGrant` in `data/desk.db` (created ONLY after the non-replayable owner credential or interactive CLI prompt from Section 4.2 is verified; the static `vibedesk_owner=1` cookie alone is never sufficient). The live or demo runner operates autonomously over bar closes for weeks by verifying this durable grant in the Ledger, completely independent of browser cookies or active web sessions.
 3. **In-Memory Simulator Isolation:**
    - `FakeOrderMt5` lives in `src/vibedesk/execution/fake_order_mt5.py` (importing `FakeMt5` from `vibedesk.market.fake_mt5`). It MUST NEVER reside in `market/` or anywhere else in `src/` outside `execution/`, ensuring the read-only core is not polluted with order mock state.
    - All automated unit and integration tests run exclusively against `FakeOrderMt5`. Zero network calls or real terminal connections occur in tests.
@@ -179,8 +179,8 @@ The owner may bypass the 4-week or 30-trade waiting period via the web UI ("Mark
 ### 3.4 XM Demo Order Execution
 
 Once promoted to Demo:
-- **Promotion Gate:** Promoting a strategy to demo execution requires explicit owner authentication using the non-replayable credential or local CLI prompt defined in Section 4.2.
-- The Live Runner submits real `order_send` requests to the connected XM Demo MT5 terminal.
+- **Promotion Gate & Demo ExecutionGrant:** Promoting a strategy to demo execution requires explicit owner authentication using the non-replayable credential or local CLI prompt defined in Section 4.2. Successful promotion creates an immutable `ExecutionGrant(mode="demo", ...)` in the Ledger (`data/desk.db`), binding the Hypothesis ID, symbol, git commit hash, `RULES_VERSION`, authorized sizing, and the demo account scope (`trade_mode="demo"`, demo account `login`, and broker `server`).
+- The Live/Demo Runner submits real `order_send` requests to the connected XM Demo MT5 terminal only after confirming `account_info()` matches the demo grant.
 - Sizing follows the Spec's `fixed_risk` block (default 1.0% risk per trade) calculated on the Demo account balance.
 - **Position Limit:** At most **one open position** per Hypothesis. Opposite signals execute stop-and-reverse or exit according to Spec rules.
 
@@ -209,8 +209,13 @@ Transitioning a strategy from the XM Demo to real money is the highest-risk even
    - *Option A (Owner Passphrase/PIN):* A human-entered passphrase or PIN typed into the confirmation modal, hashed with argon2/bcrypt and checked against a salt and hash stored in an OS-protected credential store (e.g. Windows Credential Manager or an external secrets file outside `data/settings.json` and outside the git repository).
    - *Option B (Interactive Local CLI Only):* The live switch is omitted from the HTTP API entirely, requiring an interactive local CLI command (`uv run desk live-switch <hypothesis_id>`) that prompts for interactive keyboard confirmation directly in the laptop terminal.
 3. **Two-Step Modal Confirmation:** If using the UI, the owner must also explicitly type the symbol name and family ID into a confirmation dialog before sending the activation payload.
-4. **Durable Ledger Grant (`LiveGrant`):** Activation creates a durable, immutable `LiveGrant` record in the SQLite Ledger (`data/desk.db`), binding the Hypothesis ID, symbol, git commit hash, `RULES_VERSION`, and authorized sizing. The Live Runner runs autonomously over closed bars for weeks by verifying this durable grant against the Ledger; it does NOT depend on a continuous browser session or transient browser tokens.
-5. **Grant Revocation:** A `LiveGrant` is immediately revoked when the owner clicks "Pause Live" or when the Kill Switch is triggered.
+4. **Durable Ledger Grant (`ExecutionGrant`):** Activation creates a durable, immutable `ExecutionGrant` record in the SQLite Ledger (`data/desk.db`), binding:
+   - Hypothesis ID and Symbol
+   - Git commit hash and `RULES_VERSION`
+   - Authorized sizing rules
+   - **Account Scope:** execution mode (`demo` vs. `live`), MT5 `login` number, and broker `server` name.
+   Before every opening deal, `OrderMt5` calls `account_info()` and asserts that the current terminal connection matches all three account scope fields, guaranteeing that a demo-promoted strategy cannot trade on a real terminal and vice versa. The Live Runner runs autonomously over closed bars for weeks by verifying this durable grant against the Ledger; it does NOT depend on a continuous browser session or transient browser tokens.
+5. **Grant Revocation:** An `ExecutionGrant` is immediately revoked when the owner clicks "Pause Live" / "Pause Demo" or when the Kill Switch is triggered.
 6. **Account Quarantine:** Live trading MUST use a dedicated XM Live MT5 terminal instance. It must NEVER run on the terminal instance used for development, backtesting, or demo testing.
 
 ---
@@ -254,7 +259,7 @@ sequenceDiagram
     KS->>Notify: Push Critical Telegram Alert
 ```
 
-1. **State Latch:** Immediately flips `LIVE_RUNNER_STATE = "HALTED"` and revokes/suspends active `LiveGrant`s. All scheduled bar-close triggers reject incoming new entries.
+1. **State Latch:** Immediately flips `LIVE_RUNNER_STATE = "HALTED"` and revokes/suspends active `ExecutionGrant`s. All scheduled bar-close triggers reject incoming new entries.
 2. **Permission Decoupling (Flattening Invariant):** While `HALTED` blocks all new entry orders, `OrderMt5` explicitly permits closing deals (`TRADE_ACTION_DEAL` opposite side) and cancellations (`TRADE_ACTION_REMOVE`). Latching `HALTED` never blocks the flatten sequence itself, and flattening requires no owner browser session (allowing CLI `uv run desk kill-switch` to operate autonomously).
 3. **Ownership Filtering (Ownership Protection Invariant):** The Kill Switch MUST NOT close positions or cancel orders it does not own. On the owner's account, flattening every position indiscriminately would destroy manual discretionary trades (placed directly in the MT5 terminal) or trades from other strategies. The Kill Switch queries `orders_get()` and `positions_get()`, strictly filtering by:
    - **Magic Number:** `order.magic` / `position.magic` matches a registered Vibe Desk strategy magic number (e.g., `VIBEDESK_MAGIC_BASE + hypothesis_id`). Any order or position with magic `0` (manual terminal order) or a foreign magic number is ignored.
@@ -436,6 +441,7 @@ class FakeOrderMt5(FakeMt5):
     Maintains simulated orders, open positions, and account balances without
     initiating external network calls or opening broker connections.
     """
+    def account_info(self) -> AccountInfo: ...
     def order_check(self, request: dict) -> OrderCheckResult: ...
     def order_send(self, request: dict) -> OrderSendResult: ...
     def positions_get(self, symbol: str | None = None) -> tuple[Position, ...]: ...
@@ -458,6 +464,7 @@ class FakeOrderMt5(FakeMt5):
    - Verify execution state latches to `HALTED`.
    - **Permission Decoupling Test:** Assert that `order_send` for position closing (`TRADE_ACTION_DEAL`) and pending order cancellation (`TRADE_ACTION_REMOVE`) succeeds *after* `LIVE_RUNNER_STATE == 'HALTED'` is latched and with zero owner session token/cookie, while any attempt to open a new position raises `ExecutionPermissionError`.
    - **Ownership Isolation Test:** Plant an open position and pending order with a foreign magic number (e.g., `magic=0` representing a manual terminal trade, or `magic=999999` from another system). Assert that after `trigger()`, the foreign position and order remain OPEN and untouched while all Vibe Desk positions are closed.
+   - **Account Scope Isolation Test:** In `FakeOrderMt5`, configure a strategy with an active `ExecutionGrant(mode="demo", login=12345, server="XMGlobal-Demo")`. Set `FakeOrderMt5.account_info()` to `trade_mode = ACCOUNT_TRADE_MODE_REAL` (or a mismatched login/server). Assert that any opening deal (`TRADE_ACTION_DEAL` or `TRADE_ACTION_PENDING`) is refused with `AccountScopeMismatchError`, proving that a demo-approved grant can never open an order on a live terminal.
 3. **Fill-Bar Re-Check Suite:**
    - Server clock alignment: Server midnight corresponds to the 17:00 New York daily close (`market/server_time.py`). Friday trading closes at server 00:00 Saturday (17:00 New York Friday). FX markets reopen on Monday 00:00 server time (Sunday 17:00 NY), and GOLD reopens on Monday 01:00 server time (Sunday 18:00 NY) after its 1-hour daily break.
    - **Test Scenario (EURUSD M15):** Plant a signal at the close of Friday 23:45 server time (16:45 NY time, the final M15 bar before Friday close). Bar $t+1$ opens across the weekend gap at Monday 00:00 server time. For a Spec whose `session_window` or `day_of_week` filter excludes Monday opens, assert that upon receiving the first tick of bar $t+1$, the entry is cleanly skipped and logged in the Ledger as `TIME_FILTER_SKIPPED`.
@@ -499,14 +506,14 @@ Before any code under `src/vibedesk/execution/` is written or unparked, the owne
 - [ ] **Decision 5: CCC-72 Fill Comparison Edge Erosion Threshold**
   - *[Proposal]* Confirm threshold for flagging `EXECUTION_EROSION` on the Leaderboard (proposed: Track 3 demo profit factor lagging Track 1 backtest model by $> 15\%$ over 30 trades).
 - [ ] **Decision 6: Guard Test Evolution Approval (test_guard.py and test_mt5_guard.py)**
-  - Approve updating both `tests/test_guard.py` (scoping order-call regex ban to exclude `execution/`) and `tests/test_mt5_guard.py` (allowing `execution/seam.py` as second importer, partitioned AST allowlist, and runtime durable `LiveGrant` verification with permission decoupling). All other packages in `src/` remain permanently order-free.
+  - Approve updating both `tests/test_guard.py` (scoping order-call regex ban to exclude `execution/`) and `tests/test_mt5_guard.py` (allowing `execution/seam.py` as second importer, partitioned AST allowlist with `account_info` in `ALLOWED_ORDER_CALLS`, and runtime durable `ExecutionGrant` verification with account scope isolation and permission decoupling). All other packages in `src/` remain permanently order-free.
 - [ ] **Decision 7: Terminal Instance Segregation**
   - Confirm whether the XM Live account will run on a separate Windows user/terminal profile to prevent accidental contamination of demo history or data cache.
 - [ ] **Decision 8: Kill Switch Handling of Partial Broker Errors**
   - In an emergency flatten, if one position cannot close due to a broker freeze or off-quotes, should the Kill Switch retry indefinitely with expanding slippage, alert via Telegram, or execute a terminal force-close?
-- [ ] **Decision 9: Owner Credential for Live Switch & Demo Promotion (Anti-Spoofing)**
-  - Confirm the non-replayable human credential mechanism preventing local agents or scripts with `vibedesk_owner=1` from switching live or promoting to demo:
+- [ ] **Decision 9: Owner Credential for Live Switch & Demo Promotion (Anti-Spoofing & Account Scope Binding)**
+  - Confirm the non-replayable human credential mechanism preventing local agents or scripts with `vibedesk_owner=1` from switching live or promoting to demo (minting an `ExecutionGrant` bound to mode, login, and server):
     - *Choice A:* Owner passphrase or PIN typed into the UI modal and verified against an OS-protected credential hash outside `data/settings.json` and the git repo.
-    - *Choice B:* Restrict the Live Switch and Demo Promotion exclusively to an interactive local CLI command (`uv run desk live-switch <hypothesis_id>`) requiring keyboard input on the laptop.
+    - *Choice B:* Restrict the Live Switch and Demo Promotion exclusively to an interactive local CLI command (`uv run desk live-switch <hypothesis_id>` / `uv run desk demo-promote <hypothesis_id>`) requiring keyboard input on the laptop.
 - [ ] **Decision 10: Broker Requote Slippage Tolerance (Deviation Formula)**
   - *[Proposal]* Confirm the dynamic deviation tolerance formula based on Spread Floor: `deviation = max(10, int(0.5 * spread_floor_points))` (e.g., 10 points = 1.0 pip on EURUSD from 20-point floor, 27 points = $0.27 on GOLD from 55-point floor).
