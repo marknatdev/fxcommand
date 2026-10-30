@@ -19,7 +19,7 @@ Vibe Desk is built on a strict separation between research and money. Layer A cr
 The order side governs what happens when a strategy proves itself forward:
 1. **Paper to Demo (CCC-68):** A strategy that earns the **Demo-ready badge** in the Forward Arena may graduate to live demo order routing on the XM Demo terminal.
 2. **Demo to Live (CCC-70):** A strategy that clears the **Live Gate** (CCC-69) across statistical trade counts per timeframe may be switched to live real-money execution **only by the owner**.
-3. **Emergency Halt (CCC-70):** A physical **Kill Switch** accessible via UI, API, and CLI flattens open positions and halts all order execution within one tick.
+3. **Emergency Halt (CCC-70):** A physical **Kill Switch** accessible via UI, API, and CLI flattens owned open positions and halts all order execution within one tick.
 
 ### Core Architectural Invariants
 
@@ -97,7 +97,7 @@ src/vibedesk/execution/
 ├── gate.py            # Demo & Live gate validators
 ├── risk.py            # Pre-trade Risk Gate (caps, daily limits, spread floors)
 ├── runner.py          # Bar-close execution loop & time-filter re-checker
-├── kill_switch.py     # Flatten positions, cancel orders, halt loop
+├── kill_switch.py     # Flatten owned positions, cancel owned orders, halt loop
 ├── seam.py            # OrderMt5 protocol and wrapper
 ├── comparison.py      # Fill comparison (Paper vs Live Spread vs Broker)
 └── reconcile.py       # State reconciliation on reconnect / boot
@@ -217,23 +217,33 @@ sequenceDiagram
 
     Owner->>KS: Trigger Kill Switch (UI / API / CLI)
     KS->>Runner: Set EXECUTION_HALTED = True
-    KS->>OrderSeam: Cancel All Pending Orders
-    OrderSeam->>MT5: order_send(TRADE_ACTION_REMOVE)
-    KS->>OrderSeam: Query All Open Positions
-    OrderSeam->>MT5: positions_get()
-    loop For each open position
+    KS->>OrderSeam: Query Orders & Positions
+    OrderSeam->>MT5: orders_get(), positions_get()
+    MT5-->>OrderSeam: Return all account orders & positions
+    OrderSeam-->>KS: orders, positions
+    KS->>KS: Filter by Vibe Desk Magic Number & Symbol
+    Note over KS,MT5: Foreign / manual positions & orders remain untouched
+    loop For each matching Vibe Desk pending order
+        KS->>OrderSeam: Cancel Pending Order
+        OrderSeam->>MT5: order_send(TRADE_ACTION_REMOVE)
+    end
+    loop For each matching Vibe Desk position
         KS->>OrderSeam: Close Position at Market
         OrderSeam->>MT5: order_send(TRADE_ACTION_DEAL, opposite side)
     end
-    KS->>Ledger: Append Emergency Halt Event
+    KS->>Ledger: Append Emergency Halt Event (Closed Tickets, Preserved Foreign Count)
     KS->>Notify: Push Critical Telegram Alert
 ```
 
 1. **State Latch:** Immediately flips `LIVE_RUNNER_STATE = "HALTED"`. All scheduled bar-close triggers reject incoming signals.
-2. **Pending Order Cancellation:** Sends `TRADE_ACTION_REMOVE` for all active limit/stop orders.
-3. **Market Flatten:** Queries `positions_get()` and dispatches immediate market closing orders (`TRADE_ACTION_DEAL`) for all open positions across all Vibe Desk magic numbers.
-4. **Audit Logging:** Logs the halt timestamp, triggering user/system, position snapshot, and exit fills to the Ledger.
-5. **Telegram Dispatch:** Emits a high-priority alert to the owner's Telegram channel with exit prices and realized P&L.
+2. **Ownership Filtering (Ownership Protection Invariant):** The Kill Switch MUST NOT close positions or cancel orders it does not own. On the owner's account, flattening every position indiscriminately would destroy manual discretionary trades (placed directly in the MT5 terminal) or trades from other strategies. The Kill Switch queries `orders_get()` and `positions_get()`, strictly filtering by:
+   - **Magic Number:** `order.magic` / `position.magic` matches a registered Vibe Desk strategy magic number (e.g., `VIBEDESK_MAGIC_BASE + hypothesis_id`). Any order or position with magic `0` (manual terminal order) or a foreign magic number is ignored.
+   - **Symbol:** `order.symbol` / `position.symbol` matches the symbol registered to that Hypothesis.
+   - All manual trades and foreign positions remain completely untouched.
+3. **Pending Order Cancellation:** Sends `TRADE_ACTION_REMOVE` strictly for matching Vibe Desk pending limit/stop orders.
+4. **Market Flatten:** Dispatches immediate market closing orders (`TRADE_ACTION_DEAL`) strictly for matching Vibe Desk open positions.
+5. **Audit Logging:** Logs the halt timestamp, triggering user/system, closed Vibe Desk tickets, exit prices, and count of foreign positions left open to the Ledger.
+6. **Telegram Dispatch:** Emits a high-priority alert to the owner's Telegram channel with exit prices, realized P&L, and confirmation of foreign positions preserved.
 
 ### 5.2 Latency & Performance Targets
 
@@ -250,7 +260,8 @@ sequenceDiagram
 
 The Kill Switch must be verified in automated CI without contacting real brokers:
 - Driven by `FakeOrderMt5`, which populates mock positions and pending orders.
-- The test asserts that upon `kill_switch.trigger()`, all mock positions transition to closed, all pending orders are purged, the runner state latches to `HALTED`, and the exact audit event is written to the test database.
+- The test asserts that upon `kill_switch.trigger()`, all mock positions owned by Vibe Desk transition to closed, all Vibe Desk pending orders are purged, the runner state latches to `HALTED`, and the exact audit event is written to the test database.
+- It also asserts that any planted foreign or manual positions (`magic=0` or foreign ID) remain open and untouched.
 
 ---
 
@@ -417,9 +428,10 @@ class FakeOrderMt5(FakeMt5):
    - Verify rejection when live spread exceeds $2\times$ Spread Floor.
    - Verify exposure capping at 3 concurrent positions.
 2. **Kill Switch Suite:**
-   - Verify all mock open positions are closed at current bid/ask within a single test execution pass.
-   - Verify pending orders are purged.
+   - Verify all mock open positions owned by Vibe Desk (matching magic number and symbol) are closed at current bid/ask within a single test execution pass.
+   - Verify Vibe Desk pending orders are purged.
    - Verify execution state latches to `HALTED`.
+   - **Ownership Isolation Test:** Plant an open position and pending order with a foreign magic number (e.g., `magic=0` representing a manual terminal trade, or `magic=999999` from another system). Assert that after `trigger()`, the foreign position and order remain OPEN and untouched while all Vibe Desk positions are closed.
 3. **Fill-Bar Re-Check Suite:**
    - Plant a signal at Friday 21:45 server time where bar $t+1$ opens on Sunday evening outside the session filter.
    - Assert entry is cleanly skipped and logged.
