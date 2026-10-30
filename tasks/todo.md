@@ -726,4 +726,5 @@ The following items remain open for the owner:
 - **CCC-79 / CCC-80:** Architectural decisions (Holdout trade close price / atr_target stop distance)
 - **CCC-83 / CCC-87:** Legacy review cards for initial web app and styling
 - **CCC-90:** Restart `omniroute.service` on server with raised memory limits (503 fix)
+- **Order-side design (Layer B parked cards CCC-68, CCC-70, CCC-71, CCC-72, CCC-82):** [docs/design/order-side.md](../docs/design/order-side.md)
 
