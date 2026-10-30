@@ -179,6 +179,7 @@ The owner may bypass the 4-week or 30-trade waiting period via the web UI ("Mark
 ### 3.4 XM Demo Order Execution
 
 Once promoted to Demo:
+- **Promotion Gate:** Promoting a strategy to demo execution requires explicit owner authentication using the non-replayable credential or local CLI prompt defined in Section 4.2.
 - The Live Runner submits real `order_send` requests to the connected XM Demo MT5 terminal.
 - Sizing follows the Spec's `fixed_risk` block (default 1.0% risk per trade) calculated on the Demo account balance.
 - **Position Limit:** At most **one open position** per Hypothesis. Opposite signals execute stop-and-reverse or exit according to Spec rules.
@@ -203,11 +204,14 @@ Transitioning a strategy from the XM Demo to real money is the highest-risk even
 
 ### 4.2 Owner Authorization Security Model
 
-1. **Authentication:** The Live Switch endpoint `POST /api/execution/live-switch` strictly requires the `vibedesk_owner=1` cookie (`SameSite=Strict`).
-2. **Two-Step Modal Confirmation:** The UI requires the owner to type the symbol name and family ID into a confirmation dialog before sending the activation payload.
-3. **Durable Ledger Grant (`LiveGrant`):** Activation creates a durable, immutable `LiveGrant` record in the SQLite Ledger (`data/desk.db`), binding the Hypothesis ID, symbol, git commit hash, `RULES_VERSION`, and authorized sizing. The Live Runner runs autonomously over closed bars for weeks by verifying this durable grant against the Ledger; it does NOT depend on a continuous browser session or transient browser tokens.
-4. **Grant Revocation:** A `LiveGrant` is immediately revoked when the owner clicks "Pause Live" or when the Kill Switch is triggered.
-5. **Account Quarantine:** Live trading MUST use a dedicated XM Live MT5 terminal instance. It must NEVER run on the terminal instance used for development, backtesting, or demo testing.
+1. **Beyond the Static Cookie (Anti-Spoofing & AI Isolation Invariant):** Today, the `vibedesk_owner=1` cookie is a constant value set on any `GET /` (`src/vibedesk/app/auth.py`), which is not HttpOnly. While sufficient for approving Holdouts in local development, it CANNOT be the sole gate for switching real money live or promoting to demo trading. Any local process, subagent, or script with `curl` or access to the HTTP port could send `Cookie: vibedesk_owner=1`, which would violate the core **"AI Never Orders"** invariant (Section 1).
+2. **Non-Replayable Human Credential:** The Live Switch endpoint (`POST /api/execution/live-switch`) and Demo Promotion (`POST /api/execution/demo-promote`) require a credential that an AI agent cannot read, forge, or replay:
+   - *Option A (Owner Passphrase/PIN):* A human-entered passphrase or PIN typed into the confirmation modal, hashed with argon2/bcrypt and checked against a salt and hash stored in an OS-protected credential store (e.g. Windows Credential Manager or an external secrets file outside `data/settings.json` and outside the git repository).
+   - *Option B (Interactive Local CLI Only):* The live switch is omitted from the HTTP API entirely, requiring an interactive local CLI command (`uv run desk live-switch <hypothesis_id>`) that prompts for interactive keyboard confirmation directly in the laptop terminal.
+3. **Two-Step Modal Confirmation:** If using the UI, the owner must also explicitly type the symbol name and family ID into a confirmation dialog before sending the activation payload.
+4. **Durable Ledger Grant (`LiveGrant`):** Activation creates a durable, immutable `LiveGrant` record in the SQLite Ledger (`data/desk.db`), binding the Hypothesis ID, symbol, git commit hash, `RULES_VERSION`, and authorized sizing. The Live Runner runs autonomously over closed bars for weeks by verifying this durable grant against the Ledger; it does NOT depend on a continuous browser session or transient browser tokens.
+5. **Grant Revocation:** A `LiveGrant` is immediately revoked when the owner clicks "Pause Live" or when the Kill Switch is triggered.
+6. **Account Quarantine:** Live trading MUST use a dedicated XM Live MT5 terminal instance. It must NEVER run on the terminal instance used for development, backtesting, or demo testing.
 
 ---
 
@@ -500,3 +504,7 @@ Before any code under `src/vibedesk/execution/` is written or unparked, the owne
   - Confirm whether the XM Live account will run on a separate Windows user/terminal profile to prevent accidental contamination of demo history or data cache.
 - [ ] **Decision 8: Kill Switch Handling of Partial Broker Errors**
   - In an emergency flatten, if one position cannot close due to a broker freeze or off-quotes, should the Kill Switch retry indefinitely with expanding slippage, alert via Telegram, or execute a terminal force-close?
+- [ ] **Decision 9: Owner Credential for Live Switch & Demo Promotion (Anti-Spoofing)**
+  - Confirm the non-replayable human credential mechanism preventing local agents or scripts with `vibedesk_owner=1` from switching live or promoting to demo:
+    - *Choice A:* Owner passphrase or PIN typed into the UI modal and verified against an OS-protected credential hash outside `data/settings.json` and the git repo.
+    - *Choice B:* Restrict the Live Switch and Demo Promotion exclusively to an interactive local CLI command (`uv run desk live-switch <hypothesis_id>`) requiring keyboard input on the laptop.
