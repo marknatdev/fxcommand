@@ -76,16 +76,17 @@ flowchart TD
     BarFeed -->|"Closed Bars"| ForwardArena
     ForwardArena --> Leaderboard
     Leaderboard -->|"Demo-Ready Badge"| DemoGate
+    Leaderboard -->|"Track Record"| LiveGate
 
     DemoGate -->|"Owner Promote"| LiveRunner
-    LiveGate -->|"Owner Live Switch"| LiveRunner
-    KillSwitch -.->|"Interrupt & Flatten"| LiveRunner
-
     LiveRunner -->|"Pre-trade Checks"| RiskGate
     RiskGate -->|"Validated Request"| OrderSeam
     OrderSeam -->|"order_send"| DemoAccount
+    DemoAccount -->|"Demo Closed Trades"| LiveGate
+    LiveGate -->|"Owner Live Switch"| LiveRunner
     OrderSeam -.->|"order_send (Owner Live)"| LiveAccount
     OrderSeam -->|"Record Deals & Fills"| Ledger
+    KillSwitch -.->|"Interrupt & Flatten"| LiveRunner
 ```
 
 ### 2.2 Subsystem Code Location
@@ -99,9 +100,11 @@ src/vibedesk/execution/
 ├── runner.py          # Bar-close execution loop & time-filter re-checker
 ├── kill_switch.py     # Flatten owned positions, cancel owned orders, halt loop
 ├── seam.py            # OrderMt5 protocol and wrapper
-├── comparison.py      # Fill comparison (Paper vs Live Spread vs Broker)
+├── fake_order_mt5.py  # In-memory order simulator for pytest suites
 └── reconcile.py       # State reconciliation on reconnect / boot
 ```
+
+> **Note on Fill Comparison (CCC-72):** Per the 2026-10-30 grill decision, the comparison engine between the backtest-cost track and the realistic live-spread track is built now, order-free, as part of Layer B paper work (located alongside the Forward Arena in `src/vibedesk/arena/comparison.py`). It does NOT belong in `execution/`. When demo order execution is later unparked, `execution/seam.py` only feeds Track 3 demo deal records into the Arena's comparison engine via an append-only deal interface.
 
 ### 2.3 Strict Isolation from AI & Research Desk
 
@@ -111,15 +114,23 @@ src/vibedesk/execution/
 
 ### 2.4 Guard Test Evolution
 
-Currently, `tests/test_guard.py` and `tests/test_mt5_guard.py` scan `src/` and assert that no order-related MT5 call (`order_send`, `order_check`, `positions_*`, `orders_*`) appears anywhere in `src/`.
+Currently, `tests/test_guard.py` and `tests/test_mt5_guard.py` protect the codebase from accidental order code. `tests/test_mt5_guard.py` is the primary and stricter guard, enforcing three layers: only `market/mt5_api.py` imports `MetaTrader5`; an AST scan forbids any MT5 function off `ALLOWED_CALLS` across all of `src/`; and `ReadOnlyMt5` refuses non-allowed calls at runtime.
 
 When order execution is implemented, these guards must evolve into a **Quarantine Architecture**:
-1. **Core Guard (Unchanged):** An AST scan asserts that `src/vibedesk/` excluding `src/vibedesk/execution/` contains ZERO order functions, zero position queries, and zero imports of `execution`.
-2. **Read-Only Seam Guard (`market/mt5_api.py`):** `ReadOnlyMt5` remains completely read-only. `market/` is forbidden from importing `execution`.
-3. **Execution Seam Guard (`execution/seam.py`):**
-   - Only `execution/seam.py` is permitted to wrap `MetaTrader5` order functions.
-   - Requires an explicit runtime authorization token signed by the owner session.
-   - All tests in `tests/` MUST continue to run against `FakeOrderMt5` (zero real order calls in test runs).
+
+1. **Regex Guard (`tests/test_guard.py`):**
+   - The regex scan for `\b(order_send|order_check|positions_\w*|orders_\w*)\b` continues to assert that NO file in `src/` outside `src/vibedesk/execution/` contains order-related function names.
+2. **Three-Layer MT5 Guard (`tests/test_mt5_guard.py`):**
+   - **Layer 1 (Import Restriction):** The single-importer check is updated to permit exactly two files to import `MetaTrader5`: `market/mt5_api.py` (read-only data seam) and `execution/seam.py` (order execution seam). Any other import of `MetaTrader5` (including by `importlib` string) across `src/` fails the test.
+   - **Layer 2 (AST Function & Attribute Scan):** The AST scanner is partitioned:
+     - All packages in `src/` outside `execution/` remain strictly restricted to `ALLOWED_CALLS`. Naming any order or position function (`order_send`, `order_check`, `positions_get`, `orders_get`, `history_deals_get`, `order_calc_margin`) outside `execution/` fails CI immediately.
+     - `execution/seam.py` is checked against an explicit `ALLOWED_ORDER_CALLS` allowlist: `frozenset({"order_send", "order_check", "positions_get", "orders_get", "history_orders_get", "history_deals_get", "order_calc_margin", "symbol_info", "symbol_info_tick", "initialize", "shutdown", "last_error"})`.
+   - **Layer 3 (Runtime Protection):**
+     - `ReadOnlyMt5` in `market/mt5_api.py` remains 100% read-only and continues to refuse every non-allowed attribute.
+     - `OrderMt5` in `execution/seam.py` wraps `MetaTrader5` behind an explicit authorization check. On every order call, it verifies an active, short-lived HMAC-SHA256 authorization token (`OrderAuthToken`, signed by the server's session secret and issued only when the owner cookie `vibedesk_owner=1` is present, with a sliding 15-minute expiry). If the token is missing, expired, or if the Kill Switch has latched `LIVE_RUNNER_STATE = "HALTED"`, `OrderMt5` raises `ExecutionPermissionError` before touching the underlying module.
+3. **In-Memory Simulator Isolation:**
+   - `FakeOrderMt5` lives in `src/vibedesk/execution/fake_order_mt5.py` (importing `FakeMt5` from `vibedesk.market.fake_mt5`). It MUST NEVER reside in `market/` or anywhere else in `src/` outside `execution/`, ensuring the read-only core is not polluted with order mock state.
+   - All automated unit and integration tests run exclusively against `FakeOrderMt5`. Zero network calls or real terminal connections occur in tests.
 
 ---
 
@@ -129,8 +140,8 @@ When order execution is implemented, these guards must evolve into a **Quarantin
 
 ```mermaid
 stateDiagram-v2
-    [*] --> CANDIDATE: Gauntlet Pass
-    CANDIDATE --> ForwardArena: Owner Clicks "Send to Arena"
+    [*] --> CANDIDATE_or_PASS: Gauntlet Pass (CANDIDATE or Holdout PASS)
+    CANDIDATE_or_PASS --> ForwardArena: Owner Clicks "Send to Arena"
     
     state ForwardArena {
         [*] --> AccumulatingProof: Virtual 10k USD Account
@@ -142,7 +153,8 @@ stateDiagram-v2
     OwnerOverride --> DemoPending: Override Logged in Ledger
 
     DemoPending --> XM_Demo_Active: Owner Clicks "Promote to Demo"
-    XM_Demo_Active --> LiveGatePending: Meets Live Gate Criteria (CCC-69)
+    XM_Demo_Active --> LiveGate: Demo Closed Trades & Track Record
+    LiveGate --> OwnerLiveApproved: Owner Clicks "Live Switch"
 ```
 
 ### 3.2 Demo-Ready Badge Criteria
@@ -152,9 +164,8 @@ A strategy running in the Forward Arena earns the **Demo-Ready Badge** when it m
 2. **Sample Size:** At least **30 forward closed trades** completed on closed bars.
 3. **Forward Profit Factor:** Cumulative forward profit factor $\ge 1.10$.
 4. **Drawdown Boundary:** Maximum forward drawdown $< 6.0\%$ from peak virtual equity.
-5. **Decay Check:** No statistically significant edge decay:
-   - Forward PF must be within the 90% confidence interval of the Gauntlet Walk-Forward folds.
-   - Win rate must not deviate by $> 2.0$ standard deviations from the backtest distribution.
+5. **Decay Check:** No significant decay against the Gauntlet expected range, reusing the **CCC-67 Leaderboard decay flag** (`is_decayed == False`). There is exactly one definition of edge decay across Vibe Desk.
+   - *[Proposal]*: Candidate quantitative thresholds for CCC-67's decay flag (such as forward PF falling within the 90% confidence interval of the walk-forward folds, or win rate within 2.0 standard deviations of the backtest distribution) are documented as proposals for owner confirmation in Section 12.
 
 ### 3.3 Owner Override
 
@@ -175,17 +186,17 @@ Once promoted to Demo:
 
 ### 4.1 Live Gate Requirements (CCC-69)
 
-Transitioning a strategy from the XM Demo to real money is the highest-risk event in Vibe Desk. A strategy must survive the quantitative Live Gate:
+Transitioning a strategy from the XM Demo to real money is the highest-risk event in Vibe Desk. A strategy must survive the quantitative Live Gate. CCC-69 is specifically scoped to **M15, H1, and H4**; D1 is included below as an optional candidate proposal:
 
-| Criterion | M15 Timeframe | H1 Timeframe | H4 Timeframe | D1 Timeframe |
+| Criterion | M15 Timeframe | H1 Timeframe | H4 Timeframe | D1 Timeframe [Proposal] |
 |---|---|---|---|---|
-| **Min Forward Trades** | $\ge 100$ trades | $\ge 60$ trades | $\ge 40$ trades | $\ge 30$ trades |
-| **Min Track Record** | $\ge 8$ weeks | $\ge 8$ weeks | $\ge 12$ weeks | $\ge 16$ weeks |
+| **Min Forward Trades** | $\ge 100$ trades | $\ge 60$ trades | $\ge 40$ trades | $\ge 30$ trades *[Proposal]* |
+| **Min Track Record** *[Proposal]* | $\ge 8$ weeks | $\ge 8$ weeks | $\ge 12$ weeks | $\ge 16$ weeks |
 | **Statistical PF Bound** | Lower 95% bootstrap bound of forward PF $> 1.00$ | Lower 95% bootstrap bound of forward PF $> 1.00$ | Lower 95% bootstrap bound of forward PF $> 1.00$ | Lower 95% bootstrap bound of forward PF $> 1.00$ |
 | **Max Drawdown** | $< 6.0\%$ | $< 6.0\%$ | $< 6.0\%$ | $< 6.0\%$ |
-| **Execution Quality** | Demo slippage within 1.5× Spread Floor | Demo slippage within 1.5× Spread Floor | Demo slippage within 1.5× Spread Floor | Demo slippage within 1.5× Spread Floor |
+| **Execution Quality** *[Proposal]* | Demo slippage within 1.5× Spread Floor | Demo slippage within 1.5× Spread Floor | Demo slippage within 1.5× Spread Floor | Demo slippage within 1.5× Spread Floor |
 
-*Note: The Live Gate requires a formal Architecture Decision Record (ADR) prior to enablement.*
+*Note: The Live Gate requires a formal Architecture Decision Record (ADR) prior to enablement. Every parameter marked `[Proposal]` is documented for explicit owner confirmation in Section 12 before being codified in the ADR.*
 
 ### 4.2 Owner Authorization Security Model
 
@@ -291,20 +302,22 @@ flowchart TD
 ### 6.1 Hard Constraints
 
 1. **Max Risk Per Trade:**
-   - Determined by the Spec's `fixed_risk` block (default 1.0% of current equity).
-   - Absolute hard ceiling: If calculated volume would risk $> 1.5\%$ of equity under the defined stop distance, the trade is rejected.
+   - Sizing is determined strictly by the Spec's `fixed_risk` block (standard default: **1.0%** of current equity).
+   - Hard Risk Gate Ceiling: The Risk Gate enforces a hard maximum ceiling of **1.0%** of equity. Any order where lot size rounding or price slippage would risk $> 1.0\%$ of equity under the defined stop distance is rejected.
+   - *[Proposal]*: Owner configurable ceiling option up to 1.5% (see Section 12 Decision 3).
 2. **Daily Loss Limit:**
    - If cumulative closed + floating losses for the current server trading day exceed **3.0% of starting daily equity**, the Risk Gate halts all new entries for the remainder of the day. Existing positions are managed by their stops/targets.
 3. **Portfolio Drawdown Ceiling:**
    - If total portfolio equity falls $> 6.0\%$ below its high-water mark, trading halts across all strategies pending owner review.
 4. **Exposure & Concurrency Caps:**
-   - Maximum **1 open position** per symbol.
-   - Maximum **3 open positions** concurrently across the entire desk.
-5. **Spread Protection:**
+   - **Hypothesis Limit (Spec Invariant §5.1 / §3.4):** Exactly **1 open position per Hypothesis**. A single Hypothesis never pyramids or holds multiple trades.
+   - **Desk-Wide Cap:** Maximum **3 open positions** concurrently across the entire desk.
+   - **Per-Symbol Concurrency Lock *[Proposal]*:** To prevent correlated risk when multiple Hypotheses trade the same symbol (e.g., multiple GOLD breakout Hypotheses active at once), the desk may enforce a strict cap of at most 1 open position per symbol across all Hypotheses. If active, any new signal on a symbol that already has an open position is blocked by the Risk Gate, logged as `RISK_GATE_SYMBOL_BUSY` in the Ledger, and **excluded from the fill comparison (CCC-72)** so portfolio concurrency blocks do not distort single-strategy execution metrics.
+5. **Spread Protection *[Proposal]*:**
    - Before order dispatch, the runner queries `symbol_info_tick()`.
    - If `(ask - bid) / point > 2.0 * Spread Floor`, the order is aborted with `SPREAD_BLOWOUT`. This protects against news spikes and holiday illiquidity.
-6. **Margin & Stop Validation:**
-   - Queries `order_calc_margin()` to verify free margin $> 200\%$.
+6. **Margin & Stop Validation *[Proposal]*:**
+   - **Post-Order Margin Level Check:** Queries `order_calc_margin()` and verifies that projected account margin level (`equity / (existing_margin + new_margin) * 100`) remains $> 200\%$ after order placement.
    - Verifies the stop distance exceeds MT5's reported `trade_stops_level`.
 
 ---
@@ -361,7 +374,7 @@ The Fill Comparison engine computes:
 - **Spread Drag:** $\Delta_{\text{spread}} = \text{Spread}_{\text{broker}} - \text{Spread}_{\text{floor}}$
 - **Execution Slippage:** $\Delta_{\text{slip}} = |P_{\text{deal}} - P_{\text{expected\_open}}| / \text{point}$
 - **Execution Delay:** Timestamp delta between bar close $t$ and broker deal execution time $t_{\text{deal}}$ (ms).
-- **Edge Erosion Flag:** If Track 3 cumulative profit factor lags Track 1 by $> 15\%$ over 30 trades, the strategy is automatically flagged with `EXECUTION_EROSION` on the Leaderboard.
+- **Edge Erosion Flag *[Proposal]*:** If Track 3 cumulative profit factor lags Track 1 by $> 15\%$ over 30 trades, the strategy is automatically flagged with `EXECUTION_EROSION` on the Leaderboard.
 
 ---
 
@@ -372,9 +385,9 @@ The Fill Comparison engine computes:
 Signals are computed at the close of bar $t$. In historical simulation, entry occurs at the open of bar $t+1$. 
 
 In live trading:
-- The Live Runner wakes at the close of bar $t$.
-- Before sending the order, it computes the expected timestamp of bar $t+1$.
-- **Re-check:** It re-evaluates all Spec time filters (`session_window`, `day_of_week`) against the **actual opening time of bar $t+1$**.
+- The Live Runner evaluates signals at the close of bar $t$.
+- **Across Weekend or Holiday Gaps:** The runner does not guess or assume the opening time or price of bar $t+1$. Across any session gap (e.g., from Friday close to Monday open), it waits for the **first tick of bar $t+1$** to arrive from the broker feed.
+- From this first tick, it reads the actual opening timestamp of bar $t+1$, confirms that the broker has opened the bar, and re-evaluates all Spec time filters (`session_window`, `day_of_week`) against that actual opening timestamp.
 - If bar $t+1$ violates the session filter (for example, if the market closes early for a holiday, or a weekend gap shifts the opening bar outside the permitted trading hours), the runner **aborts the entry** and logs `TIME_FILTER_SKIPPED` in the Ledger.
 
 ### 9.2 Engine Parity
@@ -391,7 +404,7 @@ Operating a trading runner on a local Windows machine introduces distinct physic
 |---|---|---|
 | **MT5 Disconnect / Network Drop** | Orders fail, price feed stops | Exponential backoff retry (1s, 2s, 4s, 8s, up to 30s). If disconnected $> 60\text{ s}$, trigger high-priority Telegram alert. Refuse all new order submissions until tick feed resumes. |
 | **Laptop Sleep / Power Loss** | Missed bar closes, unmonitored positions | **Prevention:** Live Runner calls Windows API `SetThreadExecutionState(ES_CONTINUOUS \| ES_SYSTEM_REQUIRED \| ES_AWAYMODE_REQUIRED)`.<br/>**Recovery on Boot:** Reconciler scans `positions_get()`, matches tickets to Ledger, checks `history_deals_get()` for missed stops/exits, and reconciles state. |
-| **Broker Requotes / Off-Quotes** | Order rejected during volatility | Set `deviation = 30` (3 points slippage tolerance). If rejected with `TRADE_RETCODE_REQUOTE` or `TRADE_RETCODE_PRICE_OFF`, abort the entry. Never chase a moving market. |
+| **Broker Requotes / Off-Quotes** | Order rejected during volatility | In MT5 `MqlTradeRequest`, `deviation` is in **points** (not pips). Tolerance is calibrated dynamically per symbol as a fraction of the measured `Spread Floor` (which is stored in points): `deviation = max(10, int(0.5 * spread_floor_points))` (e.g. EURUSD: 10 points = 1.0 pip; GOLD: 30 points = $0.30). If rejected with `TRADE_RETCODE_REQUOTE` (10004) or `TRADE_RETCODE_PRICE_OFF` (10021), abort the entry and log `REQUOTE_ABORT`. Never chase a moving market. |
 | **Partial Fills** | Position size smaller than calculated | Detect deal volume $< \text{order volume}$. Ledger records actual filled volume; stops and targets are calibrated to the actual filled lot size. |
 | **Server DST Shift (Mismatch Weeks)** | Bar times shift relative to NY sessions | Handled by `server_time.py` (European DST `Europe/Athens`). Session checks dynamically evaluate exchange-local hours against New York market week. |
 | **Order Send Timeout** | Uncertain order status | Query `orders_get(ticket=...)` and `positions_get(ticket=...)` before retrying. Never resend an unconfirmed order without verifying position existence. |
@@ -404,7 +417,7 @@ To uphold the project rule **"No orders, ever"**, all automated verification is 
 
 ### 11.1 `FakeOrderMt5` Simulator Design
 
-`FakeOrderMt5` extends `FakeMt5` (`src/vibedesk/market/fake_mt5.py`) by simulating MT5's trading state machine:
+`FakeOrderMt5` extends `FakeMt5` (`src/vibedesk/market/fake_mt5.py`) by simulating MT5's trading state machine. It lives in `src/vibedesk/execution/fake_order_mt5.py`. It MUST NOT sit in `market/` or anywhere else in `src/` outside `execution/`, ensuring it does not trigger the read-only AST guard on core modules.
 
 ```python
 class FakeOrderMt5(FakeMt5):
@@ -416,6 +429,7 @@ class FakeOrderMt5(FakeMt5):
     def order_check(self, request: dict) -> OrderCheckResult: ...
     def order_send(self, request: dict) -> OrderSendResult: ...
     def positions_get(self, symbol: str | None = None) -> tuple[Position, ...]: ...
+    def orders_get(self, symbol: str | None = None) -> tuple[Order, ...]: ...
     def history_orders_get(self, ticket: int | None = None) -> tuple[Order, ...]: ...
     def history_deals_get(self, ticket: int | None = None) -> tuple[Deal, ...]: ...
 ```
@@ -423,18 +437,20 @@ class FakeOrderMt5(FakeMt5):
 ### 11.2 Required Test Suites
 
 1. **Risk Gate Suite:**
-   - Verify rejection when position risk exceeds 1.0% cap.
+   - Verify rejection when position risk exceeds the 1.0% cap.
    - Verify rejection when daily losses cross the 3.0% threshold.
    - Verify rejection when live spread exceeds $2\times$ Spread Floor.
-   - Verify exposure capping at 3 concurrent positions.
+   - Verify exposure capping at 3 concurrent positions, and verify rejection when symbol is already busy under per-symbol lock (`RISK_GATE_SYMBOL_BUSY`).
+   - Verify rejection when projected post-order margin level falls $\le 200\%$.
 2. **Kill Switch Suite:**
    - Verify all mock open positions owned by Vibe Desk (matching magic number and symbol) are closed at current bid/ask within a single test execution pass.
    - Verify Vibe Desk pending orders are purged.
    - Verify execution state latches to `HALTED`.
    - **Ownership Isolation Test:** Plant an open position and pending order with a foreign magic number (e.g., `magic=0` representing a manual terminal trade, or `magic=999999` from another system). Assert that after `trigger()`, the foreign position and order remain OPEN and untouched while all Vibe Desk positions are closed.
 3. **Fill-Bar Re-Check Suite:**
-   - Plant a signal at Friday 21:45 server time where bar $t+1$ opens on Sunday evening outside the session filter.
-   - Assert entry is cleanly skipped and logged.
+   - Server clock alignment: Server midnight corresponds to the 17:00 New York daily close (`market/server_time.py`). Friday trading closes at server 00:00 Saturday (17:00 New York Friday). FX markets reopen on Monday 00:00 server time (Sunday 17:00 NY), and GOLD reopens on Monday 01:00 server time (Sunday 18:00 NY) after its 1-hour daily break.
+   - **Test Scenario (EURUSD M15):** Plant a signal at the close of Friday 23:45 server time (16:45 NY time, the final M15 bar before Friday close). Bar $t+1$ opens across the weekend gap at Monday 00:00 server time. For a Spec whose `session_window` or `day_of_week` filter excludes Monday opens, assert that upon receiving the first tick of bar $t+1$, the entry is cleanly skipped and logged in the Ledger as `TIME_FILTER_SKIPPED`.
+   - **Test Scenario (GOLD M15):** Plant a signal at the close of Friday 23:45 server time. Bar $t+1$ opens at Monday 01:00 server time (respecting GOLD's 00:00–01:00 break). Assert identical time-filter re-check evaluation.
 4. **State Reconciliation Suite:**
    - Simulate a crash where an open position in the Ledger was closed by the broker (mock stop hit) while the runner was offline.
    - Assert startup reconciliation queries `history_deals_get()` and marks the trade closed with correct exit price and swap.
@@ -445,20 +461,35 @@ class FakeOrderMt5(FakeMt5):
 
 Before any code under `src/vibedesk/execution/` is written or unparked, the owner must make explicit choices on the following points:
 
-- [ ] **Decision 1: Execution Engine Selection**
-  - *Option A:* Python Live Runner using the official `MetaTrader5` Python package (recommended for exact logic parity).
-  - *Option B:* Native MQL5 Expert Advisor (CCC-82) running inside the terminal.
-- [ ] **Decision 2: Live Gate Trade Count Thresholds**
-  - Confirm or adjust minimum trade counts per timeframe: M15 ($\ge 100$), H1 ($\ge 60$), H4 ($\ge 40$).
-  - Confirm lower bootstrap confidence level (default: 95% lower bound $> 1.00$ PF).
-- [ ] **Decision 3: Hard Risk Gate Limits**
-  - Set maximum risk percentage per trade (default: 1.0%).
-  - Set daily portfolio loss limit (default: 3.0% of equity).
-  - Set maximum portfolio drawdown limit (default: 6.0% from peak).
-  - Set maximum concurrent open positions across all symbols (default: 3).
-- [ ] **Decision 4: Terminal Instance Segregation**
-  - Confirm whether the Live account will run on a separate Windows user/terminal profile to prevent accidental contamination of demo history.
-- [ ] **Decision 5: Kill Switch Behavior on Partial Broker Errors**
-  - In an emergency flatten, if one position cannot close due to a broker freeze, should the system retry indefinitely, alert via Telegram, or execute a terminal force-close?
-- [ ] **Decision 6: Guard Test Evolution Approval**
-  - Approve updating `test_guard.py` to permit order functions exclusively within the isolated `src/vibedesk/execution/` package, leaving the rest of the codebase permanently order-free.
+- [ ] **Decision 1: Execution Engine Selection (CCC-82 Trade-Off)**
+  - *Choice A (Recommended):* Python-Side Live Runner (`vibedesk/execution/runner.py`) using the official `MetaTrader5` Python package for 100% logic and math parity with the Gauntlet.
+  - *Choice B:* Native MQL5 Expert Advisor (CCC-82) running inside the terminal (with MQL5-to-SQLite IPC).
+  - *Choice C:* Python Live Runner with an optional lightweight MQL5 "Hard Stop Sentinel EA" as local disconnect insurance.
+- [ ] **Decision 2: Live Gate Trade Count Thresholds and Scope (CCC-69)**
+  - Confirm minimum closed trades per timeframe: M15 ($\ge 100$), H1 ($\ge 60$), H4 ($\ge 40$).
+  - *[Proposal]* Confirm whether D1 is included in live scope (proposed: $\ge 30$ trades).
+  - *[Proposal]* Confirm minimum forward track record in weeks per timeframe (proposed: M15 $\ge 8$ weeks, H1 $\ge 8$ weeks, H4 $\ge 12$ weeks, D1 $\ge 16$ weeks).
+  - *[Proposal]* Confirm execution-quality criterion (proposed: demo execution slippage within $1.5\times$ Spread Floor).
+  - Confirm lower bootstrap confidence level (default: 95% bootstrap lower bound of forward PF $> 1.00$).
+  - Confirm maximum forward drawdown boundary ($< 6.0\%$).
+- [ ] **Decision 3: Hard Risk Gate Limits & Concurrency Policies**
+  - Confirm default risk percentage per trade (default: 1.0% from Spec `fixed_risk` block).
+  - *[Proposal]* Confirm hard risk ceiling cap (proposed: 1.0% hard cap, or configurable up to 1.5%).
+  - Confirm daily portfolio loss limit (default: 3.0% of starting equity).
+  - Confirm maximum portfolio drawdown limit (default: 6.0% from peak equity).
+  - Confirm desk-wide concurrency cap (default: maximum 3 open positions across all symbols).
+  - *[Proposal]* Confirm per-symbol concurrency lock policy: choose between strictly 1 position per Hypothesis across all symbols, OR enforcing max 1 position per symbol desk-wide (blocking concurrent Hypotheses on GOLD, logged as `RISK_GATE_SYMBOL_BUSY` and excluded from fill comparison).
+  - *[Proposal]* Confirm spread blowout abort threshold (proposed: abort order if live spread $> 2.0\times$ Spread Floor).
+  - *[Proposal]* Confirm post-order margin level check (proposed: projected margin level $> 200\%$).
+- [ ] **Decision 4: CCC-67 Leaderboard Edge Decay Flag Thresholds**
+  - Confirm candidate statistical thresholds for the single decay flag reused by the Demo-ready badge:
+    - *[Proposal]* Forward PF must fall within the 90% confidence interval of the Gauntlet walk-forward folds.
+    - *[Proposal]* Forward win rate must not deviate by $> 2.0$ standard deviations from the backtest distribution.
+- [ ] **Decision 5: CCC-72 Fill Comparison Edge Erosion Threshold**
+  - *[Proposal]* Confirm threshold for flagging `EXECUTION_EROSION` on the Leaderboard (proposed: Track 3 demo profit factor lagging Track 1 backtest model by $> 15\%$ over 30 trades).
+- [ ] **Decision 6: Guard Test Evolution Approval (test_guard.py and test_mt5_guard.py)**
+  - Approve updating both `tests/test_guard.py` (scoping order-call regex ban to exclude `execution/`) and `tests/test_mt5_guard.py` (allowing `execution/seam.py` as second importer, partitioned AST allowlist, and runtime `OrderAuthToken` verification). All other packages in `src/` remain permanently order-free.
+- [ ] **Decision 7: Terminal Instance Segregation**
+  - Confirm whether the XM Live account will run on a separate Windows user/terminal profile to prevent accidental contamination of demo history or data cache.
+- [ ] **Decision 8: Kill Switch Handling of Partial Broker Errors**
+  - In an emergency flatten, if one position cannot close due to a broker freeze or off-quotes, should the Kill Switch retry indefinitely with expanding slippage, alert via Telegram, or execute a terminal force-close?
