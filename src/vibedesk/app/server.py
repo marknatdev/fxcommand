@@ -461,7 +461,7 @@ def create_app(
             last_refresh = max(import_dates)
 
         # Cached last refresh / import result without probing initialize/shutdown
-        nightly_job = scheduler.jobs().get("nightly_refresh") if scheduler else None
+        nightly_job = scheduler.job("nightly_refresh") if scheduler else None
         if desk.update.running:
             refresh_ok = True
         elif desk.update.last_ok is not None:
