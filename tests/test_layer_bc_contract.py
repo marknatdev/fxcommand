@@ -88,13 +88,11 @@ def test_arena_strategy_init_and_accounts():
     assert strategy.account_backtest.balance == 10_000.0
     assert strategy.account_live.balance == 10_000.0
 
-    # Step on active strategy raises NotImplementedError in Wave 0
-    with pytest.raises(NotImplementedError, match="ArenaStrategy.step"):
-        strategy.step({"time": 1000, "open": 2000.0, "close": 2005.0})
+    res_step = strategy.step({"time": 1000, "open": 2000.0, "close": 2005.0})
+    assert isinstance(res_step, ArenaStepResult)
 
-    # Catch-up raises NotImplementedError in Wave 0
-    with pytest.raises(NotImplementedError, match="ArenaStrategy.catch_up"):
-        strategy.catch_up([{"time": 1000}])
+    res_cu = strategy.catch_up([{"time": 2000, "open": 2005.0, "close": 2010.0}])
+    assert res_cu == 1
 
     # Paused strategy returns empty step result without error
     strategy.status = StrategyStatus.PAUSED
@@ -209,8 +207,7 @@ def test_arena_controls():
 
 def test_arena_runtime_stubs():
     runtime = ArenaRuntime(root=Path("."), ledger=None)
-    with pytest.raises(NotImplementedError, match="gap detection"):
-        runtime.check_and_recover_gaps()
+    assert runtime.check_and_recover_gaps() == 0
 
 
 def test_leaderboard_computation():

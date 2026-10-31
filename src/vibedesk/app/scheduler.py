@@ -1,9 +1,11 @@
-"""Background scheduler for Layer A maintenance jobs (spec §4, §8.4, CCC-53).
+"""Background scheduler for Layer A maintenance jobs (spec §4, §8.4, CCC-53) and Layer B (CCC-66).
 
 Jobs:
 1. `nightly_refresh`: 02:00 Asia/Bangkok (19:00 UTC) daily. Incremental import from MT5 terminal.
 2. `weekly_spread_floors`: 00:00 Asia/Bangkok Sunday (Saturday 17:00 UTC). Re-measure Spread Floors.
 3. `daily_digest`: 21:00 Asia/Bangkok (14:00 UTC) daily. Telegram push of REJECTs, Trials, tokens.
+4. `arena_closed_bar_poll`: Every 10 seconds. Poll MT5 for closed bars, step Arena (CCC-66).
+5. `night_shift_brief`: 07:00 Asia/Bangkok daily. Morning brief to Telegram (CCC-75).
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ class JobInfo:
 
 
 class Scheduler:
-    """Manages scheduled background maintenance and reporting jobs (spec §4, §8.4, CCC-53)."""
+    """Manages background maintenance and reporting jobs (spec §4, §8.4, CCC-53, CCC-66)."""
 
     def __init__(
         self,
@@ -45,6 +47,8 @@ class Scheduler:
         clock: Callable[[], datetime] | None = None,
         api: Any | None = None,
         symbols: Sequence[str] | None = None,
+        arena_runtime: Any | None = None,
+        enable_arena: bool | None = None,
     ) -> None:
         self.root = Path(root)
         self.desk = desk
@@ -53,10 +57,11 @@ class Scheduler:
         self._clock = clock or (lambda: datetime.now(BANGKOK_TZ))
         self._api = api
         self.symbols = tuple(symbols) if symbols is not None else None
+        self.arena_runtime = arena_runtime or getattr(desk, "arena_runtime", None)
         self._running = False
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        self._jobs = {
+        self._jobs: dict[str, JobInfo] = {
             "nightly_refresh": JobInfo(
                 name="nightly_refresh",
                 schedule_desc="02:00 Asia/Bangkok daily",
@@ -73,6 +78,35 @@ class Scheduler:
                 description="Compile daily digest (REJECTs, Trials, tokens) and push to Telegram.",
             ),
         }
+        if self.arena_runtime is not None or enable_arena is True:
+            self.register_arena_jobs(self.arena_runtime)
+
+    def register_arena_jobs(self, arena_runtime: Any | None = None) -> None:
+        """Register Forward Arena poll and Night Shift brief (spec §2.1, §6.2, CCC-66)."""
+        if arena_runtime is not None:
+            self.arena_runtime = arena_runtime
+        now = self._clock()
+        if "arena_closed_bar_poll" not in self._jobs:
+            job = JobInfo(
+                name="arena_closed_bar_poll",
+                schedule_desc="Every 10 seconds",
+                description=(
+                    "Poll MT5 for newly closed bars, append to cache, step Arena strategies."
+                ),
+            )
+            job.next_run = self._compute_next_run("arena_closed_bar_poll", now)
+            self._jobs["arena_closed_bar_poll"] = job
+
+        if "night_shift_brief" not in self._jobs:
+            job = JobInfo(
+                name="night_shift_brief",
+                schedule_desc="07:00 Asia/Bangkok daily",
+                description=(
+                    "Compile and dispatch Night Shift morning brief to Telegram (spec §6.2)."
+                ),
+            )
+            job.next_run = self._compute_next_run("night_shift_brief", now)
+            self._jobs["night_shift_brief"] = job
 
     def _compute_next_run(self, name: str, now: datetime) -> datetime:
         """Compute the next scheduled run time in Asia/Bangkok."""
@@ -92,6 +126,11 @@ class Scheduler:
                 hour=0, minute=0, second=0, microsecond=0
             )
             return target if current < target else target + timedelta(days=7)
+        elif name == "night_shift_brief":
+            target = current.replace(hour=7, minute=0, second=0, microsecond=0)
+            return target if current < target else target + timedelta(days=1)
+        elif name == "arena_closed_bar_poll":
+            return current + timedelta(seconds=10)
         raise KeyError(f"unknown job {name!r}")
 
     def start(self) -> None:
@@ -137,7 +176,7 @@ class Scheduler:
             current_time = current_time.astimezone(BANGKOK_TZ)
 
         ran: list[str] = []
-        for name, job in self._jobs.items():
+        for name, job in list(self._jobs.items()):
             if job.next_run is None:
                 job.next_run = self._compute_next_run(name, current_time)
             elif current_time >= job.next_run:
@@ -265,8 +304,6 @@ class Scheduler:
         else:
             now_bkk = clock_time.replace(tzinfo=BANGKOK_TZ)
 
-        # Scheduled 21:00 Bangkok time as UTC (CCC-53, coordination with Notify team)
-        # Using explicit until so consecutive 24 h windows line up exactly even if late
         if scheduled_time is not None:
             scheduled_bkk = (
                 scheduled_time.astimezone(BANGKOK_TZ)
@@ -305,10 +342,53 @@ class Scheduler:
             "until_utc": until_utc.isoformat(),
         }
 
+    def _run_arena_closed_bar_poll(self) -> dict[str, Any]:
+        """Poll MT5 for newly closed bars, append to cache, and step Arena strategies (CCC-66)."""
+        if self.arena_runtime is None:
+            return {"job": "arena_closed_bar_poll", "status": "ok", "stepped": 0}
+        try:
+            results = self.arena_runtime.poll_closed_bars(
+                root=self.root,
+                api=self._api,
+                clock=self._clock,
+            )
+            return {
+                "job": "arena_closed_bar_poll",
+                "status": "ok",
+                "stepped": len(results),
+                "results": results,
+            }
+        except Exception as e:
+            logger.exception("Error in arena closed bar poll: %s", e)
+            return {"job": "arena_closed_bar_poll", "status": "error", "error": str(e)}
+
+    def _run_night_shift_brief(self, scheduled_time: datetime | None = None) -> dict[str, Any]:
+        """Compile and send 07:00 Bangkok Night Shift morning brief (spec §6.2, CCC-75)."""
+        from vibedesk.nightshift import NightShiftState, compile_morning_brief
+
+        state = getattr(self.desk, "night_shift_state", None) or NightShiftState()
+        notice = compile_morning_brief(state)
+        sent = False
+        if self.notifier is not None:
+            sent = self.notifier.send(notice)
+
+        return {
+            "job": "night_shift_brief",
+            "status": "ok",
+            "sent": sent,
+            "trials_run": state.trials_run,
+            "candidates_found": state.candidates_found,
+            "tokens_used": state.tokens_used,
+            "stopped_reason": state.stopped_reason,
+        }
+
     def run_job_now(self, name: str, scheduled_time: datetime | None = None) -> dict[str, Any]:
         """Manually trigger a job immediately (for testing or admin per CCC-53)."""
         if name not in self._jobs:
-            raise KeyError(f"unknown job {name!r}; expected one of {list(self._jobs.keys())}")
+            if name in ("arena_closed_bar_poll", "night_shift_brief"):
+                self.register_arena_jobs()
+            else:
+                raise KeyError(f"unknown job {name!r}; expected one of {list(self._jobs.keys())}")
         job = self._jobs[name]
         job.status = "running"
         now = self._clock()
@@ -319,6 +399,10 @@ class Scheduler:
                 res = self._run_weekly_spread_floors()
             elif name == "daily_digest":
                 res = self._run_daily_digest(scheduled_time=scheduled_time)
+            elif name == "arena_closed_bar_poll":
+                res = self._run_arena_closed_bar_poll()
+            elif name == "night_shift_brief":
+                res = self._run_night_shift_brief(scheduled_time=scheduled_time)
             else:
                 raise KeyError(name)
             job.last_run = now
