@@ -40,13 +40,14 @@ class Quote:
         return Quote(self.open + amount, self.high + amount, self.low + amount, self.close + amount)
 
 
-def simulate_reference(bars, signals, cost, m1=None) -> list[dict]:
+def simulate_reference(bars, signals, cost, m1=None, time_filter=None) -> list[dict]:
     slip = cost.slippage_points * cost.point
 
     def spread_of(points) -> float:
         return max(int(points), cost.spread_floor_points) * cost.spread_multiplier * cost.point
 
     spreads = [spread_of(s) for s in bars.spread]
+    tf = signals.time_filter if time_filter is None else time_filter
     n = len(bars)
     trail_dist = signals.trail_dist if signals.trail_dist is not None else [math.nan] * n
     exit_long = signals.exit_long if signals.exit_long is not None else [False] * n
@@ -74,24 +75,27 @@ def simulate_reference(bars, signals, cost, m1=None) -> list[dict]:
             waiting, turning = turning, None
 
         if waiting is not None:
-            side = 1 if signals.long_entry[waiting] else -1
-            risk = float(signals.stop_dist[waiting])
-            target_dist = float(signals.target_dist[waiting])
-            if side == 1:
-                entry, entry_cost = bid.open + spreads[t] + slip, spreads[t] + slip
+            if tf is not None and not tf[t]:
+                waiting = None
             else:
-                entry, entry_cost = bid.open - slip, slip
-            position = _Position(
-                side=side,
-                entry_idx=t,
-                entry=entry,
-                stop=entry - side * risk,
-                target=None if math.isnan(target_dist) else entry + side * target_dist,
-                risk=risk,
-                entry_cost=entry_cost,
-            )
-            waiting = None
-            entered_now = True
+                side = 1 if signals.long_entry[waiting] else -1
+                risk = float(signals.stop_dist[waiting])
+                target_dist = float(signals.target_dist[waiting])
+                if side == 1:
+                    entry, entry_cost = bid.open + spreads[t] + slip, spreads[t] + slip
+                else:
+                    entry, entry_cost = bid.open - slip, slip
+                position = _Position(
+                    side=side,
+                    entry_idx=t,
+                    entry=entry,
+                    stop=entry - side * risk,
+                    target=None if math.isnan(target_dist) else entry + side * target_dist,
+                    risk=risk,
+                    entry_cost=entry_cost,
+                )
+                waiting = None
+                entered_now = True
 
         if position is not None:
             held = t - position.entry_idx
@@ -131,10 +135,11 @@ def simulate_reference(bars, signals, cost, m1=None) -> list[dict]:
                 and not bool(same[t])
                 and signals.stop_dist[t] > 0
                 and t + 1 < len(bars)
+                and (tf is None or tf[t])
             ):
                 turning = t
 
-        if position is None and t + 1 < len(bars):
+        if position is None and t + 1 < len(bars) and (tf is None or tf[t]):
             go_long = bool(signals.long_entry[t]) and not bool(signals.short_entry[t])
             go_short = bool(signals.short_entry[t]) and not bool(signals.long_entry[t])
             if (go_long or go_short) and signals.stop_dist[t] > 0:

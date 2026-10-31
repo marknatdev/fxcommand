@@ -747,7 +747,7 @@ The following items remain open for the owner:
 
 ## Wave 1: Core Engines and Isolation
 - [ ] **T-ArenaCore (CCC-66):** Forward Arena closed bar feed, dual fill tracks, gap replay catch-up, controls.
-- [ ] **T-Engine (CCC-71, CCC-79, CCC-80):** Fill-bar rule in `simulate.py`, Holdout trade close at last bar, remove unused `stop_distance` in `atr_target`, bump `RULES_VERSION = 4`, apply Migration 4 in `store.py`.
+- [x] **T-Engine (CCC-71, CCC-79, CCC-80):** Fill-bar rule in `simulate.py`, Holdout trade close at last bar, remove unused `stop_distance` in `atr_target`, bump `RULES_VERSION = 4`, apply Migration 4 in `store.py`.
 - [x] **T-NightShift (CCC-75):** Overnight research loop with 20-Trial and 50% token caps, 07:00 Bangkok brief.
   - Implemented `run_night_shift` in `runner.py` with queued ideas and family parameter variations.
   - Enforced 20-Trial max cap and 50% daily token share cap (stopping early with typed reason). Treated non-positive daily token cap as unlimited.
