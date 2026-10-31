@@ -37,28 +37,6 @@ class CustomBlockRegistry:
         self.library = library
         self._blocks: dict[str, CustomBlockMeta] = {}
 
-    def _is_ledger_approved(self, name: str, sha256: str) -> tuple[bool, str | None]:
-        """Check if this code hash was approved in the Ledger (Migration 4)."""
-        if self.ledger is not None and hasattr(self.ledger, "_db"):
-            try:
-                with self.ledger._lock:
-                    cur = self.ledger._db.cursor()
-                    cur.execute(
-                        """
-                        SELECT a.approved_at FROM custom_block_approvals a
-                        JOIN custom_blocks b ON a.block_id = b.id
-                        WHERE b.name = ? AND b.sha256 = ?
-                        ORDER BY a.id DESC LIMIT 1
-                        """,
-                        (name, sha256),
-                    )
-                    row = cur.fetchone()
-                    if row:
-                        return True, str(row[0])
-            except Exception:
-                pass
-        return False, None
-
     def register(
         self,
         name: str,
@@ -75,7 +53,22 @@ class CustomBlockRegistry:
             raise ValueError(f"Custom block {name!r} is already registered")
 
         sha256 = hashlib.sha256(code.encode("utf-8")).hexdigest()
-        is_approved, approved_at = self._is_ledger_approved(name, sha256)
+        is_approved = False
+        approved_at: str | None = None
+
+        if self.ledger is not None:
+            record = self.ledger.get_custom_block(name)
+            if record is None:
+                self.ledger.register_custom_block(
+                    name=name,
+                    kind=kind,
+                    code=code,
+                    sha256=sha256,
+                )
+            state = self.ledger.read_custom_block_approval_state(name)
+            if state["approved"] and state["sha256"] == sha256:
+                is_approved = True
+                approved_at = state["approved_at"]
 
         meta = CustomBlockMeta(
             name=name,
@@ -88,17 +81,6 @@ class CustomBlockRegistry:
             block_def=block_def,
         )
         self._blocks[name] = meta
-
-        if self.ledger is not None and hasattr(self.ledger, "_db"):
-            try:
-                with self.ledger._lock:
-                    self.ledger._db.execute(
-                        "INSERT INTO custom_blocks (name, kind, code, sha256) VALUES (?, ?, ?, ?)",
-                        (name, kind, code, sha256),
-                    )
-                    self.ledger._db.commit()
-            except Exception:
-                pass
 
         if is_approved and block_def is not None and self.library is not None:
             self.library._defs[name] = block_def
@@ -120,9 +102,16 @@ class CustomBlockRegistry:
 
         old = self._blocks[name]
         new_sha256 = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        is_approved = False
+        approved_at: str | None = None
 
-        # Check if the new hash is approved in the Ledger
-        is_approved, approved_at = self._is_ledger_approved(name, new_sha256)
+        if self.ledger is not None:
+            record = self.ledger.get_custom_block(name)
+            if record is not None and record.sha256 == new_sha256:
+                state = self.ledger.read_custom_block_approval_state(name)
+                if state["approved"] and state["sha256"] == new_sha256:
+                    is_approved = True
+                    approved_at = state["approved_at"]
 
         new_bdef = block_def or old.block_def
 
@@ -143,17 +132,6 @@ class CustomBlockRegistry:
         elif is_approved and new_bdef is not None and self.library is not None:
             self.library._defs[name] = new_bdef
 
-        if self.ledger is not None and hasattr(self.ledger, "_db"):
-            try:
-                with self.ledger._lock:
-                    self.ledger._db.execute(
-                        "INSERT INTO custom_blocks (name, kind, code, sha256) VALUES (?, ?, ?, ?)",
-                        (name, old.kind, code, new_sha256),
-                    )
-                    self.ledger._db.commit()
-            except Exception:
-                pass
-
         return meta
 
     def approve(self, name: str, approver: str = "owner") -> CustomBlockMeta:
@@ -162,46 +140,34 @@ class CustomBlockRegistry:
             raise KeyError(f"Custom block {name!r} not found")
 
         old = self._blocks[name]
-        now_iso = datetime.now(UTC).isoformat()
+        approved_at: str
+
+        if self.ledger is not None:
+            record = self.ledger.get_custom_block(name)
+            if record is None or record.sha256 != old.sha256:
+                self.ledger.register_custom_block(
+                    name=name,
+                    kind=old.kind,
+                    code=old.code,
+                    sha256=old.sha256,
+                )
+            self.ledger.record_custom_block_approval(name, approver=approver)
+            state = self.ledger.read_custom_block_approval_state(name)
+            approved_at = state["approved_at"] or datetime.now(UTC).isoformat()
+        else:
+            approved_at = datetime.now(UTC).isoformat()
+
         approved_meta = CustomBlockMeta(
             name=old.name,
             kind=old.kind,
             code=old.code,
             approved=True,
-            approved_at=now_iso,
+            approved_at=approved_at,
             sha256=old.sha256,
             author=old.author,
             block_def=old.block_def,
         )
         self._blocks[name] = approved_meta
-
-        if self.ledger is not None and hasattr(self.ledger, "_db"):
-            try:
-                with self.ledger._lock:
-                    cur = self.ledger._db.cursor()
-                    cur.execute(
-                        "SELECT id FROM custom_blocks WHERE name = ? AND sha256 = ? "
-                        "ORDER BY id DESC LIMIT 1",
-                        (name, old.sha256),
-                    )
-                    row = cur.fetchone()
-                    if row:
-                        block_id = row[0]
-                    else:
-                        self.ledger._db.execute(
-                            "INSERT INTO custom_blocks (name, kind, code, sha256) "
-                            "VALUES (?, ?, ?, ?)",
-                            (name, old.kind, old.code, old.sha256),
-                        )
-                        block_id = cur.lastrowid
-
-                    self.ledger._db.execute(
-                        "INSERT INTO custom_block_approvals (block_id, approver) VALUES (?, ?)",
-                        (block_id, approver),
-                    )
-                    self.ledger._db.commit()
-            except Exception:
-                pass
 
         if old.block_def is not None and self.library is not None:
             self.library._defs[name] = old.block_def
@@ -235,7 +201,12 @@ class CustomBlockRegistry:
         if meta is None or not meta.approved:
             return False
         current_hash = hashlib.sha256(meta.code.encode("utf-8")).hexdigest()
-        return current_hash == meta.sha256
+        if current_hash != meta.sha256:
+            return False
+        if self.ledger is not None:
+            state = self.ledger.read_custom_block_approval_state(name)
+            return bool(state["approved"] and state["sha256"] == current_hash)
+        return True
 
     def get(self, name: str) -> CustomBlockMeta | None:
         return self._blocks.get(name)

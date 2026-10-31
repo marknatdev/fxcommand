@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-import sqlite3
-import threading
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -177,30 +177,89 @@ def test_property_test_rejects_inert_block():
 # --- Custom Block Registry & Ledger Integration ---
 
 
+@dataclass(frozen=True)
+class FakeCustomBlockRecord:
+    id: int
+    name: str
+    kind: str
+    code: str
+    sha256: str
+    created_at: str
+
+
 class FakeLedger:
-    """In-memory SQLite ledger replicating Migration 4 custom block tables."""
+    """Fake ledger implementing Migration 4 public interface (ADR 0012)."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._db = sqlite3.connect(":memory:", check_same_thread=False)
-        with self._lock:
-            self._db.executescript("""
-                CREATE TABLE custom_blocks (
-                    id INTEGER PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    code TEXT NOT NULL,
-                    sha256 TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                );
+        self.blocks: dict[str, FakeCustomBlockRecord] = {}
+        self.approvals: dict[str, dict[str, Any]] = {}
+        self._next_id = 1
 
-                CREATE TABLE custom_block_approvals (
-                    id INTEGER PRIMARY KEY,
-                    block_id INTEGER NOT NULL REFERENCES custom_blocks (id),
-                    approver TEXT NOT NULL,
-                    approved_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                );
-            """)
+    def register_custom_block(
+        self, name: str, kind: str, code: str, sha256: str | None = None
+    ) -> int:
+        clean_name = name.strip()
+        clean_kind = kind.strip()
+        if not clean_name or not clean_kind:
+            raise ValueError("name and kind required")
+        # Compute sha256 from verbatim code
+        computed = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        if sha256 is not None and sha256 != computed:
+            raise ValueError(f"passed sha256 {sha256} does not match computed {computed}")
+        if clean_name in self.blocks and self.blocks[clean_name].sha256 == computed:
+            raise ValueError(f"Custom block {clean_name!r} is already registered")
+        bid = self._next_id
+        self._next_id += 1
+        rec = FakeCustomBlockRecord(
+            id=bid,
+            name=clean_name,
+            kind=clean_kind,
+            code=code,
+            sha256=computed,
+            created_at="2026-10-31T00:00:00Z",
+        )
+        if clean_name in self.blocks and self.blocks[clean_name].sha256 != computed:
+            self.approvals.pop(clean_name, None)
+        self.blocks[clean_name] = rec
+        return bid
+
+    def record_custom_block_approval(
+        self, block_id_or_name: int | str, approver: str = "owner"
+    ) -> int:
+        rec = self.get_custom_block(block_id_or_name)
+        if rec is None:
+            raise KeyError(f"no custom block {block_id_or_name!r}")
+        self.approvals[rec.name] = {
+            "approver": approver.strip(),
+            "approved_at": "2026-10-31T01:00:00Z",
+        }
+        return rec.id
+
+    def read_custom_block_approval_state(self, block_id_or_name: int | str) -> dict[str, Any]:
+        rec = self.get_custom_block(block_id_or_name)
+        if rec is None:
+            raise KeyError(f"no custom block {block_id_or_name!r}")
+        appr = self.approvals.get(rec.name)
+        return {
+            "block_id": rec.id,
+            "name": rec.name,
+            "kind": rec.kind,
+            "sha256": rec.sha256,
+            "approved": appr is not None,
+            "approved_at": appr["approved_at"] if appr else None,
+            "approver": appr["approver"] if appr else None,
+        }
+
+    def is_custom_block_approved(self, block_id_or_name: int | str) -> bool:
+        return self.read_custom_block_approval_state(block_id_or_name)["approved"]
+
+    def get_custom_block(self, block_id_or_name: int | str) -> FakeCustomBlockRecord | None:
+        if isinstance(block_id_or_name, int):
+            for b in self.blocks.values():
+                if b.id == block_id_or_name:
+                    return b
+            return None
+        return self.blocks.get(str(block_id_or_name).strip())
 
 
 def test_registry_registration_and_unapproved_by_default():
@@ -216,13 +275,11 @@ def test_registry_registration_and_unapproved_by_default():
     assert meta.approved_at is None
     assert reg.is_approved("safe_filter") is False
 
-    # Stored in custom_blocks table
-    cur = ledger._db.cursor()
-    cur.execute("SELECT name, sha256 FROM custom_blocks WHERE name = ?", ("safe_filter",))
-    row = cur.fetchone()
-    assert row is not None
-    assert row[0] == "safe_filter"
-    assert row[1] == meta.sha256
+    # Stored via Ledger register_custom_block
+    rec = ledger.get_custom_block("safe_filter")
+    assert rec is not None
+    assert rec.name == "safe_filter"
+    assert rec.sha256 == meta.sha256
 
 
 def test_owner_approval_action_and_ledger_record():
@@ -239,21 +296,11 @@ def test_owner_approval_action_and_ledger_record():
     assert approved_meta.approved_at is not None
     assert reg.is_approved("safe_entry") is True
 
-    # Check ledger records
-    cur = ledger._db.cursor()
-    cur.execute(
-        """
-        SELECT b.name, a.approver, a.approved_at
-        FROM custom_block_approvals a
-        JOIN custom_blocks b ON a.block_id = b.id
-        WHERE b.name = ?
-        """,
-        ("safe_entry",),
-    )
-    row = cur.fetchone()
-    assert row is not None
-    assert row[0] == "safe_entry"
-    assert row[1] == "owner"
+    # Check ledger records via read_custom_block_approval_state
+    state = ledger.read_custom_block_approval_state("safe_entry")
+    assert state["approved"] is True
+    assert state["approver"] == "owner"
+    assert state["name"] == "safe_entry"
 
 
 def test_changed_file_invalidates_approval():
@@ -365,19 +412,9 @@ def persisted_block(bars, p):
     file_path.write_text(code, encoding="utf-8")
     sha256 = hashlib.sha256(code.encode("utf-8")).hexdigest()
 
-    # Seed Ledger approval for this sha256
-    with ledger._lock:
-        cur = ledger._db.cursor()
-        cur.execute(
-            "INSERT INTO custom_blocks (name, kind, code, sha256) VALUES (?, ?, ?, ?)",
-            ("persisted_block", "filter", code, sha256),
-        )
-        block_id = cur.lastrowid
-        cur.execute(
-            "INSERT INTO custom_block_approvals (block_id, approver) VALUES (?, ?)",
-            (block_id, "owner"),
-        )
-        ledger._db.commit()
+    # Seed Ledger approval via public methods
+    ledger.register_custom_block("persisted_block", "filter", code, sha256=sha256)
+    ledger.record_custom_block_approval("persisted_block", "owner")
 
     # Load with registry connected to ledger
     reg = CustomBlockRegistry(ledger=ledger)
