@@ -758,7 +758,7 @@ The following items remain open for the owner:
   - Implemented per-item `try/log/continue` error isolation so single item failures do not abort the night.
   - Kept runner notifier-free; exposed `compile_morning_brief(state, notifier)` for scheduler dispatch at 07:00.
   - Full test coverage in `tests/test_nightshift.py` including real `Desk` test with synthetic bars, and contract verification in `tests/test_layer_bc_contract.py`.
-- [ ] **T-CustomBlocks (CCC-77):** Custom block dynamic loader, property tests, approval gate.
+- [x] **T-CustomBlocks (CCC-77):** Custom block dynamic loader, property tests, approval gate.
 
 ## Wave 2: Analysis, Gates and UI
 - [ ] **T-Leaderboard (CCC-67, CCC-69):** Rank by net R, decay calculation, Demo-Ready badge with override, per-TF live gate.
