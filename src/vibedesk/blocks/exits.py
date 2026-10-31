@@ -39,7 +39,7 @@ class AtrTargetParams(_Params):
 
 
 @LIBRARY.register("atr_target", Kind.TARGET, AtrTargetParams)
-def atr_target(bars: Bars, p: AtrTargetParams, stop_dist: np.ndarray) -> np.ndarray:
+def atr_target(bars: Bars, p: AtrTargetParams, *args: object) -> np.ndarray:
     """Target `mult` times ATR(`period`) away from the entry fill, using ATR at the signal bar."""
     return p.mult * atr(bars.high, bars.low, bars.close, p.period)
 
