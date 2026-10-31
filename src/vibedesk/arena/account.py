@@ -17,6 +17,10 @@ class Position:
     stop_price: float
     target_price: float | None = None
     stop_distance: float = 0.0
+    trail_price: float | None = None
+    entry_cost: float = 0.0
+    bars_held: int = 0
+    opposite_due: bool = False
 
 
 @dataclass(frozen=True)
