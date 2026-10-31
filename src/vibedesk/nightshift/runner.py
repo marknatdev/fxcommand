@@ -74,21 +74,22 @@ def generate_family_variations(
     variations: list[dict[str, Any]] = []
     base_name = spec.get("name", "Strategy")
 
-    # 1. Vary exit stop multiplier
-    stop_mult = spec.get("exit", {}).get("stop", {}).get("params", {}).get("mult", 2.0)
+    # 1. Vary exit stop multiplier (handling scalar or sweep list)
+    raw_mult = spec.get("exit", {}).get("stop", {}).get("params", {}).get("mult", 2.0)
+    curr_mult = raw_mult[0] if isinstance(raw_mult, list) else raw_mult
     for delta in (-0.5, 0.5, 1.0):
-        new_mult = round(float(stop_mult) + delta, 1)
-        if 1.0 <= new_mult <= 5.0 and new_mult != stop_mult:
-            var = copy.deepcopy(spec)
-            var["name"] = f"{base_name} (stop {new_mult}x)"[:80]
-            var["exit"]["stop"]["params"]["mult"] = new_mult
-            try:
+        try:
+            new_mult = round(float(curr_mult) + delta, 1)
+            if 1.0 <= new_mult <= 5.0 and new_mult != curr_mult:
+                var = copy.deepcopy(spec)
+                var["name"] = f"{base_name} (stop {new_mult}x)"[:80]
+                var["exit"]["stop"]["params"]["mult"] = new_mult
                 validate(normalize(var))
                 variations.append(var)
-            except Exception:
-                pass
-            if len(variations) >= max_variations:
-                return variations
+        except Exception:
+            pass
+        if len(variations) >= max_variations:
+            return variations
 
     # 2. Vary target R if target exists, or add one if absent
     target = spec.get("exit", {}).get("target")
@@ -96,27 +97,27 @@ def generate_family_variations(
         r_val = target.get("params", {}).get("r", 2.0)
         curr_r = r_val[0] if isinstance(r_val, list) else r_val
         for delta in (-0.5, 0.5, 1.0):
-            new_r = round(float(curr_r) + delta, 1)
-            if 1.0 <= new_r <= 5.0 and new_r != curr_r:
-                var = copy.deepcopy(spec)
-                var["name"] = f"{base_name} (target {new_r}R)"[:80]
-                var["exit"]["target"]["params"]["r"] = new_r
-                try:
+            try:
+                new_r = round(float(curr_r) + delta, 1)
+                if 1.0 <= new_r <= 5.0 and new_r != curr_r:
+                    var = copy.deepcopy(spec)
+                    var["name"] = f"{base_name} (target {new_r}R)"[:80]
+                    var["exit"]["target"]["params"]["r"] = new_r
                     validate(normalize(var))
                     variations.append(var)
-                except Exception:
-                    pass
-                if len(variations) >= max_variations:
-                    return variations
+            except Exception:
+                pass
+            if len(variations) >= max_variations:
+                return variations
     elif not target:
         for r_cand in (2.0, 3.0):
-            var = copy.deepcopy(spec)
-            var["name"] = f"{base_name} ({r_cand}R target)"[:80]
-            var.setdefault("exit", {})["target"] = {
-                "block": "r_target",
-                "params": {"r": r_cand},
-            }
             try:
+                var = copy.deepcopy(spec)
+                var["name"] = f"{base_name} ({r_cand}R target)"[:80]
+                var.setdefault("exit", {})["target"] = {
+                    "block": "r_target",
+                    "params": {"r": r_cand},
+                }
                 validate(normalize(var))
                 variations.append(var)
             except Exception:
@@ -130,18 +131,18 @@ def generate_family_variations(
         curr_p = entry_params["period"]
         p_val = curr_p[0] if isinstance(curr_p, list) else curr_p
         for delta in (-5, 5, 10):
-            new_p = int(p_val + delta)
-            if 10 <= new_p <= 100 and new_p != p_val:
-                var = copy.deepcopy(spec)
-                var["name"] = f"{base_name} (period {new_p})"[:80]
-                var["entry"]["params"]["period"] = new_p
-                try:
+            try:
+                new_p = int(p_val + delta)
+                if 10 <= new_p <= 100 and new_p != p_val:
+                    var = copy.deepcopy(spec)
+                    var["name"] = f"{base_name} (period {new_p})"[:80]
+                    var["entry"]["params"]["period"] = new_p
                     validate(normalize(var))
                     variations.append(var)
-                except Exception:
-                    pass
-                if len(variations) >= max_variations:
-                    return variations
+            except Exception:
+                pass
+            if len(variations) >= max_variations:
+                return variations
 
     return variations
 

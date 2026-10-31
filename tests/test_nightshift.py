@@ -339,3 +339,36 @@ def test_run_night_shift_error_handling(tmp_path: Path):
     desk.run = faulty_run
     state = run_night_shift(desk=desk, queued_ideas=[_make_spec()])
     assert state.stopped_reason == "error"
+
+
+def test_generate_family_variations_with_list_params():
+    spec = _make_spec(period=20)
+    spec["exit"]["stop"]["params"]["mult"] = [1.5, 2.0]
+    spec["exit"]["target"] = {"block": "r_target", "params": {"r": [2.0, 3.0]}}
+    spec["entry"]["params"]["period"] = [20, 55]
+
+    variations = generate_family_variations(spec, max_variations=4)
+    assert len(variations) >= 1
+    for var in variations:
+        validated = validate(var)
+        assert validated.symbol == "GOLD"
+        assert validated.entry.block == "donchian_breakout"
+
+
+def test_run_night_shift_with_list_params_family(tmp_path: Path):
+    desk = FakeDesk(tmp_path)
+    budget = TokenBudget(daily_cap=100_000)
+
+    sweep_spec = _make_spec(period=20)
+    sweep_spec["exit"]["stop"]["params"]["mult"] = [1.5, 2.0]
+
+    run_night_shift(desk=desk, budget=budget, queued_ideas=[sweep_spec])
+    assert len(desk.list_families()) == 1
+
+    state = run_night_shift(
+        desk=desk,
+        budget=budget,
+        config=NightShiftConfig(max_trials=3),
+    )
+    assert state.stopped_reason == "hit_trial_cap_3"
+    assert state.trials_run == 3
