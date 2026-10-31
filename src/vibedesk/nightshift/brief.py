@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from vibedesk.nightshift.runner import NightShiftState
 from vibedesk.notify import Notice, NoticeKind
 
@@ -17,10 +19,10 @@ def format_morning_brief(state: NightShiftState) -> str:
     )
 
 
-def compile_morning_brief(state: NightShiftState) -> Notice:
+def compile_morning_brief(state: NightShiftState, notifier: Any = None) -> Notice:
     """Compile morning brief Notice for dispatch."""
     text = format_morning_brief(state)
-    return Notice(
+    notice = Notice(
         kind=NoticeKind.DAILY_DIGEST,
         text=text,
         data={
@@ -29,5 +31,10 @@ def compile_morning_brief(state: NightShiftState) -> Notice:
             "tokens_used": state.tokens_used,
             "stopped_reason": state.stopped_reason,
             "brief_type": "night_shift_morning",
+            "started_at": state.started_at,
+            "finished_at": state.finished_at,
         },
     )
+    if notifier is not None:
+        notifier.send(notice)
+    return notice

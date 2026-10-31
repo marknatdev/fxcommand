@@ -339,8 +339,9 @@ def test_night_shift_config_and_stubs():
     assert notice.kind == NoticeKind.DAILY_DIGEST
     assert notice.data["trials_run"] == 15
 
-    with pytest.raises(NotImplementedError, match="run_night_shift"):
-        run_night_shift(desk=None, budget=None)
+    state_out = run_night_shift(desk=None, budget=None)
+    assert isinstance(state_out, NightShiftState)
+    assert state_out.stopped_reason == "completed"
 
 
 # --- Regime Desk Tests ---
