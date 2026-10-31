@@ -1,6 +1,7 @@
 """The Ledger (spec §6.4, §9.3; ADRs 0002, 0003): append-only, budgeted, one Holdout spend."""
 
 import ast
+import hashlib
 import json
 import re
 import sqlite3
@@ -110,6 +111,11 @@ TAMPERING = {
     "holdout_requests": "hypothesis_id = hypothesis_id",
     "holdout_approvals": "token = 'forged'",
     "holdout_spends": "verdict = 'PASS'",
+    "arena_strategies": "symbol = 'USDJPY'",
+    "arena_actions": "action = 'tampered'",
+    "arena_overrides": "reason = 'tampered'",
+    "custom_blocks": "code = 'tampered'",
+    "custom_block_approvals": "approver = 'tampered'",
 }
 
 
@@ -118,9 +124,18 @@ def full_ledger(ledger):
     """A Ledger with at least one row in every table."""
     family = ledger.create_family("London breakout on gold")
     hypothesis = ledger.register_hypothesis(family, make_spec(mult=[1.5, 2.0]))
-    record(ledger, hypothesis, sharpes=[0.1, 0.2])
+    record(ledger, hypothesis, sharpes=[0.1, 0.2], verdict="CANDIDATE")
     ledger.extend_budget(family)
     ledger.record_holdout(approved(ledger, hypothesis), "HOLDOUT FAIL", "{}")
+    strat_id = ledger.insert_arena_strategy(hypothesis)
+    ledger.record_arena_action(strat_id, action="paused", reason="test")
+    ledger.record_arena_override(strat_id, gate_type="demo_ready", reason="solid forward behavior")
+    block_id = ledger.register_custom_block(
+        name="test_block",
+        kind="entry",
+        code="def test_entry(): pass",
+    )
+    ledger.record_custom_block_approval(block_id, approver="owner")
     return ledger
 
 
@@ -658,3 +673,307 @@ def test_ledger_holdout_requests(ledger):
 
     spent = ledger.holdout_requests(status="spent")
     assert len(spent) == 0
+
+
+# Migration 4: Arena and Custom Blocks (Layer B/C W1)
+
+
+def test_migration_4_applies_cleanly(path):
+    old = sqlite3.connect(path)
+    old.executescript(
+        f"BEGIN;\n{MIGRATIONS[0]}\n{MIGRATIONS[1]}\n{MIGRATIONS[2]}\n"
+        f"PRAGMA user_version = 3;\nCOMMIT;"
+    )
+    # Seed v3 data: family, hypothesis, trial
+    old.execute(
+        "INSERT INTO families (id, idea, created_at) VALUES (1, 'V3 Family', '2026-01-01 00:00:00')"
+    )
+    old.execute(
+        "INSERT INTO hypotheses (id, family_id, spec_json, entry_block, symbol, "
+        "timeframe, created_at) "
+        "VALUES (1, 1, '{}', 'donchian_breakout', 'GOLD', 'M15', '2026-01-01 00:00:00')"
+    )
+    old.execute(
+        "INSERT INTO trials (id, hypothesis_id, verdict, cost_json, bars_count, "
+        "bars_first, bars_last, bars_sha256, result_json, rules_version, created_at) "
+        "VALUES (1, 1, 'CANDIDATE', "
+        '\'{"point": 0.01, "spread_floor_points": 50, "slippage_points": 1}\', '
+        "1000, 1704067200, 1704153600, 'sha', '{}', 3, '2026-01-01 00:00:00')"
+    )
+    old.commit()
+    old.close()
+
+    with Ledger(path) as ledger:
+        conn = sqlite3.connect(path)
+        (version,) = conn.execute("PRAGMA user_version").fetchone()
+        conn.close()
+        assert version == 4
+        assert len(ledger.list_arena_strategies()) == 0
+        assert len(ledger.list_custom_blocks()) == 0
+        fam = ledger.family(1)
+        assert fam.idea == "V3 Family"
+        hyp = ledger.hypothesis(1)
+        assert hyp.symbol == "GOLD"
+        trial = ledger.trial(1)
+        assert trial.verdict == "CANDIDATE"
+
+
+def test_arena_strategies_insert_and_status(ledger):
+    family = ledger.create_family("EURUSD breakout")
+    hypothesis = ledger.register_hypothesis(family, make_spec(symbol="EURUSD"))
+    record(ledger, hypothesis, verdict="CANDIDATE")
+
+    strat_id = ledger.insert_arena_strategy(hypothesis, twin_type="standard")
+    strat = ledger.arena_strategy(strat_id)
+    assert strat.id == strat_id
+    assert strat.hypothesis_id == hypothesis
+    assert strat.symbol == "EURUSD"
+    assert strat.timeframe == "M15"
+    assert strat.status == "active"
+    assert strat.twin_type == "standard"
+    assert strat.initial_balance == 10_000.0
+
+    # Pause
+    act1 = ledger.record_arena_action(strat_id, action="paused", reason="high spread")
+    assert act1 > 0
+    assert ledger.arena_strategy(strat_id).status == "paused"
+    assert len(ledger.list_arena_strategies(status="paused")) == 1
+    assert len(ledger.list_arena_strategies(status="active")) == 0
+
+    # Resume
+    ledger.record_arena_action(strat_id, action="resumed")
+    assert ledger.arena_strategy(strat_id).status == "active"
+
+    # Remove
+    ledger.record_arena_action(strat_id, action="removed", reason="alpha decayed")
+    assert ledger.arena_strategy(strat_id).status == "removed"
+    assert len(ledger.list_arena_strategies(status="removed")) == 1
+
+
+def test_arena_strategy_removed_is_terminal(ledger):
+    family = ledger.create_family("Terminal removal family")
+    hypothesis = ledger.register_hypothesis(family, make_spec(symbol="EURUSD"))
+    record(ledger, hypothesis, verdict="CANDIDATE")
+
+    strat_id = ledger.insert_arena_strategy(hypothesis)
+    assert ledger.arena_strategy(strat_id).status == "active"
+
+    # Remove
+    ledger.record_arena_action(strat_id, action="removed", reason="performance degraded")
+    assert ledger.arena_strategy(strat_id).status == "removed"
+
+    # Subsequent lifecycle actions are rejected with LedgerError
+    with pytest.raises(LedgerError, match="permanently removed"):
+        ledger.record_arena_action(strat_id, action="resumed")
+
+    with pytest.raises(LedgerError, match="permanently removed"):
+        ledger.record_arena_action(strat_id, action="paused")
+
+    with pytest.raises(LedgerError, match="permanently removed"):
+        ledger.record_arena_action(strat_id, action="removed")
+
+    # Audit / free-text events are still allowed
+    act_id = ledger.record_arena_action(strat_id, action="catch_up", reason="replayed bars")
+    assert act_id > 0
+    assert ledger.arena_strategy(strat_id).status == "removed"
+
+
+def test_arena_global_stop_and_resume(ledger):
+    family = ledger.create_family("Global stop family")
+    h1 = ledger.register_hypothesis(family, make_spec(mult=[1.5]))
+    record(ledger, h1, verdict="CANDIDATE")
+    h2 = ledger.register_hypothesis(family, make_spec(mult=[2.0]))
+    record(ledger, h2, verdict="CANDIDATE")
+
+    s1 = ledger.insert_arena_strategy(h1)
+    s2 = ledger.insert_arena_strategy(h2)
+
+    assert ledger.arena_stopped() is False
+    assert len(ledger.list_arena_strategies(status="active")) == 2
+
+    # Global emergency stop
+    stop_id = ledger.record_arena_action(
+        strategy_id=None, action="stopped", reason="emergency_stop"
+    )
+    assert stop_id > 0
+    assert ledger.arena_stopped() is True
+    assert ledger.arena_strategy(s1).status == "paused"
+    assert ledger.arena_strategy(s2).status == "paused"
+    assert len(ledger.list_arena_strategies(status="active")) == 0
+    assert len(ledger.list_arena_strategies(status="paused")) == 2
+
+    # Resume Arena
+    resume_id = ledger.record_arena_action(
+        strategy_id=None, action="arena_resumed", reason="cleared"
+    )
+    assert resume_id > 0
+    assert ledger.arena_stopped() is False
+    assert ledger.arena_strategy(s1).status == "active"
+    assert ledger.arena_strategy(s2).status == "active"
+    assert len(ledger.list_arena_strategies(status="active")) == 2
+
+
+def test_arena_strategy_ineligibility_rejected(ledger):
+    family = ledger.create_family("Ineligible family")
+    h_no_trial = ledger.register_hypothesis(family, make_spec(mult=[1.0]))
+
+    # (a) No trials -> rejected
+    with pytest.raises(LedgerError, match="not eligible for Arena"):
+        ledger.insert_arena_strategy(h_no_trial)
+
+    # (b) REJECT trial -> rejected
+    record(ledger, h_no_trial, verdict="REJECT", sharpes=[-0.5])
+    with pytest.raises(LedgerError, match="not eligible for Arena"):
+        ledger.insert_arena_strategy(h_no_trial)
+
+    # (c) CANDIDATE trial -> eligible
+    h_cand = ledger.register_hypothesis(family, make_spec(mult=[1.5]))
+    record(ledger, h_cand, verdict="CANDIDATE", sharpes=[1.5])
+    s_id = ledger.insert_arena_strategy(h_cand)
+    assert s_id > 0
+
+    # (d) PASS holdout spend -> eligible
+    h_pass = ledger.register_hypothesis(family, make_spec(mult=[2.0]))
+    record(ledger, h_pass, verdict="CANDIDATE", sharpes=[1.2])
+    ledger.extend_budget(family)
+    req = approved(ledger, h_pass)
+    ledger.record_holdout(req, "PASS", "{}")
+    s_pass_id = ledger.insert_arena_strategy(h_pass)
+    assert s_pass_id > 0
+
+
+def test_arena_strategies_validation(ledger):
+    family = ledger.create_family("Validation idea")
+    hypothesis = ledger.register_hypothesis(family, make_spec())
+    record(ledger, hypothesis, verdict="CANDIDATE")
+
+    with pytest.raises(ValueError, match="twin_type"):
+        ledger.insert_arena_strategy(hypothesis, twin_type="invalid_type")
+
+    with pytest.raises(ValueError, match="initial_balance"):
+        ledger.insert_arena_strategy(hypothesis, initial_balance=-100)
+
+    with pytest.raises(TypeError, match="bool"):
+        ledger.insert_arena_strategy(True)
+
+    with pytest.raises(TypeError, match="bool"):
+        ledger.arena_strategy(True)
+
+    with pytest.raises(TypeError, match="bool"):
+        ledger.record_arena_action(True, action="paused")
+
+    with pytest.raises(NotFound, match="no Arena strategy"):
+        ledger.arena_strategy(99999)
+
+    with pytest.raises(NotFound, match="no Arena strategy"):
+        ledger.record_arena_action(99999, action="paused")
+
+
+def test_arena_overrides_recording(ledger):
+    family = ledger.create_family("Override family")
+    hypothesis = ledger.register_hypothesis(family, make_spec())
+    record(ledger, hypothesis, verdict="CANDIDATE")
+    strat_id = ledger.insert_arena_strategy(hypothesis)
+
+    override_id = ledger.record_arena_override(
+        strat_id, gate_type="demo_ready", reason="verified out of sample"
+    )
+    assert override_id > 0
+
+    with pytest.raises(ValueError, match="non-empty reason"):
+        ledger.record_arena_override(strat_id, gate_type="demo_ready", reason="   ")
+
+    with pytest.raises(ValueError, match="Unknown gate_type"):
+        ledger.record_arena_override(strat_id, gate_type="unknown_gate", reason="valid reason")
+
+    with pytest.raises(NotFound, match="no Arena strategy"):
+        ledger.record_arena_override(99999, gate_type="demo_ready", reason="valid reason")
+
+    with pytest.raises(TypeError, match="bool"):
+        ledger.record_arena_override(True, gate_type="demo_ready", reason="valid reason")
+
+
+def test_custom_blocks_lifecycle(ledger):
+    code = "def custom_filter(bars): return bars['close'] > 100"
+    block_id = ledger.register_custom_block(
+        name="my_filter",
+        kind="filter",
+        code=code,
+    )
+    assert block_id > 0
+
+    # Duplicate registration raises ValueError
+    with pytest.raises(ValueError, match="already registered"):
+        ledger.register_custom_block(name="my_filter", kind="filter", code=code)
+
+    # Initial state is unapproved
+    state = ledger.read_custom_block_approval_state("my_filter")
+    assert state["approved"] is False
+    assert state["approved_at"] is None
+    assert state["approver"] is None
+    assert ledger.is_custom_block_approved("my_filter") is False
+
+    # Approve
+    app_id = ledger.record_custom_block_approval("my_filter", approver="owner")
+    assert app_id > 0
+
+    # Approval state updated
+    state2 = ledger.read_custom_block_approval_state(block_id)
+    assert state2["approved"] is True
+    assert state2["approved_at"] is not None
+    assert state2["approver"] == "owner"
+    assert ledger.is_custom_block_approved(block_id) is True
+
+    # Re-approval raises LedgerError
+    with pytest.raises(LedgerError, match="already approved"):
+        ledger.record_custom_block_approval(block_id, approver="owner")
+
+    # Fetch by name and id
+    b1 = ledger.get_custom_block("my_filter")
+    assert b1.id == block_id
+    assert b1.name == "my_filter"
+    assert b1.approved is True
+
+    b2 = ledger.get_custom_block(block_id)
+    assert b2.name == "my_filter"
+
+    with pytest.raises(NotFound, match="no custom block"):
+        ledger.get_custom_block("nonexistent")
+
+    # List custom blocks
+    all_blocks = ledger.list_custom_blocks()
+    assert len(all_blocks) >= 1
+    assert any(b.name == "my_filter" for b in all_blocks)
+
+
+def test_custom_block_code_verbatim_and_sha_validation(ledger):
+    raw_code = "  def my_custom_block():\n    return 42\n  \n"
+    expected_hash = hashlib.sha256(raw_code.encode("utf-8")).hexdigest()
+
+    # Mismatched sha256 raises ValueError
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        ledger.register_custom_block(
+            name="mismatched",
+            kind="entry",
+            code=raw_code,
+            sha256="0" * 64,
+        )
+
+    # Verbatim storage and computed hash
+    block_id = ledger.register_custom_block(
+        name="verbatim_block",
+        kind="entry",
+        code=raw_code,
+    )
+    b = ledger.get_custom_block(block_id)
+    assert b.code == raw_code
+    assert b.sha256 == expected_hash
+
+    # Matching sha256 is accepted
+    block_id2 = ledger.register_custom_block(
+        name="verbatim_block_2",
+        kind="filter",
+        code=raw_code,
+        sha256=expected_hash,
+    )
+    assert block_id2 > 0
