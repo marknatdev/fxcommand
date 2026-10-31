@@ -123,6 +123,10 @@ class ArenaStrategy:
         point: float | None = None,
         digits: int | None = None,
         risk_fraction: float | None = None,
+        cost_snapshot: Any | None = None,
+        swap_long: float | None = None,
+        swap_short: float | None = None,
+        triple_day: int = 3,
     ) -> None:
         self.id = strategy_id
         self.hypothesis_id = hypothesis_id
@@ -135,12 +139,38 @@ class ArenaStrategy:
         self.created_at = created_at
 
         prof = PROFILES.get(symbol)
-        self.point = point if point is not None else (prof.point if prof else 0.01)
-        self.digits = digits if digits is not None else (prof.digits if prof else 2)
-        self.spread_floor = (
-            spread_floor if spread_floor is not None else DEFAULT_SPREAD_FLOORS.get(symbol, 20.0)
-        )
-        self.slippage_points = 1.0
+        if cost_snapshot is not None:
+            self.point = point if point is not None else float(cost_snapshot.point)
+            self.digits = digits if digits is not None else (prof.digits if prof else 2)
+            self.spread_floor = (
+                spread_floor
+                if spread_floor is not None
+                else float(cost_snapshot.spread_floor_points)
+            )
+            self.slippage_points = float(getattr(cost_snapshot, "slippage_points", 1.0))
+            self.swap_long_points = (
+                swap_long if swap_long is not None else float(cost_snapshot.swap_long_points)
+            )
+            self.swap_short_points = (
+                swap_short if swap_short is not None else float(cost_snapshot.swap_short_points)
+            )
+            self.triple_day = int(getattr(cost_snapshot, "triple_swap_day", 3))
+        else:
+            self.point = point if point is not None else (prof.point if prof else 0.01)
+            self.digits = digits if digits is not None else (prof.digits if prof else 2)
+            self.spread_floor = (
+                spread_floor
+                if spread_floor is not None
+                else DEFAULT_SPREAD_FLOORS.get(symbol, 20.0)
+            )
+            self.slippage_points = 1.0
+            self.swap_long_points = (
+                swap_long if swap_long is not None else (-83.83 if symbol == "GOLD" else -5.0)
+            )
+            self.swap_short_points = (
+                swap_short if swap_short is not None else (20.64 if symbol == "GOLD" else 1.0)
+            )
+            self.triple_day = triple_day
 
         if risk_fraction is not None:
             self.risk_fraction = risk_fraction
@@ -163,14 +193,22 @@ class ArenaStrategy:
         self.pending_signal: dict[str, Any] | None = None
         self._next_trade_id: int = 1
 
-        self.swap_long_points: float = -83.83 if symbol == "GOLD" else -5.0
-        self.swap_short_points: float = 20.64 if symbol == "GOLD" else 1.0
-
     def step(self, bar: dict[str, Any], live_spread: float | None = None) -> ArenaStepResult:
         """Evaluate strategy on newly closed bar t and execute fills at bar t+1."""
         bar_time = int(bar.get("time", 0))
 
         if self.status == StrategyStatus.REMOVED:
+            return ArenaStepResult(
+                strategy_id=self.id,
+                bar_time=bar_time,
+                signals_evaluated=0,
+                trades_opened=0,
+                trades_closed=0,
+                backtest_net_r=self.account_backtest.net_r,
+                live_net_r=self.account_live.net_r,
+            )
+
+        if bar_time <= self.last_bar_time and self.last_bar_time > 0:
             return ArenaStepResult(
                 strategy_id=self.id,
                 bar_time=bar_time,
@@ -218,8 +256,14 @@ class ArenaStrategy:
                     dir_ = self.pending_signal["direction"]
                     stop_dist = self.pending_signal["stop_dist"]
                     target_dist = self.pending_signal["target_dist"]
+                    sig_spread = self.pending_signal.get("signal_spread")
+                    track_live_spread = (
+                        sig_spread
+                        if sig_spread is not None
+                        else (live_spread if live_spread is not None else bar_spread)
+                    )
 
-                    # Execute fill for both tracks
+                    # Execute fill for both tracks independently
                     for acct, track_kind in (
                         (self.account_backtest, FillTrackKind.BACKTEST_COST),
                         (self.account_live, FillTrackKind.LIVE_SPREAD),
@@ -232,7 +276,7 @@ class ArenaStrategy:
                                 point=self.point,
                                 spread_floor=self.spread_floor,
                                 bar_spread=bar_spread,
-                                live_spread=live_spread,
+                                live_spread=track_live_spread,
                                 slippage_points=self.slippage_points,
                             )
                             risk_amt = acct.equity * self.risk_fraction
@@ -327,7 +371,7 @@ class ArenaStrategy:
                         swap_nights(
                             np.array([pos.entry_time], dtype=np.int64),
                             np.array([bar_time], dtype=np.int64),
-                            triple_day=3,
+                            triple_day=self.triple_day,
                         )[0]
                     )
                     swap_rate = (
@@ -444,6 +488,7 @@ class ArenaStrategy:
                             else None
                         )
 
+                        sig_sp = live_spread if live_spread is not None else bar_spread
                         if is_long and not is_short and stop_d > 0:
                             self.pending_signal = {
                                 "direction": 1,
@@ -451,6 +496,7 @@ class ArenaStrategy:
                                 "target_dist": target_d,
                                 "trail_dist": trail_d,
                                 "signal_time": bar_time,
+                                "signal_spread": sig_sp,
                             }
                         elif is_short and not is_long and stop_d > 0:
                             self.pending_signal = {
@@ -459,34 +505,49 @@ class ArenaStrategy:
                                 "target_dist": target_d,
                                 "trail_dist": trail_d,
                                 "signal_time": bar_time,
+                                "signal_spread": sig_sp,
                             }
                         else:
                             self.pending_signal = None
                     else:
-                        # Position is open: update trailing stops and opposite signals at close
-                        pos = self.account_backtest.open_position
-                        if pos is not None and signals.trail_dist is not None:
-                            trail_d = float(signals.trail_dist[-1])
-                            if not np.isnan(trail_d):
-                                if pos.direction == 1:
-                                    level = close_ - trail_d
-                                    if pos.trail_price is None or level > pos.trail_price:
-                                        self._update_trail_price(level)
-                                else:
-                                    sp_price = max(bar_spread, self.spread_floor) * self.point
-                                    level = close_ + sp_price + trail_d
-                                    if pos.trail_price is None or level < pos.trail_price:
-                                        self._update_trail_price(level)
-
-                        if (
-                            signals.exit_long is not None
-                            and signals.exit_short is not None
-                            and (
-                                (pos.direction == 1 and bool(signals.exit_long[-1]))
-                                or (pos.direction == -1 and bool(signals.exit_short[-1]))
-                            )
+                        # Position is open: update trailing stops and opposite signals independently
+                        for acct, track_kind in (
+                            (self.account_backtest, FillTrackKind.BACKTEST_COST),
+                            (self.account_live, FillTrackKind.LIVE_SPREAD),
                         ):
-                            self._set_opposite_due()
+                            pos = acct.open_position
+                            if pos is not None:
+                                if signals.trail_dist is not None:
+                                    trail_d = float(signals.trail_dist[-1])
+                                    if not np.isnan(trail_d):
+                                        if pos.direction == 1:
+                                            level = close_ - trail_d
+                                            if pos.trail_price is None or level > pos.trail_price:
+                                                self._set_acct_trail(acct, level)
+                                        else:
+                                            sp_pts = (
+                                                max(bar_spread, self.spread_floor)
+                                                if track_kind == FillTrackKind.BACKTEST_COST
+                                                else (
+                                                    live_spread
+                                                    if live_spread is not None
+                                                    else bar_spread
+                                                )
+                                            )
+                                            sp_price = sp_pts * self.point
+                                            level = close_ + sp_price + trail_d
+                                            if pos.trail_price is None or level < pos.trail_price:
+                                                self._set_acct_trail(acct, level)
+
+                                if (
+                                    signals.exit_long is not None
+                                    and signals.exit_short is not None
+                                    and (
+                                        (pos.direction == 1 and bool(signals.exit_long[-1]))
+                                        or (pos.direction == -1 and bool(signals.exit_short[-1]))
+                                    )
+                                ):
+                                    self._set_acct_opposite(acct)
                 except Exception as e:
                     logger.debug("Signal compilation skipped: %s", e)
 
@@ -502,43 +563,49 @@ class ArenaStrategy:
             live_net_r=self.account_live.net_r,
         )
 
+    def _set_acct_trail(self, acct: PaperAccount, level: float) -> None:
+        if acct.open_position is not None:
+            p = acct.open_position
+            acct.open_position = Position(
+                symbol=p.symbol,
+                direction=p.direction,
+                entry_time=p.entry_time,
+                entry_price=p.entry_price,
+                size=p.size,
+                stop_price=p.stop_price,
+                target_price=p.target_price,
+                stop_distance=p.stop_distance,
+                trail_price=level,
+                entry_cost=p.entry_cost,
+                bars_held=p.bars_held,
+                opposite_due=p.opposite_due,
+            )
+
+    def _set_acct_opposite(self, acct: PaperAccount) -> None:
+        if acct.open_position is not None:
+            p = acct.open_position
+            acct.open_position = Position(
+                symbol=p.symbol,
+                direction=p.direction,
+                entry_time=p.entry_time,
+                entry_price=p.entry_price,
+                size=p.size,
+                stop_price=p.stop_price,
+                target_price=p.target_price,
+                stop_distance=p.stop_distance,
+                trail_price=p.trail_price,
+                entry_cost=p.entry_cost,
+                bars_held=p.bars_held,
+                opposite_due=True,
+            )
+
     def _update_trail_price(self, level: float) -> None:
         for acct in (self.account_backtest, self.account_live):
-            if acct.open_position is not None:
-                p = acct.open_position
-                acct.open_position = Position(
-                    symbol=p.symbol,
-                    direction=p.direction,
-                    entry_time=p.entry_time,
-                    entry_price=p.entry_price,
-                    size=p.size,
-                    stop_price=p.stop_price,
-                    target_price=p.target_price,
-                    stop_distance=p.stop_distance,
-                    trail_price=level,
-                    entry_cost=p.entry_cost,
-                    bars_held=p.bars_held,
-                    opposite_due=p.opposite_due,
-                )
+            self._set_acct_trail(acct, level)
 
     def _set_opposite_due(self) -> None:
         for acct in (self.account_backtest, self.account_live):
-            if acct.open_position is not None:
-                p = acct.open_position
-                acct.open_position = Position(
-                    symbol=p.symbol,
-                    direction=p.direction,
-                    entry_time=p.entry_time,
-                    entry_price=p.entry_price,
-                    size=p.size,
-                    stop_price=p.stop_price,
-                    target_price=p.target_price,
-                    stop_distance=p.stop_distance,
-                    trail_price=p.trail_price,
-                    entry_cost=p.entry_cost,
-                    bars_held=p.bars_held,
-                    opposite_due=True,
-                )
+            self._set_acct_opposite(acct)
 
     def _build_bars_object(self) -> Bars | None:
         if not self._bars_history:

@@ -32,6 +32,7 @@ from vibedesk.arena.strategy import check_fill_bar_time_filters
 from vibedesk.blocks.spec import StrategySpec, validate
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.cache import write_chunk
+from vibedesk.market.costs import CostMeasurement, record_cost
 from vibedesk.market.fake_mt5 import FakeMt5
 from vibedesk.market.synthetic import SyntheticBarSource
 from vibedesk.notify import NoticeKind, RecordingNotifier
@@ -383,6 +384,127 @@ def test_send_to_arena_eligibility_checks():
     assert enrolled.status == StrategyStatus.ACTIVE
     assert enrolled.account_backtest.balance == 10_000.0
     assert enrolled.account_live.balance == 10_000.0
+
+
+def test_send_to_arena_enforces_eligibility_even_with_explicit_spec():
+    spec = _make_spec()
+    mock_ledger = MagicMock()
+    # Only REJECT trials
+    reject_trial = MagicMock(verdict="REJECT", id=1, family_id=10)
+    mock_ledger.trials_for.return_value = [reject_trial]
+    mock_ledger.holdout_spend.return_value = None
+
+    runtime = ArenaRuntime(root=Path("."), ledger=mock_ledger)
+    with pytest.raises(ValueError, match="Only CANDIDATE or Holdout PASS"):
+        runtime.send_to_arena(hypothesis_id=5, spec=spec)
+
+
+def test_send_to_arena_holdout_pass_with_family_id():
+    spec = _make_spec()
+    mock_ledger = MagicMock()
+    # Trial verdict is REJECT, but holdout spend for family_id 42 is PASS
+    trial = MagicMock(verdict="REJECT", id=1, family_id=42)
+    mock_ledger.trials_for.return_value = [trial]
+    hyp_mock = MagicMock(
+        family_id=42,
+        spec_json=spec.model_dump_json(),
+        symbol="GOLD",
+        timeframe="H1",
+    )
+    mock_ledger.hypothesis.return_value = hyp_mock
+    mock_ledger.holdout_spend.side_effect = lambda fam: (
+        MagicMock(verdict="PASS") if fam == 42 else None
+    )
+    mock_ledger.insert_arena_strategy.return_value = 1
+
+    runtime = ArenaRuntime(root=Path("."), ledger=mock_ledger)
+    enrolled = runtime.send_to_arena(hypothesis_id=5)
+    assert enrolled.id == 1
+    mock_ledger.holdout_spend.assert_called_with(42)
+
+
+def test_paused_strategy_manages_open_position_to_stop():
+    spec = _make_spec()
+    runtime = ArenaRuntime(root=Path("."), ledger=None)
+    strat = ArenaStrategy(
+        strategy_id=1,
+        hypothesis_id=10,
+        spec=spec,
+        symbol="GOLD",
+        timeframe="H1",
+    )
+    runtime.register_strategy(strat)
+
+    # 1. Step bar to fill a long position: entry at 2000.0, stop at 1990.0
+    strat.pending_signal = {
+        "direction": 1,
+        "stop_dist": 10.0,
+        "target_dist": 20.0,
+        "trail_dist": None,
+    }
+    bar_fill = {"time": 1000, "open": 2000.0, "high": 2005.0, "low": 1998.0, "close": 2002.0}
+    strat.step(bar_fill)
+    assert strat.account_backtest.open_position is not None
+
+    # 2. Pause strategy
+    runtime.controls.pause_strategy(1, reason="owner pause")
+    assert strat.status == StrategyStatus.PAUSED
+
+    # 3. Bar dips to 1985.0 (breaches stop at 1990.0)
+    bar_stop = {"time": 2000, "open": 2000.0, "high": 2001.0, "low": 1985.0, "close": 1988.0}
+    res = runtime.process_closed_bar("GOLD", "H1", bar_stop)
+    assert len(res) == 1
+    assert res[0].trades_closed == 1
+    assert strat.account_backtest.open_position is None
+    assert len(strat.account_backtest.closed_trades) == 1
+    assert strat.account_backtest.closed_trades[0].exit_reason == "stop"
+
+
+def test_poll_closed_bars_deduplicates_and_subsequent_signals_fire(tmp_path: Path):
+    source = SyntheticBarSource(1, date(2026, 1, 1), date(2026, 12, 31))
+    now = datetime(2026, 1, 7, 12, 0, tzinfo=UTC)
+    fake_mt5 = FakeMt5(source, now=now)
+    assert fake_mt5.initialize()
+
+    spec = _make_spec()
+    runtime = ArenaRuntime(root=tmp_path, ledger=None, api=fake_mt5)
+    strat = ArenaStrategy(1, 10, spec, "GOLD", "H1")
+    runtime.register_strategy(strat)
+
+    # First poll steps closed bars
+    res1 = runtime.poll_closed_bars(root=tmp_path, api=fake_mt5, clock=lambda: now)
+    assert len(res1) > 0
+    history_len = len(strat._bars_history)
+    last_time = strat.last_bar_time
+    assert last_time > 0
+
+    # Second poll with identical clock time no-ops (deduplicates, no re-stepping)
+    runtime.poll_closed_bars(root=tmp_path, api=fake_mt5, clock=lambda: now)
+    assert len(strat._bars_history) == history_len
+    assert strat.last_bar_time == last_time
+
+
+def test_arena_strategy_loads_measured_costs(tmp_path: Path):
+    meas = CostMeasurement(
+        symbol="GOLD",
+        measured_at="2026-10-25T00:00:00Z",
+        point=0.01,
+        spread_floor_points=65.0,
+        spread_p90_points=70.0,
+        ticks=1000,
+        swap_long_points=-92.0,
+        swap_short_points=25.0,
+        triple_swap_day=4,
+    )
+    record_cost(tmp_path, meas)
+
+    spec = _make_spec()
+    runtime = ArenaRuntime(root=tmp_path, ledger=None)
+    strat = runtime.send_to_arena(hypothesis_id=1, spec=spec, symbol="GOLD", timeframe="H1")
+
+    assert strat.spread_floor == 65.0
+    assert strat.swap_long_points == -92.0
+    assert strat.triple_day == 4
 
 
 # --- Scheduler 10s Poll and 07:00 Brief Tests ---

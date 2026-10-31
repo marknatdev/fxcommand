@@ -85,6 +85,11 @@ class Scheduler:
         """Register Forward Arena poll and Night Shift brief (spec §2.1, §6.2, CCC-66)."""
         if arena_runtime is not None:
             self.arena_runtime = arena_runtime
+        if self.arena_runtime is not None and hasattr(self.arena_runtime, "check_and_recover_gaps"):
+            try:
+                self.arena_runtime.check_and_recover_gaps()
+            except Exception as e:
+                logger.warning("Arena gap recovery on startup failed: %s", e)
         now = self._clock()
         if "arena_closed_bar_poll" not in self._jobs:
             job = JobInfo(
