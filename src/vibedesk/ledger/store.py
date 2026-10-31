@@ -161,6 +161,62 @@ MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE holdout_requests ADD COLUMN trial_id INTEGER REFERENCES trials (id);
     """,
+    # 4: Layer B & C tables: Forward Arena and custom Blocks (spec §2, §8; ADRs 0010, 0012).
+    f"""
+    CREATE TABLE arena_strategies (
+        id INTEGER PRIMARY KEY,
+        hypothesis_id INTEGER NOT NULL REFERENCES hypotheses (id),
+        symbol TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'removed')),
+        twin_type TEXT NOT NULL DEFAULT 'standard'
+            CHECK (twin_type IN ('standard', 'regime_gated')),
+        initial_balance REAL NOT NULL DEFAULT 10000.0 CHECK (initial_balance > 0),
+        created_at TEXT NOT NULL DEFAULT ({_NOW})
+    );
+    CREATE INDEX arena_strategies_by_hypothesis ON arena_strategies (hypothesis_id);
+
+    CREATE TABLE arena_actions (
+        id INTEGER PRIMARY KEY,
+        strategy_id INTEGER REFERENCES arena_strategies (id),
+        action TEXT NOT NULL CHECK (length(trim(action)) > 0),
+        reason TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT ({_NOW})
+    );
+    CREATE INDEX arena_actions_by_strategy ON arena_actions (strategy_id);
+
+    CREATE TABLE arena_overrides (
+        id INTEGER PRIMARY KEY,
+        strategy_id INTEGER NOT NULL REFERENCES arena_strategies (id),
+        gate_type TEXT NOT NULL CHECK (gate_type IN ('demo_ready', 'live_gate')),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+        created_at TEXT NOT NULL DEFAULT ({_NOW})
+    );
+    CREATE INDEX arena_overrides_by_strategy ON arena_overrides (strategy_id);
+
+    CREATE TABLE custom_blocks (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
+        kind TEXT NOT NULL CHECK (length(trim(kind)) > 0),
+        code TEXT NOT NULL CHECK (length(trim(code)) > 0),
+        sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+        created_at TEXT NOT NULL DEFAULT ({_NOW})
+    );
+
+    CREATE TABLE custom_block_approvals (
+        id INTEGER PRIMARY KEY,
+        block_id INTEGER NOT NULL UNIQUE REFERENCES custom_blocks (id),
+        approver TEXT NOT NULL CHECK (length(trim(approver)) > 0),
+        created_at TEXT NOT NULL DEFAULT ({_NOW})
+    );
+    """
+    + _append_only(
+        "arena_strategies",
+        "arena_actions",
+        "arena_overrides",
+        "custom_blocks",
+        "custom_block_approvals",
+    ),
 )
 
 
@@ -291,6 +347,61 @@ class HoldoutSpend:
     verdict: str
     result_json: str
     created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ArenaStrategyRecord:
+    id: int
+    hypothesis_id: int
+    symbol: str
+    timeframe: str
+    status: str
+    twin_type: str
+    initial_balance: float
+    created_at: str
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+
+@dataclass(frozen=True, slots=True)
+class ArenaActionRecord:
+    id: int
+    strategy_id: int | None
+    action: str
+    reason: str
+    created_at: str
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+
+@dataclass(frozen=True, slots=True)
+class ArenaOverrideRecord:
+    id: int
+    strategy_id: int
+    gate_type: str
+    reason: str
+    created_at: str
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+
+@dataclass(frozen=True, slots=True)
+class CustomBlockRecord:
+    id: int
+    name: str
+    kind: str
+    code: str
+    sha256: str
+    approved: bool
+    approved_at: str | None
+    approver: str | None
+    created_at: str
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
 
 
 class Ledger:
@@ -682,6 +793,329 @@ class Ledger:
                 "SELECT * FROM holdout_spends WHERE family_id = ?", (family_id,)
             ).fetchone()
             return None if row is None else HoldoutSpend(**row)
+
+    # Forward Arena (Layer B, CCC-66, CCC-67, CCC-69)
+
+    def insert_arena_strategy(
+        self,
+        hypothesis_id: int | Any,
+        symbol: str | None = None,
+        timeframe: str | None = None,
+        twin_type: str = "standard",
+        initial_balance: float = 10_000.0,
+    ) -> int:
+        """Enroll a Hypothesis as an ArenaStrategy in the Forward Arena."""
+        hyp_id = int(hypothesis_id.id) if hasattr(hypothesis_id, "id") else int(hypothesis_id)
+        if twin_type not in ("standard", "regime_gated"):
+            raise ValueError(f"twin_type must be 'standard' or 'regime_gated', got {twin_type!r}")
+        if initial_balance <= 0:
+            raise ValueError("initial_balance must be positive")
+        with self._write() as db:
+            hyp = self._hypothesis_row(db, hyp_id)
+            strat_symbol = symbol if symbol is not None else hyp["symbol"]
+            strat_tf = timeframe if timeframe is not None else hyp["timeframe"]
+            return db.execute(
+                "INSERT INTO arena_strategies "
+                "(hypothesis_id, symbol, timeframe, status, twin_type, initial_balance)"
+                " VALUES (?, ?, ?, 'active', ?, ?)",
+                (hyp_id, strat_symbol, strat_tf, twin_type, initial_balance),
+            ).lastrowid
+
+    def arena_strategy(self, strategy_id: int) -> ArenaStrategyRecord:
+        """Get an enrolled ArenaStrategy by id with its current status."""
+        with self._lock:
+            row = self._db.execute(
+                """
+                SELECT 
+                    s.id,
+                    s.hypothesis_id,
+                    s.symbol,
+                    s.timeframe,
+                    COALESCE(
+                        (SELECT CASE 
+                            WHEN a.action = 'resumed' THEN 'active'
+                            WHEN a.action IN ('paused', 'removed') THEN a.action
+                            ELSE s.status
+                         END
+                         FROM arena_actions a 
+                         WHERE a.strategy_id = s.id AND a.action IN ('paused', 'resumed', 'removed')
+                         ORDER BY a.id DESC LIMIT 1),
+                        s.status
+                    ) AS status,
+                    s.twin_type,
+                    s.initial_balance,
+                    s.created_at
+                FROM arena_strategies s
+                WHERE s.id = ?
+                """,
+                (strategy_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"no Arena strategy {strategy_id}")
+            return ArenaStrategyRecord(**row)
+
+    def list_arena_strategies(self, status: str | None = None) -> list[ArenaStrategyRecord]:
+        """List all enrolled Arena strategies, optionally filtered by current status."""
+        query = """
+            SELECT 
+                s.id,
+                s.hypothesis_id,
+                s.symbol,
+                s.timeframe,
+                COALESCE(
+                    (SELECT CASE 
+                        WHEN a.action = 'resumed' THEN 'active'
+                        WHEN a.action IN ('paused', 'removed') THEN a.action
+                        ELSE s.status
+                     END
+                     FROM arena_actions a 
+                     WHERE a.strategy_id = s.id AND a.action IN ('paused', 'resumed', 'removed')
+                     ORDER BY a.id DESC LIMIT 1),
+                    s.status
+                ) AS status,
+                s.twin_type,
+                s.initial_balance,
+                s.created_at
+            FROM arena_strategies s
+        """
+        params: list[Any] = []
+        if status is not None:
+            query = f"SELECT * FROM ({query}) WHERE status = ? ORDER BY id ASC"
+            params.append(status.lower())
+        else:
+            query = f"{query} ORDER BY s.id ASC"
+
+        with self._lock:
+            rows = self._db.execute(query, params).fetchall()
+            return [ArenaStrategyRecord(**row) for row in rows]
+
+    def append_arena_action(
+        self,
+        strategy_id: int | None,
+        action: str,
+        reason: str = "",
+    ) -> int:
+        """Append an audit action for an Arena strategy or global Arena control."""
+        if not action or not action.strip():
+            raise ValueError("action must be a non-empty string")
+        with self._write() as db:
+            if strategy_id is not None:
+                row = db.execute(
+                    "SELECT 1 FROM arena_strategies WHERE id = ?", (strategy_id,)
+                ).fetchone()
+                if row is None:
+                    raise NotFound(f"no Arena strategy {strategy_id}")
+            return db.execute(
+                "INSERT INTO arena_actions (strategy_id, action, reason) VALUES (?, ?, ?)",
+                (strategy_id, action.strip(), reason.strip()),
+            ).lastrowid
+
+    record_arena_action = append_arena_action
+
+    def record_arena_override(
+        self,
+        strategy_id: int,
+        gate_type: str,
+        reason: str,
+    ) -> int:
+        """Record an owner override for Demo-Ready or Live Gate in the Ledger (ADR 0010)."""
+        clean_reason = reason.strip()
+        if not clean_reason:
+            raise ValueError("A non-empty reason is required for owner overrides")
+        if gate_type not in ("demo_ready", "live_gate"):
+            raise ValueError(f"Unknown gate_type: {gate_type}")
+        with self._write() as db:
+            row = db.execute(
+                "SELECT 1 FROM arena_strategies WHERE id = ?", (strategy_id,)
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"no Arena strategy {strategy_id}")
+            return db.execute(
+                "INSERT INTO arena_overrides (strategy_id, gate_type, reason) VALUES (?, ?, ?)",
+                (strategy_id, gate_type, clean_reason),
+            ).lastrowid
+
+    record_override = record_arena_override
+
+    # Custom Blocks (Layer C, CCC-77, ADR 0012)
+
+    def register_custom_block(
+        self,
+        name: str,
+        kind: str,
+        code: str,
+        sha256: str | None = None,
+    ) -> int:
+        """Register an AI-authored custom block; returns the block id."""
+        clean_name = name.strip()
+        clean_kind = kind.strip()
+        clean_code = code.strip()
+        if not clean_name:
+            raise ValueError("custom block name must not be empty")
+        if not clean_kind:
+            raise ValueError("custom block kind must not be empty")
+        if not clean_code:
+            raise ValueError("custom block code must not be empty")
+        digest = sha256 or hashlib.sha256(clean_code.encode("utf-8")).hexdigest()
+        if len(digest) != 64:
+            raise ValueError("sha256 must be a 64-character hex string")
+
+        with self._write() as db:
+            existing = db.execute(
+                "SELECT 1 FROM custom_blocks WHERE name = ?", (clean_name,)
+            ).fetchone()
+            if existing is not None:
+                raise ValueError(f"Custom block {clean_name!r} is already registered")
+            return db.execute(
+                "INSERT INTO custom_blocks (name, kind, code, sha256) VALUES (?, ?, ?, ?)",
+                (clean_name, clean_kind, clean_code, digest),
+            ).lastrowid
+
+    def record_custom_block_approval(
+        self,
+        block_id_or_name: int | str,
+        approver: str = "owner",
+    ) -> int:
+        """Record owner approval of a custom block (ADR 0012)."""
+        clean_approver = approver.strip()
+        if not clean_approver:
+            raise ValueError("approver must not be empty")
+        with self._write() as db:
+            if isinstance(block_id_or_name, int):
+                row = db.execute(
+                    "SELECT id FROM custom_blocks WHERE id = ?", (block_id_or_name,)
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT id FROM custom_blocks WHERE name = ?", (str(block_id_or_name).strip(),)
+                ).fetchone()
+            if row is None:
+                raise NotFound(f"no custom block {block_id_or_name!r}")
+            block_id = int(row[0])
+            already = db.execute(
+                "SELECT 1 FROM custom_block_approvals WHERE block_id = ?", (block_id,)
+            ).fetchone()
+            if already is not None:
+                raise LedgerError(f"custom block {block_id_or_name!r} is already approved")
+            return db.execute(
+                "INSERT INTO custom_block_approvals (block_id, approver) VALUES (?, ?)",
+                (block_id, clean_approver),
+            ).lastrowid
+
+    record_approval = record_custom_block_approval
+
+    def read_custom_block_approval_state(
+        self,
+        block_id_or_name: int | str,
+    ) -> dict[str, Any]:
+        """Read the approval state of a custom block."""
+        with self._lock:
+            if isinstance(block_id_or_name, int):
+                sql = """
+                    SELECT b.id, b.name, b.kind, b.sha256,
+                           a.id IS NOT NULL AS approved,
+                           a.created_at AS approved_at,
+                           a.approver
+                    FROM custom_blocks b
+                    LEFT JOIN custom_block_approvals a ON a.block_id = b.id
+                    WHERE b.id = ?
+                """
+                param = (block_id_or_name,)
+            else:
+                sql = """
+                    SELECT b.id, b.name, b.kind, b.sha256,
+                           a.id IS NOT NULL AS approved,
+                           a.created_at AS approved_at,
+                           a.approver
+                    FROM custom_blocks b
+                    LEFT JOIN custom_block_approvals a ON a.block_id = b.id
+                    WHERE b.name = ?
+                """
+                param = (str(block_id_or_name).strip(),)
+            row = self._db.execute(sql, param).fetchone()
+            if row is None:
+                raise NotFound(f"no custom block {block_id_or_name!r}")
+            return {
+                "block_id": row["id"],
+                "name": row["name"],
+                "kind": row["kind"],
+                "sha256": row["sha256"],
+                "approved": bool(row["approved"]),
+                "approved_at": row["approved_at"],
+                "approver": row["approver"],
+            }
+
+    get_custom_block_approval_state = read_custom_block_approval_state
+
+    def is_custom_block_approved(self, block_id_or_name: int | str) -> bool:
+        """Check if a custom block is approved."""
+        return self.read_custom_block_approval_state(block_id_or_name)["approved"]
+
+    def get_custom_block(self, block_id_or_name: int | str) -> CustomBlockRecord | None:
+        """Fetch a custom block record by id or name, or None if not found."""
+        with self._lock:
+            col = "b.id" if isinstance(block_id_or_name, int) else "b.name"
+            val = (
+                block_id_or_name
+                if isinstance(block_id_or_name, int)
+                else str(block_id_or_name).strip()
+            )
+            row = self._db.execute(
+                f"""
+                SELECT b.id, b.name, b.kind, b.code, b.sha256,
+                       a.id IS NOT NULL AS approved,
+                       a.created_at AS approved_at,
+                       a.approver,
+                       b.created_at
+                FROM custom_blocks b
+                LEFT JOIN custom_block_approvals a ON a.block_id = b.id
+                WHERE {col} = ?
+                """,
+                (val,),
+            ).fetchone()
+            if row is None:
+                return None
+            return CustomBlockRecord(
+                id=row["id"],
+                name=row["name"],
+                kind=row["kind"],
+                code=row["code"],
+                sha256=row["sha256"],
+                approved=bool(row["approved"]),
+                approved_at=row["approved_at"],
+                approver=row["approver"],
+                created_at=row["created_at"],
+            )
+
+    def list_custom_blocks(self) -> list[CustomBlockRecord]:
+        """List all registered custom blocks with their approval status."""
+        with self._lock:
+            rows = self._db.execute(
+                """
+                SELECT b.id, b.name, b.kind, b.code, b.sha256,
+                       a.id IS NOT NULL AS approved,
+                       a.created_at AS approved_at,
+                       a.approver,
+                       b.created_at
+                FROM custom_blocks b
+                LEFT JOIN custom_block_approvals a ON a.block_id = b.id
+                ORDER BY b.id ASC
+                """
+            ).fetchall()
+            return [
+                CustomBlockRecord(
+                    id=row["id"],
+                    name=row["name"],
+                    kind=row["kind"],
+                    code=row["code"],
+                    sha256=row["sha256"],
+                    approved=bool(row["approved"]),
+                    approved_at=row["approved_at"],
+                    approver=row["approver"],
+                    created_at=row["created_at"],
+                )
+                for row in rows
+            ]
 
     # Internals
 
