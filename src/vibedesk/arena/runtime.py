@@ -49,8 +49,11 @@ class ArenaRuntime:
             s.status = StrategyStatus.PAUSED
 
     def resume(self) -> None:
-        """Resume runtime execution."""
+        """Resume runtime execution and reactivate non-removed strategies."""
         self._stopped = False
+        for s in self.strategies.values():
+            if s.status != StrategyStatus.REMOVED:
+                s.status = StrategyStatus.ACTIVE
 
     def send_to_arena(
         self,
@@ -73,13 +76,10 @@ class ArenaRuntime:
             has_pass = False
             for t in trials:
                 if hasattr(self.ledger, "holdout_spend"):
-                    try:
-                        sp = self.ledger.holdout_spend(t.id)
-                        if sp and getattr(sp, "verdict", None) == "PASS":
-                            has_pass = True
-                            break
-                    except Exception:
-                        pass
+                    sp = self.ledger.holdout_spend(t.id)
+                    if sp and getattr(sp, "verdict", None) == "PASS":
+                        has_pass = True
+                        break
             if not (has_candidate or has_pass) and strategy_spec is None:
                 raise ValueError(
                     "Only CANDIDATE or Holdout PASS Hypotheses may enter the Forward Arena"
@@ -103,7 +103,19 @@ class ArenaRuntime:
         if strat_tf is None:
             strat_tf = getattr(strategy_spec, "timeframe", "H1")
 
-        strat_id = len(self.strategies) + 1
+        if self.ledger is not None and hasattr(self.ledger, "insert_arena_strategy"):
+            strat_id = int(
+                self.ledger.insert_arena_strategy(
+                    hypothesis_id=hypothesis_id,
+                    symbol=strat_symbol,
+                    timeframe=strat_tf,
+                    twin_type=twin_type,
+                    initial_balance=initial_balance,
+                )
+            )
+        else:
+            strat_id = len(self.strategies) + 1
+
         strategy = ArenaStrategy(
             strategy_id=strat_id,
             hypothesis_id=hypothesis_id,
@@ -123,6 +135,12 @@ class ArenaRuntime:
         )
         return strategy
 
+    def is_stopped(self) -> bool:
+        """Check if Arena execution is globally stopped."""
+        if self.ledger is not None and hasattr(self.ledger, "arena_stopped"):
+            return bool(self.ledger.arena_stopped())
+        return self._stopped
+
     def process_closed_bar(
         self,
         symbol: str,
@@ -131,7 +149,7 @@ class ArenaRuntime:
         live_spread: float | None = None,
     ) -> list[ArenaStepResult]:
         """Step all active strategies matching symbol and timeframe."""
-        if self._stopped:
+        if self.is_stopped():
             return []
 
         results: list[ArenaStepResult] = []
