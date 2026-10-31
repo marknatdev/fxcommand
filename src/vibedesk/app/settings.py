@@ -28,6 +28,8 @@ REPO = Path(__file__).resolve().parents[3]
 DATA = REPO / "data"
 DEFAULT_LLM_URL = "http://127.0.0.1:20128/v1"  # OmniRoute, through the SSH tunnel
 DEFAULT_DAILY_TOKEN_CAP = 100_000
+DEFAULT_NIGHTSHIFT_TRIAL_CAP = 20
+DEFAULT_NIGHTSHIFT_TOKEN_SHARE = 0.50
 
 
 @dataclass
@@ -38,6 +40,8 @@ class Settings:
     daily_token_cap: int = DEFAULT_DAILY_TOKEN_CAP
     telegram_enabled: bool = False
     telegram_chat_id: str = ""
+    nightshift_trial_cap: int = DEFAULT_NIGHTSHIFT_TRIAL_CAP
+    nightshift_token_share: float = DEFAULT_NIGHTSHIFT_TOKEN_SHARE
 
     def public(self) -> dict:
         """What the page may see: never the key or secrets themselves."""
@@ -48,6 +52,8 @@ class Settings:
             "daily_token_cap": self.daily_token_cap,
             "telegram_enabled": self.telegram_enabled,
             "telegram_chat_id_set": bool(self.telegram_chat_id),
+            "nightshift_trial_cap": self.nightshift_trial_cap,
+            "nightshift_token_share": self.nightshift_token_share,
         }
 
 
@@ -55,6 +61,16 @@ def load(root: Path = DATA, env: dict[str, str] | None = None) -> Settings:
     active_env = {**_dotenv(REPO / ".env"), **os.environ} if env is None else env
     token_cap_str = active_env.get("VIBEDESK_DAILY_TOKEN_CAP", "")
     daily_token_cap = int(token_cap_str) if token_cap_str.isdigit() else DEFAULT_DAILY_TOKEN_CAP
+
+    ns_cap_str = active_env.get("VIBEDESK_NIGHTSHIFT_TRIAL_CAP", "")
+    ns_cap = int(ns_cap_str) if ns_cap_str.isdigit() else DEFAULT_NIGHTSHIFT_TRIAL_CAP
+
+    ns_share_str = active_env.get("VIBEDESK_NIGHTSHIFT_TOKEN_SHARE", "")
+    try:
+        ns_share = float(ns_share_str) if ns_share_str else DEFAULT_NIGHTSHIFT_TOKEN_SHARE
+    except ValueError:
+        ns_share = DEFAULT_NIGHTSHIFT_TOKEN_SHARE
+
     telegram_enabled = active_env.get("VIBEDESK_TELEGRAM_ENABLED", "").lower() in (
         "1",
         "true",
@@ -68,6 +84,8 @@ def load(root: Path = DATA, env: dict[str, str] | None = None) -> Settings:
         daily_token_cap=daily_token_cap,
         telegram_enabled=telegram_enabled,
         telegram_chat_id=active_env.get("VIBEDESK_TELEGRAM_CHAT_ID", ""),
+        nightshift_trial_cap=ns_cap,
+        nightshift_token_share=ns_share,
     )
     saved = root / "settings.json"
     if saved.exists():
@@ -80,7 +98,7 @@ def load(root: Path = DATA, env: dict[str, str] | None = None) -> Settings:
             elif isinstance(value, bool):
                 # Enabled if either environment or settings.json enables it
                 setattr(settings, name, getattr(settings, name) or value)
-            elif isinstance(value, int):
+            elif isinstance(value, (int, float)):
                 setattr(settings, name, value)
     return settings
 

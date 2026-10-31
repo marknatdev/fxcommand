@@ -273,10 +273,9 @@ class Scheduler:
                 if scheduled_time.tzinfo is not None
                 else scheduled_time.replace(tzinfo=BANGKOK_TZ)
             )
+            until_utc = scheduled_bkk.astimezone(UTC)
         else:
-            scheduled_bkk = now_bkk.replace(hour=21, minute=0, second=0, microsecond=0)
-
-        until_utc = scheduled_bkk.astimezone(UTC)
+            until_utc = now_bkk.astimezone(UTC)
 
         from vibedesk.notify import compile_daily_digest
 

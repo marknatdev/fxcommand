@@ -191,6 +191,8 @@ def test_settings_never_send_the_key_back(client, tmp_path):
         daily_token_cap=100_000,
         telegram_enabled=False,
         telegram_chat_id_set=False,
+        nightshift_trial_cap=20,
+        nightshift_token_share=0.5,
     )
     assert saved.json() == exp
     assert "sk-secret-123" not in client.get("/api/status").text

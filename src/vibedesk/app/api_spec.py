@@ -140,6 +140,8 @@ class PublicSettingsOut(BaseModel):
     daily_token_cap: int
     telegram_enabled: bool
     telegram_chat_id_set: bool
+    nightshift_trial_cap: int = 20
+    nightshift_token_share: float = 0.50
 
 
 class UpdateSettingsIn(BaseModel):
@@ -149,6 +151,66 @@ class UpdateSettingsIn(BaseModel):
     daily_token_cap: int | None = None
     telegram_enabled: bool | None = None
     telegram_chat_id: str | None = None
+    nightshift_trial_cap: int | None = None
+    nightshift_token_share: float | None = None
+
+
+# --- Layer B & C Schemas ---
+
+
+class ArenaStrategyIn(BaseModel):
+    hypothesis_id: int
+
+
+class ArenaStrategyOut(BaseModel):
+    id: int
+    hypothesis_id: int
+    symbol: str
+    timeframe: str
+    status: str
+    twin_type: str
+    created_at: str
+
+
+class ArenaOverrideIn(BaseModel):
+    gate_type: Literal["demo_ready", "live_gate"] = "demo_ready"
+    reason: str = Field(..., min_length=1)
+
+
+class LeaderboardOut(BaseModel):
+    entries: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class FillReportOut(BaseModel):
+    fills: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class NightShiftStatusOut(BaseModel):
+    status: str
+    trials_run: int = 0
+    tokens_used: int = 0
+    candidates_found: int = 0
+    stopped_reason: str = ""
+    last_run: str = ""
+
+
+class RegimeStatusOut(BaseModel):
+    evaluated_at: str
+    decisions: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CustomBlockIn(BaseModel):
+    name: str = Field(..., min_length=1)
+    kind: str = Field(..., min_length=1)
+    code: str = Field(..., min_length=1)
+
+
+class CustomBlockOut(BaseModel):
+    name: str
+    kind: str
+    approved: bool
+    approved_at: str | None = None
+    sha256: str
 
 
 class HealthOut(BaseModel):
@@ -309,6 +371,159 @@ ENDPOINT_TABLE: list[dict[str, Any]] = [
     },
 ]
 
+# --- Layer B & C Endpoint Table (docs/spec/layer-b-c.md) ---
+
+LAYER_BC_ENDPOINT_TABLE: list[dict[str, Any]] = [
+    # Layer B: Arena & Leaderboard
+    {
+        "area": "Arena",
+        "method": "GET",
+        "path": "/api/arena/strategies",
+        "owner_only": False,
+        "request": None,
+        "response": "list[ArenaStrategyOut]",
+        "description": "List all enrolled Forward Arena strategies.",
+    },
+    {
+        "area": "Arena",
+        "method": "POST",
+        "path": "/api/arena/strategies",
+        "owner_only": True,
+        "request": "ArenaStrategyIn",
+        "response": "ArenaStrategyOut",
+        "description": "Enroll a CANDIDATE strategy into the Forward Arena (owner-only).",
+    },
+    {
+        "area": "Arena",
+        "method": "POST",
+        "path": "/api/arena/strategies/{id}/pause",
+        "owner_only": True,
+        "request": None,
+        "response": "dict[str, Any]",
+        "description": "Pause an Arena strategy (owner-only).",
+    },
+    {
+        "area": "Arena",
+        "method": "POST",
+        "path": "/api/arena/strategies/{id}/resume",
+        "owner_only": True,
+        "request": None,
+        "response": "dict[str, Any]",
+        "description": "Resume an Arena strategy (owner-only).",
+    },
+    {
+        "area": "Arena",
+        "method": "DELETE",
+        "path": "/api/arena/strategies/{id}",
+        "owner_only": True,
+        "request": None,
+        "response": "dict[str, Any]",
+        "description": "Remove an Arena strategy (owner-only).",
+    },
+    {
+        "area": "Arena",
+        "method": "POST",
+        "path": "/api/arena/stop",
+        "owner_only": True,
+        "request": None,
+        "response": "dict[str, Any]",
+        "description": "Emergency global stop for Forward Arena (owner-only).",
+    },
+    {
+        "area": "Arena",
+        "method": "GET",
+        "path": "/api/arena/leaderboard",
+        "owner_only": False,
+        "request": None,
+        "response": "LeaderboardOut",
+        "description": "Get Forward Arena leaderboard ranked by net R.",
+    },
+    {
+        "area": "Arena",
+        "method": "POST",
+        "path": "/api/arena/strategies/{id}/override",
+        "owner_only": True,
+        "request": "ArenaOverrideIn",
+        "response": "dict[str, Any]",
+        "description": "Mark strategy Demo-Ready anyway via audited owner override (owner-only).",
+    },
+    {
+        "area": "Arena",
+        "method": "GET",
+        "path": "/api/arena/fills/report",
+        "owner_only": False,
+        "request": None,
+        "response": "FillReportOut",
+        "description": "Compare backtest-cost track against live-spread track.",
+    },
+    {
+        "area": "Arena",
+        "method": "GET",
+        "path": "/api/arena/uptime",
+        "owner_only": False,
+        "request": None,
+        "response": "dict[str, Any]",
+        "description": "Get host uptime, bar gap history and health status.",
+    },
+    # Layer C: Night Shift, Regime Desk & Custom Blocks
+    {
+        "area": "NightShift",
+        "method": "GET",
+        "path": "/api/nightshift/status",
+        "owner_only": False,
+        "request": None,
+        "response": "NightShiftStatusOut",
+        "description": "Get status and results of recent Night Shift runs.",
+    },
+    {
+        "area": "NightShift",
+        "method": "POST",
+        "path": "/api/nightshift/run",
+        "owner_only": True,
+        "request": None,
+        "response": "NightShiftStatusOut",
+        "description": "Manually trigger Night Shift exploration loop (owner-only).",
+    },
+    {
+        "area": "Regime",
+        "method": "GET",
+        "path": "/api/regime/status",
+        "owner_only": False,
+        "request": None,
+        "response": "RegimeStatusOut",
+        "description": "Get daily market features and regime ON/OFF decisions for strategy twins.",
+    },
+    {
+        "area": "CustomBlocks",
+        "method": "GET",
+        "path": "/api/blocks/custom",
+        "owner_only": False,
+        "request": None,
+        "response": "list[CustomBlockOut]",
+        "description": "List AI-authored custom blocks and approval states.",
+    },
+    {
+        "area": "CustomBlocks",
+        "method": "POST",
+        "path": "/api/blocks/custom",
+        "owner_only": False,
+        "request": "CustomBlockIn",
+        "response": "CustomBlockOut",
+        "description": "Submit a proposed custom block for validation.",
+    },
+    {
+        "area": "CustomBlocks",
+        "method": "POST",
+        "path": "/api/blocks/custom/{name}/approve",
+        "owner_only": True,
+        "request": None,
+        "response": "CustomBlockOut",
+        "description": "Approve a custom block for use in Trials (owner-only).",
+    },
+]
+
+
+ALL_ENDPOINT_TABLE: list[dict[str, Any]] = ENDPOINT_TABLE + LAYER_BC_ENDPOINT_TABLE
 
 # --- MCP Tool Map (spec §8.2) ---
 
@@ -331,7 +546,9 @@ MCP_TOOL_MAP: dict[str, dict[str, str]] = {
 
 
 __all__ = [
+    "ALL_ENDPOINT_TABLE",
     "ENDPOINT_TABLE",
+    "LAYER_BC_ENDPOINT_TABLE",
     "MCP_TOOL_MAP",
     "BlockLibraryOut",
     "BlockOut",
@@ -350,6 +567,15 @@ __all__ = [
     "HypothesisDetailOut",
     "PublicSettingsOut",
     "RunTrialIn",
+    "ArenaOverrideIn",
+    "ArenaStrategyIn",
+    "ArenaStrategyOut",
+    "CustomBlockIn",
+    "CustomBlockOut",
+    "FillReportOut",
+    "LeaderboardOut",
+    "NightShiftStatusOut",
+    "RegimeStatusOut",
     "TrialSummaryOut",
     "UpdateSettingsIn",
 ]
