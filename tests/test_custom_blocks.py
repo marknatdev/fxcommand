@@ -24,6 +24,7 @@ from vibedesk.blocks.custom import (
 from vibedesk.blocks.indicators import rolling_max_prev, rolling_min_prev
 from vibedesk.blocks.registry import LIBRARY, BlockDef, Kind
 from vibedesk.blocks.spec import SpecInvalid, expand_grid, validate
+from vibedesk.ledger import Ledger
 from vibedesk.market.bars import Bars
 
 # --- Safety Validator Tests ---
@@ -328,6 +329,33 @@ def test_changed_file_invalidates_approval():
     meta_reapproved = reg.approve("dyn_filter", approver="owner")
     assert meta_reapproved.approved is True
     assert reg.is_approved("dyn_filter") is True
+
+
+def test_custom_block_registry_with_real_ledger(tmp_path: Path):
+    db_path = tmp_path / "desk.db"
+    ledger = Ledger(db_path)
+    reg = CustomBlockRegistry(ledger=ledger)
+
+    code = "def real_custom_entry(bars, p):\n    return bars.close > 50, bars.close < 50\n"
+    bdef = BlockDef("real_custom_entry", Kind.ENTRY, ValidEntryParams, valid_entry_fn, "doc")
+    meta = reg.register("real_custom_entry", "entry", code, block_def=bdef)
+    assert meta.approved is False
+
+    # Ledger record created and unapproved
+    rec = ledger.get_custom_block("real_custom_entry")
+    assert rec.name == "real_custom_entry"
+    assert rec.approved is False
+
+    # Owner approves block
+    approved_meta = reg.approve("real_custom_entry", approver="owner")
+    assert approved_meta.approved is True
+    assert reg.is_approved("real_custom_entry") is True
+
+    # Ledger record verified
+    rec2 = ledger.get_custom_block("real_custom_entry")
+    assert rec2.approved is True
+    assert rec2.approver == "owner"
+    assert ledger.is_custom_block_approved("real_custom_entry") is True
 
 
 # --- Dynamic Loader Tests ---

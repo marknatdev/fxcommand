@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from vibedesk.blocks.registry import LIBRARY, BlockDef, BlockRegistry
+from vibedesk.ledger import LedgerError, NotFound
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,10 @@ class CustomBlockRegistry:
         approved_at: str | None = None
 
         if self.ledger is not None:
-            record = self.ledger.get_custom_block(name)
+            try:
+                record = self.ledger.get_custom_block(name)
+            except NotFound:
+                record = None
             if record is None:
                 self.ledger.register_custom_block(
                     name=name,
@@ -110,7 +114,10 @@ class CustomBlockRegistry:
         approved_at: str | None = None
 
         if self.ledger is not None:
-            record = self.ledger.get_custom_block(name)
+            try:
+                record = self.ledger.get_custom_block(name)
+            except NotFound:
+                record = None
             if record is not None and record.sha256 == new_sha256:
                 state = self.ledger.read_custom_block_approval_state(name)
                 if state["approved"] and state["sha256"] == new_sha256:
@@ -151,7 +158,10 @@ class CustomBlockRegistry:
         approved_at: str
 
         if self.ledger is not None:
-            record = self.ledger.get_custom_block(name)
+            try:
+                record = self.ledger.get_custom_block(name)
+            except NotFound:
+                record = None
             if record is None or record.sha256 != old.sha256:
                 self.ledger.register_custom_block(
                     name=name,
@@ -159,7 +169,11 @@ class CustomBlockRegistry:
                     code=old.code,
                     sha256=old.sha256,
                 )
-            self.ledger.record_custom_block_approval(name, approver=approver)
+            try:
+                self.ledger.record_custom_block_approval(name, approver=approver)
+            except LedgerError as e:
+                if "already approved" not in str(e):
+                    raise
             state = self.ledger.read_custom_block_approval_state(name)
             approved_at = state["approved_at"] or datetime.now(UTC).isoformat()
         else:
@@ -220,8 +234,11 @@ class CustomBlockRegistry:
         if current_hash != meta.sha256:
             return False
         if self.ledger is not None:
-            state = self.ledger.read_custom_block_approval_state(name)
-            return bool(state["approved"] and state["sha256"] == current_hash)
+            try:
+                state = self.ledger.read_custom_block_approval_state(name)
+                return bool(state["approved"] and state["sha256"] == current_hash)
+            except NotFound:
+                return False
         return True
 
     def get(self, name: str) -> CustomBlockMeta | None:
