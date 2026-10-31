@@ -750,10 +750,14 @@ The following items remain open for the owner:
 - [ ] **T-Engine (CCC-71, CCC-79, CCC-80):** Fill-bar rule in `simulate.py`, Holdout trade close at last bar, remove unused `stop_distance` in `atr_target`, bump `RULES_VERSION = 4`, apply Migration 4 in `store.py`.
 - [x] **T-NightShift (CCC-75):** Overnight research loop with 20-Trial and 50% token caps, 07:00 Bangkok brief.
   - Implemented `run_night_shift` in `runner.py` with queued ideas and family parameter variations.
-  - Enforced 20-Trial max cap and 50% daily token share cap (stopping early with typed reason).
+  - Enforced 20-Trial max cap and 50% daily token share cap (stopping early with typed reason). Treated non-positive daily token cap as unlimited.
   - Enforced per-family trial budget; refused holdout requests and arena promotions.
-  - Implemented `format_morning_brief` and `compile_morning_brief` in `brief.py` with `RecordingNotifier` support.
-  - Full test coverage in `tests/test_nightshift.py` and contract verification in `tests/test_layer_bc_contract.py`.
+  - Handled sweep list parameters in family variations.
+  - Drained `nightshift_queue.json` as items run, preserving unreached items on cap stop.
+  - Isolated Phase 2 to deterministic `generate_family_variations` strictly within `fam_id`.
+  - Implemented per-item `try/log/continue` error isolation so single item failures do not abort the night.
+  - Kept runner notifier-free; exposed `compile_morning_brief(state, notifier)` for scheduler dispatch at 07:00.
+  - Full test coverage in `tests/test_nightshift.py` including real `Desk` test with synthetic bars, and contract verification in `tests/test_layer_bc_contract.py`.
 - [ ] **T-CustomBlocks (CCC-77):** Custom block dynamic loader, property tests, approval gate.
 
 ## Wave 2: Analysis, Gates and UI
