@@ -748,7 +748,12 @@ The following items remain open for the owner:
 ## Wave 1: Core Engines and Isolation
 - [ ] **T-ArenaCore (CCC-66):** Forward Arena closed bar feed, dual fill tracks, gap replay catch-up, controls.
 - [ ] **T-Engine (CCC-71, CCC-79, CCC-80):** Fill-bar rule in `simulate.py`, Holdout trade close at last bar, remove unused `stop_distance` in `atr_target`, bump `RULES_VERSION = 4`, apply Migration 4 in `store.py`.
-- [ ] **T-NightShift (CCC-75):** Overnight research loop with 20-Trial and 50% token caps, 07:00 Bangkok brief.
+- [x] **T-NightShift (CCC-75):** Overnight research loop with 20-Trial and 50% token caps, 07:00 Bangkok brief.
+  - Implemented `run_night_shift` in `runner.py` with queued ideas and family parameter variations.
+  - Enforced 20-Trial max cap and 50% daily token share cap (stopping early with typed reason).
+  - Enforced per-family trial budget; refused holdout requests and arena promotions.
+  - Implemented `format_morning_brief` and `compile_morning_brief` in `brief.py` with `RecordingNotifier` support.
+  - Full test coverage in `tests/test_nightshift.py` and contract verification in `tests/test_layer_bc_contract.py`.
 - [ ] **T-CustomBlocks (CCC-77):** Custom block dynamic loader, property tests, approval gate.
 
 ## Wave 2: Analysis, Gates and UI
