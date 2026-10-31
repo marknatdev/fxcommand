@@ -1,4 +1,4 @@
-"""Night Shift autonomous overnight research runner (spec §6, ADR 0011, CCC-75)."""
+"""Night Shift autonomous overnight research loop (spec §6, ADR 0011, CCC-75)."""
 
 from __future__ import annotations
 
@@ -153,8 +153,6 @@ def run_night_shift(
     config: NightShiftConfig | None = None,
     llm: Any = None,
     queued_ideas: Sequence[str | dict[str, Any]] | None = None,
-    notifier: Any = None,
-    **kwargs: Any,
 ) -> NightShiftState:
     """Run autonomous overnight loop exploring queued ideas and family variations.
 
@@ -188,31 +186,21 @@ def run_night_shift(
     if config.max_trials <= 0:
         state.stopped_reason = f"hit_trial_cap_{config.max_trials}"
         state.finished_at = datetime.now(UTC).isoformat()
-        if notifier is not None:
-            from vibedesk.nightshift.brief import compile_morning_brief
-
-            compile_morning_brief(state, notifier=notifier)
         return state
 
-    # Initial check on token cap
+    # Initial check on token cap:
+    # TokenBudget treats daily_cap <= 0 as unlimited; only calculate token_limit if daily_cap > 0
     daily_cap = getattr(budget, "daily_cap", 100_000) if budget is not None else 100_000
-    token_limit = int(daily_cap * config.token_share)
+    token_limit = int(daily_cap * config.token_share) if daily_cap > 0 else None
+
     if budget is not None and getattr(budget, "is_paused", False):
         state.stopped_reason = f"hit_token_budget_{int(config.token_share * 100)}%"
         state.finished_at = datetime.now(UTC).isoformat()
-        if notifier is not None:
-            from vibedesk.nightshift.brief import compile_morning_brief
-
-            compile_morning_brief(state, notifier=notifier)
         return state
 
-    if config.token_share <= 0:
+    if daily_cap > 0 and config.token_share <= 0:
         state.stopped_reason = "hit_token_budget_0%"
         state.finished_at = datetime.now(UTC).isoformat()
-        if notifier is not None:
-            from vibedesk.nightshift.brief import compile_morning_brief
-
-            compile_morning_brief(state, notifier=notifier)
         return state
 
     def on_token_usage(usage: int | dict[str, Any]) -> None:
@@ -234,104 +222,161 @@ def run_night_shift(
                 if fam.get("trial_count", 0) > 0 and fam.get("id") is not None
             }
 
-    # Collect work queue
-    # 1. Owner's queued ideas
-    ideas_to_run: list[str | dict[str, Any]] = list(queued_ideas or [])
+    # Queue setup
+    # 1. Argument ideas
+    arg_ideas = list(queued_ideas or [])
 
     # 2. File-based queue
-    if hasattr(desk, "root"):
+    q_file = getattr(desk, "root", None)
+    if q_file is not None:
         q_file = desk.root / "nightshift_queue.json"
-        if q_file.exists():
+
+    file_queue_items: list[str | dict[str, Any]] = []
+    if q_file is not None and q_file.exists():
+        try:
+            loaded = json.loads(q_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                file_queue_items = list(loaded)
+        except Exception:
+            logger.warning("Failed to read nightshift_queue.json", exc_info=True)
+
+    remaining_file_items = list(file_queue_items)
+
+    def sync_file_queue() -> None:
+        if q_file is not None and q_file.exists():
             try:
-                file_items = json.loads(q_file.read_text(encoding="utf-8"))
-                if isinstance(file_items, list):
-                    ideas_to_run.extend(file_items)
+                q_file.write_text(json.dumps(remaining_file_items, indent=2), encoding="utf-8")
             except Exception:
-                logger.warning("Failed to read nightshift_queue.json", exc_info=True)
+                logger.warning("Failed to update nightshift_queue.json", exc_info=True)
 
     # 3. Untested families from Ledger
+    untested_ideas: list[str] = []
     if hasattr(desk, "list_families"):
         try:
             for fam in desk.list_families():
                 if (
                     fam.get("trial_count", 0) == 0
                     and fam.get("idea")
-                    and fam["idea"] not in ideas_to_run
+                    and fam["idea"] not in arg_ideas
+                    and fam["idea"] not in file_queue_items
+                    and fam["idea"] not in untested_ideas
                 ):
-                    ideas_to_run.append(fam["idea"])
+                    untested_ideas.append(fam["idea"])
         except Exception:
             logger.warning("Failed to list families from ledger", exc_info=True)
 
     def should_stop() -> str | None:
         if state.trials_run >= config.max_trials:
             return f"hit_trial_cap_{config.max_trials}"
-        if state.tokens_used >= token_limit:
+        if token_limit is not None and state.tokens_used >= token_limit:
             return f"hit_token_budget_{int(config.token_share * 100)}%"
         if budget is not None and getattr(budget, "is_paused", False):
             return f"hit_token_budget_{int(config.token_share * 100)}%"
         return None
 
+    def execute_idea_item(item: str | dict[str, Any]) -> None:
+        idea_text = ""
+        spec_dict = None
+        if isinstance(item, dict):
+            spec_dict = item
+            idea_text = item.get("name", "Queued Strategy")
+        elif isinstance(item, str):
+            idea_text = item
+            if active_llm is not None:
+                try:
+                    draft = draft_spec(active_llm, idea_text)
+                    spec_dict = draft.spec
+                except DraftFailed as e:
+                    logger.warning("Failed to draft spec for idea %r: %s", idea_text, e)
+                    return
+            else:
+                try:
+                    spec_dict = json.loads(idea_text)
+                except Exception:
+                    logger.warning("No LLM available to draft idea: %r", idea_text)
+                    return
+
+        if spec_dict is not None:
+            try:
+                frozen_candidate = validate(normalize(spec_dict))
+            except Exception:
+                logger.warning("Invalid spec for idea %r: %r", idea_text, spec_dict, exc_info=True)
+                return
+
+            if hasattr(desk, "ledger") and hasattr(desk.ledger, "family_for"):
+                fam_id = desk.ledger.family_for(
+                    frozen_candidate.entry.block, frozen_candidate.symbol
+                )
+                if fam_id is not None:
+                    used = desk.ledger.trial_count(fam_id)
+                    fam_budget = desk.ledger.budget(fam_id)
+                    if (fam_budget > 0 and used >= fam_budget) or (fam_budget == 0 and used > 0):
+                        logger.info(
+                            "Family %d budget full (%d/%d), skipping",
+                            fam_id,
+                            used,
+                            fam_budget,
+                        )
+                        return
+
+            summary = desk.run(idea_text, spec_dict)
+            state.trials_run += 1
+            if summary.get("verdict") == "CANDIDATE":
+                state.candidates_found += 1
+
     try:
-        # Phase 1: Run queued ideas
-        for item in ideas_to_run:
+        # Phase 1a: Argument queued ideas
+        for item in arg_ideas:
+            stop_reason = should_stop()
+            if stop_reason:
+                state.stopped_reason = stop_reason
+                break
+            try:
+                execute_idea_item(item)
+            except Exception as e:
+                logger.error("Error executing queued idea %r: %s", item, e, exc_info=True)
+                continue
             stop_reason = should_stop()
             if stop_reason:
                 state.stopped_reason = stop_reason
                 break
 
-            idea_text = ""
-            spec_dict = None
-            if isinstance(item, dict):
-                spec_dict = item
-                idea_text = item.get("name", "Queued Strategy")
-            elif isinstance(item, str):
-                idea_text = item
-                if active_llm is not None:
-                    try:
-                        draft = draft_spec(active_llm, idea_text)
-                        spec_dict = draft.spec
-                    except DraftFailed as e:
-                        logger.warning("Failed to draft spec for idea %r: %s", idea_text, e)
-                        continue
-                    except Exception as e:
-                        if "ScriptedLLM ran out" in str(e):
-                            logger.info("LLM ran out of turns; stopping ideas phase")
-                            break
-                        raise
-                else:
-                    try:
-                        spec_dict = json.loads(idea_text)
-                    except Exception:
-                        logger.warning("No LLM available to draft idea: %r", idea_text)
-                        continue
+        # Phase 1b: File queue ideas (drained as reached)
+        if state.stopped_reason == "pending":
+            for item in file_queue_items:
+                stop_reason = should_stop()
+                if stop_reason:
+                    state.stopped_reason = stop_reason
+                    break
 
-            if spec_dict is not None:
+                # Pop item from remaining and persist change
+                if item in remaining_file_items:
+                    remaining_file_items.remove(item)
+                    sync_file_queue()
+
                 try:
-                    frozen_candidate = validate(normalize(spec_dict))
-                except Exception:
-                    logger.warning("Invalid spec: %r", spec_dict, exc_info=True)
+                    execute_idea_item(item)
+                except Exception as e:
+                    logger.error("Error executing file queue item %r: %s", item, e, exc_info=True)
                     continue
 
-                if hasattr(desk, "ledger") and hasattr(desk.ledger, "family_for"):
-                    fam_id = desk.ledger.family_for(
-                        frozen_candidate.entry.block, frozen_candidate.symbol
-                    )
-                    if fam_id is not None:
-                        used = desk.ledger.trial_count(fam_id)
-                        fam_budget = desk.ledger.budget(fam_id)
-                        if (fam_budget > 0 and used >= fam_budget) or (
-                            fam_budget == 0 and used > 0
-                        ):
-                            logger.info(
-                                "Family %d budget full (%d/%d), skipping", fam_id, used, fam_budget
-                            )
-                            continue
+                stop_reason = should_stop()
+                if stop_reason:
+                    state.stopped_reason = stop_reason
+                    break
 
-                summary = desk.run(idea_text, spec_dict)
-                state.trials_run += 1
-                if summary.get("verdict") == "CANDIDATE":
-                    state.candidates_found += 1
-
+        # Phase 1c: Untested families from ledger
+        if state.stopped_reason == "pending":
+            for item in untested_ideas:
+                stop_reason = should_stop()
+                if stop_reason:
+                    state.stopped_reason = stop_reason
+                    break
+                try:
+                    execute_idea_item(item)
+                except Exception as e:
+                    logger.error("Error executing untested family %r: %s", item, e, exc_info=True)
+                    continue
                 stop_reason = should_stop()
                 if stop_reason:
                     state.stopped_reason = stop_reason
@@ -368,19 +413,8 @@ def run_night_shift(
                 if not base_spec:
                     continue
 
-                variations: list[dict[str, Any]] = []
-                if active_llm is not None:
-                    try:
-                        prompt = f"Create a variation of strategy for {fam.get('idea', 'strategy')}"
-                        draft = draft_spec(active_llm, prompt)
-                        variations.append(draft.spec)
-                    except Exception:
-                        pass
-
                 remaining_budget = fam_budget - used if fam_budget > 0 else 4
-                variations.extend(
-                    generate_family_variations(base_spec, max_variations=remaining_budget)
-                )
+                variations = generate_family_variations(base_spec, max_variations=remaining_budget)
 
                 for var_spec in variations:
                     stop_reason = should_stop()
@@ -393,10 +427,31 @@ def run_night_shift(
                     if (fam_budget > 0 and used >= fam_budget) or (fam_budget == 0 and used > 0):
                         break
 
-                    summary = desk.run(fam.get("idea", "Family Variation"), var_spec)
-                    state.trials_run += 1
-                    if summary.get("verdict") == "CANDIDATE":
-                        state.candidates_found += 1
+                    try:
+                        frozen_var = validate(normalize(var_spec))
+                        target_fam = desk.ledger.family_for(
+                            frozen_var.entry.block, frozen_var.symbol
+                        )
+                        if target_fam != fam_id:
+                            logger.warning(
+                                "Variation family %s does not match expected %d; skipping",
+                                target_fam,
+                                fam_id,
+                            )
+                            continue
+
+                        summary = desk.run(fam.get("idea", "Family Variation"), var_spec)
+                        state.trials_run += 1
+                        if summary.get("verdict") == "CANDIDATE":
+                            state.candidates_found += 1
+                    except Exception as e:
+                        logger.error(
+                            "Error running family variation for family %d: %s",
+                            fam_id,
+                            e,
+                            exc_info=True,
+                        )
+                        continue
 
                     stop_reason = should_stop()
                     if stop_reason:
@@ -411,8 +466,4 @@ def run_night_shift(
         state.stopped_reason = "error"
 
     state.finished_at = datetime.now(UTC).isoformat()
-    if notifier is not None:
-        from vibedesk.nightshift.brief import compile_morning_brief
-
-        compile_morning_brief(state, notifier=notifier)
     return state

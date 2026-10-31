@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from vibedesk.app.desk import Desk
 from vibedesk.app.llm import ScriptedLLM, Turn
 from vibedesk.app.research import EXAMPLE
 from vibedesk.blocks.spec import validate
 from vibedesk.desk.budget import TokenBudget
 from vibedesk.ledger import Ledger
+from vibedesk.market.bars import Timeframe
+from vibedesk.market.cache import record_import, write_chunk
+from vibedesk.market.costs import CostMeasurement, record_cost
+from vibedesk.market.synthetic import SyntheticBarSource
 from vibedesk.nightshift import (
     NightShiftConfig,
     NightShiftState,
@@ -112,6 +118,24 @@ def _make_spec(symbol: str = "GOLD", period: int = 20) -> dict[str, Any]:
     return spec
 
 
+def setup_synthetic_gold_cache(root: Path) -> None:
+    """Setup synthetic GOLD M15 and H1 bars with measured costs for real Desk testing."""
+    source = SyntheticBarSource(1, date(2013, 12, 1), date(2025, 1, 1))
+    for timeframe in (Timeframe.M15, Timeframe.H1):
+        bars = source.fetch("GOLD", timeframe)
+        for year in range(2013, 2025):
+            start = datetime(year, 1, 1, tzinfo=UTC).timestamp()
+            end = datetime(year + 1, 1, 1, tzinfo=UTC).timestamp()
+            write_chunk(root, bars.between(int(start), int(end)), year)
+    record_import(root, "GOLD", datetime(2025, 1, 1, tzinfo=UTC))
+    record_cost(
+        root,
+        CostMeasurement(
+            "GOLD", "2026-10-23T00:00:00+00:00", 0.01, 30.0, 35.0, 1000, -50.0, 10.0, 3
+        ),
+    )
+
+
 def test_nightshift_config_and_state_defaults():
     cfg = NightShiftConfig()
     assert cfg.max_trials == 20
@@ -178,6 +202,18 @@ def test_run_night_shift_hit_token_budget_with_scripted_llm(tmp_path: Path):
     assert state.tokens_used == 600
     assert budget.used == 600
     assert state.stopped_reason == "hit_token_budget_50%"
+
+
+def test_run_night_shift_non_positive_daily_cap_unlimited(tmp_path: Path):
+    """TokenBudget daily_cap <= 0 means unlimited; Night Shift must not stop for tokens."""
+    desk = FakeDesk(tmp_path)
+    budget = TokenBudget(daily_cap=0)  # Unlimited cap
+
+    queued = [_make_spec(period=p) for p in (10, 20)]
+    state = run_night_shift(desk=desk, budget=budget, queued_ideas=queued)
+
+    assert state.trials_run == 2
+    assert state.stopped_reason == "completed"
 
 
 def test_run_night_shift_budget_paused_immediately(tmp_path: Path):
@@ -270,33 +306,54 @@ def test_format_and_compile_morning_brief_with_recording_notifier():
     assert notifier.last is notice
 
 
-def test_run_night_shift_dispatches_morning_brief_if_notifier_passed(tmp_path: Path):
-    desk = FakeDesk(tmp_path)
-    budget = TokenBudget(daily_cap=100_000)
-    notifier = RecordingNotifier()
-
-    run_night_shift(
-        desk=desk,
-        budget=budget,
-        queued_ideas=[_make_spec(period=20)],
-        notifier=notifier,
-    )
-
-    assert len(notifier.notices) == 1
-    assert notifier.last.kind == NoticeKind.DAILY_DIGEST
-    assert notifier.last.data["trials_run"] == 1
-
-
-def test_run_night_shift_file_queue(tmp_path: Path):
+def test_run_night_shift_file_queue_draining(tmp_path: Path):
+    """File queue items are drained as reached; cap-stopped items remain for next run."""
     desk = FakeDesk(tmp_path)
     budget = TokenBudget(daily_cap=100_000)
 
-    # Write ideas to file
+    # Write 2 ideas to file
     q_file = tmp_path / "nightshift_queue.json"
-    q_file.write_text(json.dumps([_make_spec(period=20), _make_spec(period=30)]))
+    item1 = _make_spec(period=20)
+    item2 = _make_spec(period=30)
+    q_file.write_text(json.dumps([item1, item2], indent=2))
 
-    state = run_night_shift(desk=desk, budget=budget)
-    assert state.trials_run == 2
+    # Run 1: max_trials = 1. Only item1 should be processed and removed from file.
+    config1 = NightShiftConfig(max_trials=1)
+    state1 = run_night_shift(desk=desk, budget=budget, config=config1)
+    assert state1.trials_run == 1
+    assert state1.stopped_reason == "hit_trial_cap_1"
+
+    # Verify item2 remains in nightshift_queue.json
+    remaining = json.loads(q_file.read_text(encoding="utf-8"))
+    assert len(remaining) == 1
+    assert remaining[0]["entry"]["params"]["period"] == 30
+
+    # Run 2: processes item2 and leaves the file empty
+    config2 = NightShiftConfig(max_trials=1)
+    state2 = run_night_shift(desk=desk, budget=budget, config=config2)
+    assert state2.trials_run == 1
+    assert state2.stopped_reason == "hit_trial_cap_1"
+
+    remaining2 = json.loads(q_file.read_text(encoding="utf-8"))
+    assert len(remaining2) == 0
+
+    # Run 3: queue is empty, no new trials run
+    state3 = run_night_shift(desk=desk, budget=budget, config=NightShiftConfig(max_trials=10))
+    # Note: Phase 2 might run variations of existing families unless skipped
+    assert state3.stopped_reason in ("completed", "hit_trial_cap_10")
+
+
+def test_run_night_shift_per_item_try_continue(tmp_path: Path):
+    """One bad or invalid item does not end the night; next valid item runs."""
+    desk = FakeDesk(tmp_path)
+    budget = TokenBudget(daily_cap=100_000)
+
+    bad_item = "not valid json and not draftable without LLM"
+    good_item = _make_spec(period=20)
+
+    state = run_night_shift(desk=desk, budget=budget, queued_ideas=[bad_item, good_item])
+    assert state.trials_run == 1
+    assert len(desk.run_calls) == 1
     assert state.stopped_reason == "completed"
 
 
@@ -307,6 +364,20 @@ def test_generate_family_variations():
     for var in variations:
         assert var["symbol"] == base["symbol"]
         assert var["entry"]["block"] == base["entry"]["block"]
+        validated = validate(var)
+        assert validated.symbol == "GOLD"
+        assert validated.entry.block == "donchian_breakout"
+
+
+def test_generate_family_variations_with_list_params():
+    spec = _make_spec(period=20)
+    spec["exit"]["stop"]["params"]["mult"] = [1.5, 2.0]
+    spec["exit"]["target"] = {"block": "r_target", "params": {"r": [2.0, 3.0]}}
+    spec["entry"]["params"]["period"] = [20, 55]
+
+    variations = generate_family_variations(spec, max_variations=4)
+    assert len(variations) >= 1
+    for var in variations:
         validated = validate(var)
         assert validated.symbol == "GOLD"
         assert validated.entry.block == "donchian_breakout"
@@ -330,31 +401,6 @@ def test_run_night_shift_family_variations_phase(tmp_path: Path):
     assert state.stopped_reason == "hit_trial_cap_3"
 
 
-def test_run_night_shift_error_handling(tmp_path: Path):
-    desk = FakeDesk(tmp_path)
-
-    def faulty_run(idea: str, spec: dict[str, Any]) -> dict[str, Any]:
-        raise RuntimeError("Simulated test error in run")
-
-    desk.run = faulty_run
-    state = run_night_shift(desk=desk, queued_ideas=[_make_spec()])
-    assert state.stopped_reason == "error"
-
-
-def test_generate_family_variations_with_list_params():
-    spec = _make_spec(period=20)
-    spec["exit"]["stop"]["params"]["mult"] = [1.5, 2.0]
-    spec["exit"]["target"] = {"block": "r_target", "params": {"r": [2.0, 3.0]}}
-    spec["entry"]["params"]["period"] = [20, 55]
-
-    variations = generate_family_variations(spec, max_variations=4)
-    assert len(variations) >= 1
-    for var in variations:
-        validated = validate(var)
-        assert validated.symbol == "GOLD"
-        assert validated.entry.block == "donchian_breakout"
-
-
 def test_run_night_shift_with_list_params_family(tmp_path: Path):
     desk = FakeDesk(tmp_path)
     budget = TokenBudget(daily_cap=100_000)
@@ -372,3 +418,28 @@ def test_run_night_shift_with_list_params_family(tmp_path: Path):
     )
     assert state.stopped_reason == "hit_trial_cap_3"
     assert state.trials_run == 3
+
+
+def test_night_shift_real_desk_with_synthetic_bars(tmp_path: Path):
+    """Integration test against the real Desk with a synthetic bar source."""
+    setup_synthetic_gold_cache(tmp_path)
+    desk = Desk(tmp_path)
+    budget = TokenBudget(daily_cap=100_000)
+    config = NightShiftConfig(max_trials=1)
+
+    spec = _make_spec(symbol="GOLD", period=20)
+    state = run_night_shift(desk=desk, budget=budget, config=config, queued_ideas=[spec])
+
+    assert state.trials_run == 1
+    assert state.stopped_reason == "hit_trial_cap_1"
+
+    # Verify the trial was genuinely registered and recorded in desk.ledger
+    stats = desk.ledger_stats()
+    assert stats["desk_trial_count"] == 1
+
+    trial = desk.ledger.trial(1)
+    assert trial.id == 1
+    assert trial.verdict in ("CANDIDATE", "REJECT")
+
+    hyp = desk.ledger.hypothesis(trial.hypothesis_id)
+    assert hyp.symbol == "GOLD"
