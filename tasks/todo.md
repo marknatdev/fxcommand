@@ -756,7 +756,7 @@ The following items remain open for the owner:
   - Enrolment eligibility enforcement: only `CANDIDATE` or Holdout `PASS` Hypotheses enter via explicit `send_to_arena`.
   - Scheduler registration in `vibedesk.app.scheduler`: 10-second timer for Arena closed-bar poll and 07:00 Bangkok daily Night Shift brief job.
   - Unit tests in `tests/test_arena_core.py` (8 passing tests), `tests/test_layer_bc_contract.py` (17 passing tests).
-- [ ] **T-Engine (CCC-71, CCC-79, CCC-80):** Fill-bar rule in `simulate.py`, Holdout trade close at last bar, remove unused `stop_distance` in `atr_target`, bump `RULES_VERSION = 4`, apply Migration 4 in `store.py`.
+- [x] **T-Engine (CCC-71, CCC-79, CCC-80):** Fill-bar rule in `simulate.py`, Holdout trade close at last bar, remove unused `stop_distance` in `atr_target`, bump `RULES_VERSION = 4`, apply Migration 4 in `store.py`.
 - [x] **T-NightShift (CCC-75):** Overnight research loop with 20-Trial and 50% token caps, 07:00 Bangkok brief.
   - Implemented `run_night_shift` in `runner.py` with queued ideas and family parameter variations.
   - Enforced 20-Trial max cap and 50% daily token share cap (stopping early with typed reason). Treated non-positive daily token cap as unlimited.

@@ -32,6 +32,7 @@ Fill rules (spec §6.1):
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -41,6 +42,8 @@ from numba import njit
 from vibedesk.engine.costs import CostSnapshot
 from vibedesk.engine.prepared import PreparedMarket, prepare
 from vibedesk.market.bars import Bars
+
+logger = logging.getLogger("vibedesk.engine.simulate")
 
 
 class ExitReason(IntEnum):
@@ -65,6 +68,7 @@ class Signals:
     time_bars: int = 0  # bars to hold before a time exit; 0 for none
     exit_long: np.ndarray | None = None  # bool: close a long at the next open
     exit_short: np.ndarray | None = None  # bool: close a short at the next open
+    time_filter: np.ndarray | None = None  # bool: True if bar satisfies time filter (CCC-71)
 
 
 TRADE_DTYPE = np.dtype(
@@ -90,6 +94,7 @@ TRADE_DTYPE = np.dtype(
 @dataclass(frozen=True, slots=True, eq=False)
 class Trades:
     records: np.ndarray  # TRADE_DTYPE
+    skipped_fills: int = 0
 
     def __len__(self) -> int:
         return len(self.records)
@@ -106,18 +111,33 @@ class Trades:
         return rows
 
 
-def simulate(bars: Bars, signals: Signals, cost: CostSnapshot, m1: Bars | None = None) -> Trades:
+def simulate(
+    bars: Bars,
+    signals: Signals,
+    cost: CostSnapshot,
+    m1: Bars | None = None,
+    time_filter: np.ndarray | None = None,
+) -> Trades:
     """Simulate one Combination's signals. `m1`, when given, settles bars where the stop and
     the target are both touched; without it, or without M1 bars inside that bar, the stop wins.
 
     To simulate the same bars many times, prepare them once and call simulate_prepared.
     """
-    return simulate_prepared(prepare(bars, cost, m1), signals)
+    return simulate_prepared(prepare(bars, cost, m1), signals, time_filter=time_filter)
 
 
-def simulate_prepared(market: PreparedMarket, signals: Signals) -> Trades:
+def simulate_prepared(
+    market: PreparedMarket,
+    signals: Signals,
+    time_filter: np.ndarray | None = None,
+) -> Trades:
     """Simulate one Combination's signals on a market from `prepare`."""
     n = len(market)
+    tf = signals.time_filter if time_filter is None else time_filter
+    has_tf = tf is not None
+    tf_array = np.ones(n, dtype=np.bool_) if tf is None else np.asarray(tf, dtype=np.bool_)
+    if len(tf_array) != n:
+        raise ValueError("signals.time_filter has a different length than the bars")
     trail_dist = market.no_trail if signals.trail_dist is None else signals.trail_dist
     exit_long = market.never if signals.exit_long is None else signals.exit_long
     exit_short = market.never if signals.exit_short is None else signals.exit_short
@@ -135,7 +155,7 @@ def simulate_prepared(market: PreparedMarket, signals: Signals) -> Trades:
             raise ValueError(f"signals.{name} has a different length than the bars")
 
     bars, cost = market.bars, market.cost
-    table = _run(
+    table, num_skips = _run(
         bars.open,
         bars.high,
         bars.low,
@@ -156,7 +176,14 @@ def simulate_prepared(market: PreparedMarket, signals: Signals) -> Trades:
         market.m1_spread,
         market.m1_lo,
         market.m1_hi,
+        has_tf,
+        tf_array,
     )
+    if num_skips > 0:
+        logger.info(
+            "Fill-bar rule (CCC-71): skipped %d fill(s) that violated time filter at t+1",
+            num_skips,
+        )
     entry_idx = table[:, _ENTRY_IDX].astype(np.int64)
     exit_idx = table[:, _EXIT_IDX].astype(np.int64)
     side = table[:, _SIDE].astype(np.int8)
@@ -181,7 +208,7 @@ def simulate_prepared(market: PreparedMarket, signals: Signals) -> Trades:
     rate = np.where(side == 1, cost.swap_long_points, cost.swap_short_points)
     records["swap_r"] = rate * nights * cost.point / risk
     records["r"] = table[:, _R] + records["swap_r"]
-    return Trades(records)
+    return Trades(records, skipped_fills=num_skips)
 
 
 _STOP, _STOP_GAP, _TARGET, _END, _TRAIL, _TIME, _OPPOSITE = 1, 2, 3, 4, 5, 6, 7
@@ -293,6 +320,8 @@ def _run(
     m1_spread,
     m1_lo,
     m1_hi,
+    has_tf,
+    tf_array,
 ):
     n = len(open_)
     # Every trade enters on a bar after one that signals one side only, so that count bounds
@@ -307,6 +336,7 @@ def _run(
             last = t
     out = np.empty((capacity, 11))
     count = 0
+    num_skips = 0
 
     pos = 0  # +1 long, -1 short, 0 flat
     pending = 0  # side to enter at this bar's open
@@ -351,22 +381,27 @@ def _run(
             reverse = 0
 
         if pending != 0:
-            pos = pending
-            pending = 0
-            opened = t
-            trail = np.nan
-            opposite_due = False
-            dist = stop_dist[t - 1]
-            if pos == 1:
-                entry = open_[t] + spread[t] + slip
-                entry_cost = spread[t] + slip
-                stop = entry - dist
-                target = entry + target_dist[t - 1]
+            if has_tf and not tf_array[t]:
+                # CCC-71: bar t+1 violates time filter, skip fill
+                pending = 0
+                num_skips += 1
             else:
-                entry = open_[t] - slip
-                entry_cost = slip
-                stop = entry + dist
-                target = entry - target_dist[t - 1]
+                pos = pending
+                pending = 0
+                opened = t
+                trail = np.nan
+                opposite_due = False
+                dist = stop_dist[t - 1]
+                if pos == 1:
+                    entry = open_[t] + spread[t] + slip
+                    entry_cost = spread[t] + slip
+                    stop = entry - dist
+                    target = entry + target_dist[t - 1]
+                else:
+                    entry = open_[t] - slip
+                    entry_cost = slip
+                    stop = entry + dist
+                    target = entry - target_dist[t - 1]
 
         if pos != 0:
             at_open = 0
@@ -426,13 +461,13 @@ def _run(
                     trail = level
                 opposite_due = exit_short[t]
             # A reversal needs the Spec's own entry on the other side at this close.
-            if opposite_due and t + 1 < n and stop_dist[t] > 0:
+            if opposite_due and t + 1 < n and stop_dist[t] > 0 and (not has_tf or tf_array[t]):
                 if pos == 1 and short_entry[t] and not long_entry[t]:
                     reverse = -1
                 elif pos == -1 and long_entry[t] and not short_entry[t]:
                     reverse = 1
 
-        if pos == 0 and t + 1 < n and stop_dist[t] > 0:
+        if pos == 0 and t + 1 < n and stop_dist[t] > 0 and (not has_tf or tf_array[t]):
             if long_entry[t] and not short_entry[t]:
                 pending = 1
             elif short_entry[t] and not long_entry[t]:
@@ -463,4 +498,4 @@ def _run(
         )
         count += 1
 
-    return out[:count]
+    return out[:count], num_skips
