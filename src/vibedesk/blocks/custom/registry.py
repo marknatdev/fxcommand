@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -70,6 +70,10 @@ class CustomBlockRegistry:
                 is_approved = True
                 approved_at = state["approved_at"]
 
+        bdef = block_def
+        if bdef is not None and hasattr(bdef, "approved") and bdef.approved != is_approved:
+            bdef = replace(bdef, approved=is_approved)
+
         meta = CustomBlockMeta(
             name=name,
             kind=kind,
@@ -78,12 +82,12 @@ class CustomBlockRegistry:
             approved_at=approved_at,
             sha256=sha256,
             author=author,
-            block_def=block_def,
+            block_def=bdef,
         )
         self._blocks[name] = meta
 
-        if is_approved and block_def is not None and self.library is not None:
-            self.library._defs[name] = block_def
+        if bdef is not None and self.library is not None:
+            self.library._defs[name] = bdef
 
         return meta
 
@@ -114,6 +118,12 @@ class CustomBlockRegistry:
                     approved_at = state["approved_at"]
 
         new_bdef = block_def or old.block_def
+        if (
+            new_bdef is not None
+            and hasattr(new_bdef, "approved")
+            and new_bdef.approved != is_approved
+        ):
+            new_bdef = replace(new_bdef, approved=is_approved)
 
         meta = CustomBlockMeta(
             name=old.name,
@@ -127,9 +137,7 @@ class CustomBlockRegistry:
         )
         self._blocks[name] = meta
 
-        if not is_approved and self.library is not None:
-            self.library._defs.pop(name, None)
-        elif is_approved and new_bdef is not None and self.library is not None:
+        if new_bdef is not None and self.library is not None:
             self.library._defs[name] = new_bdef
 
         return meta
@@ -157,6 +165,10 @@ class CustomBlockRegistry:
         else:
             approved_at = datetime.now(UTC).isoformat()
 
+        bdef = old.block_def
+        if bdef is not None and hasattr(bdef, "approved"):
+            bdef = replace(bdef, approved=True)
+
         approved_meta = CustomBlockMeta(
             name=old.name,
             kind=old.kind,
@@ -165,12 +177,12 @@ class CustomBlockRegistry:
             approved_at=approved_at,
             sha256=old.sha256,
             author=old.author,
-            block_def=old.block_def,
+            block_def=bdef,
         )
         self._blocks[name] = approved_meta
 
-        if old.block_def is not None and self.library is not None:
-            self.library._defs[name] = old.block_def
+        if bdef is not None and self.library is not None:
+            self.library._defs[name] = bdef
 
         return approved_meta
 
@@ -180,6 +192,10 @@ class CustomBlockRegistry:
             raise KeyError(f"Custom block {name!r} not found")
 
         old = self._blocks[name]
+        bdef = old.block_def
+        if bdef is not None and hasattr(bdef, "approved"):
+            bdef = replace(bdef, approved=False)
+
         revoked = CustomBlockMeta(
             name=old.name,
             kind=old.kind,
@@ -188,11 +204,11 @@ class CustomBlockRegistry:
             approved_at=None,
             sha256=old.sha256,
             author=old.author,
-            block_def=old.block_def,
+            block_def=bdef,
         )
         self._blocks[name] = revoked
-        if self.library is not None:
-            self.library._defs.pop(name, None)
+        if bdef is not None and self.library is not None:
+            self.library._defs[name] = bdef
         return revoked
 
     def is_approved(self, name: str) -> bool:

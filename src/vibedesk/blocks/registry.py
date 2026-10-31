@@ -27,18 +27,21 @@ class BlockDef:
     params: type[BaseModel]
     fn: Callable
     doc: str
+    approved: bool = True
 
 
 class BlockRegistry:
     def __init__(self) -> None:
         self._defs: dict[str, BlockDef] = {}
 
-    def register(self, name: str, kind: Kind, params: type[BaseModel]) -> Callable:
+    def register(
+        self, name: str, kind: Kind, params: type[BaseModel], approved: bool = True
+    ) -> Callable:
         def decorator(fn: Callable) -> Callable:
             if name in self._defs:
                 raise ValueError(f"block {name!r} is already registered")
             doc = (fn.__doc__ or "").strip()
-            self._defs[name] = BlockDef(name, kind, params, fn, doc)
+            self._defs[name] = BlockDef(name, kind, params, fn, doc, approved=approved)
             return fn
 
         return decorator

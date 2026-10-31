@@ -449,15 +449,17 @@ def test_strategy_spec_rejects_unapproved_custom_blocks():
         "sizing": {"block": "fixed_risk", "params": {"risk_pct": 1.0}},
     }
 
-    # Unapproved custom block is not active in LIBRARY -> rejected by Spec validate
-    with pytest.raises(SpecInvalid, match="unknown block"):
-        validate(spec_dict)
-
-    # Approve the custom block
-    reg.approve("my_custom_entry", approver="owner")
-
-    # Now active in LIBRARY -> Spec validate passes!
     try:
+        # Unapproved custom block in Spec -> SpecError naming block
+        with pytest.raises(
+            SpecInvalid,
+            match=r"custom block 'my_custom_entry' is not approved by the owner \(ADR 0012\)",
+        ):
+            validate(spec_dict)
+
+        # Approve the custom block -> accepted
+        reg.approve("my_custom_entry", approver="owner")
+
         spec = validate(spec_dict)
         assert spec.entry.block == "my_custom_entry"
 
@@ -471,7 +473,6 @@ def test_strategy_spec_rejects_unapproved_custom_blocks():
         bars = base_bars(0)
         signals = compile_signals(combos[0], bars)
         assert len(signals.long_entry) == len(bars)
-
     finally:
         # Cleanup LIBRARY def
         LIBRARY._defs.pop("my_custom_entry", None)
@@ -482,9 +483,6 @@ def test_revoked_or_changed_custom_block_rejected_in_spec():
     bdef = BlockDef("revokable_entry", Kind.ENTRY, ValidEntryParams, valid_entry_fn, "doc")
     code_v1 = "def revokable_entry(bars, p): pass"
     reg.register("revokable_entry", "entry", code_v1, block_def=bdef)
-
-    # Approve v1
-    reg.approve("revokable_entry", approver="owner")
 
     spec_dict = {
         "name": "Custom Spec",
@@ -497,14 +495,40 @@ def test_revoked_or_changed_custom_block_rejected_in_spec():
         "sizing": {"block": "fixed_risk", "params": {"risk_pct": 1.0}},
     }
 
-    assert validate(spec_dict).entry.block == "revokable_entry"
+    try:
+        # 1. Unapproved -> rejected
+        with pytest.raises(
+            SpecInvalid,
+            match=r"custom block 'revokable_entry' is not approved by the owner \(ADR 0012\)",
+        ):
+            validate(spec_dict)
 
-    # Revoke approval
-    reg.revoke("revokable_entry")
+        # 2. Approved -> accepted
+        reg.approve("revokable_entry", approver="owner")
+        assert validate(spec_dict).entry.block == "revokable_entry"
 
-    # Must be rejected now
-    with pytest.raises(SpecInvalid, match="unknown block"):
-        validate(spec_dict)
+        # 3. Revoked -> unapproved again
+        reg.revoke("revokable_entry")
+        with pytest.raises(
+            SpecInvalid,
+            match=r"custom block 'revokable_entry' is not approved by the owner \(ADR 0012\)",
+        ):
+            validate(spec_dict)
+
+        # 4. Re-approved -> accepted
+        reg.approve("revokable_entry", approver="owner")
+        assert validate(spec_dict).entry.block == "revokable_entry"
+
+        # 5. Changed code hash -> unapproved again
+        code_v2 = "def revokable_entry(bars, p): return bars.close > 0"
+        reg.update_code("revokable_entry", code_v2)
+        with pytest.raises(
+            SpecInvalid,
+            match=r"custom block 'revokable_entry' is not approved by the owner \(ADR 0012\)",
+        ):
+            validate(spec_dict)
+    finally:
+        LIBRARY._defs.pop("revokable_entry", None)
 
 
 def test_custom_block_decorator():
