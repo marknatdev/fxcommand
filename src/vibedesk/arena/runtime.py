@@ -46,7 +46,8 @@ class ArenaRuntime:
         """Global emergency stop: pause all strategies."""
         self._stopped = True
         for s in self.strategies.values():
-            s.status = StrategyStatus.PAUSED
+            if s.status != StrategyStatus.REMOVED:
+                s.status = StrategyStatus.PAUSED
 
     def resume(self) -> None:
         """Resume runtime execution and reactivate non-removed strategies."""
@@ -74,19 +75,29 @@ class ArenaRuntime:
             trials = self.ledger.trials_for(hypothesis_id)
             has_candidate = any(t.verdict == "CANDIDATE" for t in trials)
             has_pass = False
-            for t in trials:
-                if hasattr(self.ledger, "holdout_spend"):
-                    sp = self.ledger.holdout_spend(t.id)
-                    if sp and getattr(sp, "verdict", None) == "PASS":
-                        has_pass = True
-                        break
-            if not (has_candidate or has_pass) and strategy_spec is None:
+
+            hyp = (
+                self.ledger.hypothesis(hypothesis_id)
+                if hasattr(self.ledger, "hypothesis")
+                else None
+            )
+            family_id = getattr(hyp, "family_id", None)
+            if family_id is None and trials:
+                family_id = getattr(trials[0], "family_id", None)
+
+            if family_id is not None and hasattr(self.ledger, "holdout_spend"):
+                sp = self.ledger.holdout_spend(family_id)
+                if sp and getattr(sp, "verdict", None) == "PASS":
+                    has_pass = True
+
+            if not (has_candidate or has_pass):
                 raise ValueError(
                     "Only CANDIDATE or Holdout PASS Hypotheses may enter the Forward Arena"
                 )
 
             if strategy_spec is None:
-                hyp = self.ledger.hypothesis(hypothesis_id)
+                if hyp is None:
+                    hyp = self.ledger.hypothesis(hypothesis_id)
                 spec_dict = (
                     json.loads(hyp.spec_json) if isinstance(hyp.spec_json, str) else hyp.spec_json
                 )
@@ -102,6 +113,14 @@ class ArenaRuntime:
             strat_symbol = getattr(strategy_spec, "symbol", "GOLD")
         if strat_tf is None:
             strat_tf = getattr(strategy_spec, "timeframe", "H1")
+
+        cost_snap = None
+        try:
+            from vibedesk.market.costs import current_cost
+
+            cost_snap = current_cost(self.root, strat_symbol)
+        except Exception:
+            cost_snap = None
 
         if self.ledger is not None and hasattr(self.ledger, "insert_arena_strategy"):
             strat_id = int(
@@ -126,6 +145,7 @@ class ArenaRuntime:
             status=StrategyStatus.ACTIVE,
             initial_balance=initial_balance,
             created_at=datetime.now(UTC).isoformat(),
+            cost_snapshot=cost_snap,
         )
         self.register_strategy(strategy)
         self.controls._record_action(
@@ -148,16 +168,13 @@ class ArenaRuntime:
         bar: dict[str, Any],
         live_spread: float | None = None,
     ) -> list[ArenaStepResult]:
-        """Step all active strategies matching symbol and timeframe."""
-        if self.is_stopped():
-            return []
-
+        """Step all active and paused strategies matching symbol and timeframe."""
         results: list[ArenaStepResult] = []
         for s in self.strategies.values():
             if (
                 s.symbol == symbol
                 and s.timeframe == timeframe
-                and s.status == StrategyStatus.ACTIVE
+                and s.status != StrategyStatus.REMOVED
             ):
                 try:
                     res = s.step(bar, live_spread=live_spread)
@@ -173,9 +190,6 @@ class ArenaRuntime:
         clock: Callable[[], datetime] | None = None,
     ) -> list[ArenaStepResult]:
         """Poll MT5 for newly closed bars, append to cache, and step strategies (spec §2.1)."""
-        if self._stopped:
-            return []
-
         data_root = Path(root or self.root)
         mt5_api = api or self.api
         if mt5_api is None:
@@ -193,7 +207,7 @@ class ArenaRuntime:
 
         active_pairs: set[tuple[str, str]] = set()
         for s in self.strategies.values():
-            if s.status == StrategyStatus.ACTIVE:
+            if s.status != StrategyStatus.REMOVED:
                 active_pairs.add((s.symbol, s.timeframe))
 
         if not active_pairs:
@@ -351,12 +365,18 @@ class ArenaRuntime:
                 continue
 
             last_time = strategy.last_bar_time
+            now_dt = datetime.now(UTC)
             if last_time <= 0:
-                continue
+                if strategy.created_at:
+                    try:
+                        last_time = int(datetime.fromisoformat(strategy.created_at).timestamp())
+                    except Exception:
+                        continue
+                else:
+                    continue
 
             tf = Timeframe(strategy.timeframe)
             start_dt = datetime.fromtimestamp(last_time + 1, tz=UTC)
-            now_dt = datetime.now(UTC)
 
             try:
                 cached_bars = read_cache_unmasked(
