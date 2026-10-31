@@ -334,14 +334,24 @@ def test_arena_controls_lifecycle():
 
     # 3. Emergency stop
     controls.stop_arena(reason="high volatility spike")
-    assert runtime._stopped is True
+    assert runtime.is_stopped() is True
     assert strat.status == StrategyStatus.PAUSED
     assert controls.actions[-1]["action"] == "stopped"
 
-    # 4. Remove
+    # 4. Resume arena
+    controls.resume_arena(reason="volatility normalised")
+    assert runtime.is_stopped() is False
+    assert strat.status == StrategyStatus.ACTIVE
+    assert controls.actions[-1]["action"] == "resumed"
+
+    # 5. Remove (terminal)
     controls.remove_strategy(1, reason="degraded edge")
     assert strat.status == StrategyStatus.REMOVED
     assert controls.actions[-1]["action"] == "removed"
+
+    # Removed strategy cannot be resumed (terminal state)
+    with pytest.raises(ValueError, match="cannot be resumed"):
+        controls.resume_strategy(1)
 
 
 # --- Enrolment & Eligibility Tests ---
@@ -365,6 +375,7 @@ def test_send_to_arena_eligibility_checks():
     mock_ledger.trials_for.return_value = [candidate_trial]
     hyp_mock = MagicMock(spec_json=spec.model_dump_json(), symbol="GOLD", timeframe="H1")
     mock_ledger.hypothesis.return_value = hyp_mock
+    mock_ledger.insert_arena_strategy.return_value = 1
 
     enrolled = runtime.send_to_arena(hypothesis_id=5)
     assert enrolled.id == 1
