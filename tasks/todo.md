@@ -789,4 +789,5 @@ The following items remain open for the owner:
 - [x] Parse enrolment timestamps explicitly as UTC for restart cache replay.
 - [x] Reject pausing a removed strategy before mutating memory or recording an action.
 - [x] Add real-Ledger restart regression coverage for cache replay, both paper accounts, global stop persistence, removed-record exclusion, and rejected pause state preservation.
-- Validation: focused Arena suite passed (15 tests); Ruff lint and formatting checks passed. Full suite pending.
+- Rebased PR #35 onto main (`9bda2ed`), preserving both PR #33 and PR #35 task notes in the sole merge conflict.
+- Validation: focused Arena suite passed (15 tests); Ruff lint and formatting checks passed (139 files). Full serial suite: 1,597 passed, 1 skipped, 13 deselected, 2 failures inherited from main: the Custom Block contract fixture lacks a valid BlockDef, and the Ledger source guard flags migration 5's DROP TABLE statements. The initial four-worker run exhausted system memory; serial execution avoided those allocation errors.
