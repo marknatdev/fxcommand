@@ -6,8 +6,8 @@ bars after t do.
 
 from __future__ import annotations
 
-from functools import cache
 from typing import Any
+from zlib import crc32
 
 import numpy as np
 from pydantic import BaseModel
@@ -21,7 +21,6 @@ class LookaheadError(AssertionError):
     """Raised when a Block uses future data to calculate past or current signals."""
 
 
-@cache
 def base_bars(seed: int) -> Bars:
     """Generate deterministic synthetic bars for property testing without BarSource."""
     rng = np.random.default_rng(seed)
@@ -102,7 +101,7 @@ def test_custom_block_lookahead(
     else:
         raise TypeError(f"Invalid sample_params type: {type(sample_params)}")
 
-    rng = np.random.default_rng(abs(hash(block.name)) % 2**32)
+    rng = np.random.default_rng(crc32(block.name.encode("utf-8")))
     signalled = False
 
     for case in range(n_cases):

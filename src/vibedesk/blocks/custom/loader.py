@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import inspect
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -52,10 +53,13 @@ class CustomBlockLoader:
     ) -> None:
         self.directory = Path(directory) if directory is not None else Path(__file__).parent
         self.registry = registry if registry is not None else CustomBlockRegistry()
+        self._loaded_paths: dict[Path, str] = {}
 
     def load_file(self, path: Path | str) -> CustomBlockMeta:
         """Load a single custom block python file."""
         file_path = Path(path)
+        prior_name = self._loaded_paths.get(file_path.resolve(), file_path.stem)
+        self.registry.invalidate(prior_name)
         code = file_path.read_text(encoding="utf-8")
         sha256 = hashlib.sha256(code.encode("utf-8")).hexdigest()
 
@@ -90,13 +94,12 @@ class CustomBlockLoader:
             self.registry._blocks[file_path.stem] = meta
             return meta
 
-        import sys
-
         mod = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = mod
         try:
-            spec.loader.exec_module(mod)
+            exec(compile(code, str(file_path), "exec"), mod.__dict__)
         except Exception as e:
+            sys.modules.pop(module_name, None)
             meta = CustomBlockMeta(
                 name=file_path.stem,
                 kind="unknown",
@@ -135,6 +138,7 @@ class CustomBlockLoader:
                 block_def=bdef,
             )
 
+        self._loaded_paths[file_path.resolve()] = meta.name
         return meta
 
     def _extract_block_def(self, mod: Any, stem: str) -> BlockDef | None:

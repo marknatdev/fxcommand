@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pytest
@@ -178,89 +176,11 @@ def test_property_test_rejects_inert_block():
 # --- Custom Block Registry & Ledger Integration ---
 
 
-@dataclass(frozen=True)
-class FakeCustomBlockRecord:
-    id: int
-    name: str
-    kind: str
-    code: str
-    sha256: str
-    created_at: str
+class FakeLedger(Ledger):
+    """Ephemeral SQLite adapter sharing the production Ledger contract."""
 
-
-class FakeLedger:
-    """Fake ledger implementing Migration 4 public interface (ADR 0012)."""
-
-    def __init__(self) -> None:
-        self.blocks: dict[str, FakeCustomBlockRecord] = {}
-        self.approvals: dict[str, dict[str, Any]] = {}
-        self._next_id = 1
-
-    def register_custom_block(
-        self, name: str, kind: str, code: str, sha256: str | None = None
-    ) -> int:
-        clean_name = name.strip()
-        clean_kind = kind.strip()
-        if not clean_name or not clean_kind:
-            raise ValueError("name and kind required")
-        # Compute sha256 from verbatim code
-        computed = hashlib.sha256(code.encode("utf-8")).hexdigest()
-        if sha256 is not None and sha256 != computed:
-            raise ValueError(f"passed sha256 {sha256} does not match computed {computed}")
-        if clean_name in self.blocks and self.blocks[clean_name].sha256 == computed:
-            raise ValueError(f"Custom block {clean_name!r} is already registered")
-        bid = self._next_id
-        self._next_id += 1
-        rec = FakeCustomBlockRecord(
-            id=bid,
-            name=clean_name,
-            kind=clean_kind,
-            code=code,
-            sha256=computed,
-            created_at="2026-10-31T00:00:00Z",
-        )
-        if clean_name in self.blocks and self.blocks[clean_name].sha256 != computed:
-            self.approvals.pop(clean_name, None)
-        self.blocks[clean_name] = rec
-        return bid
-
-    def record_custom_block_approval(
-        self, block_id_or_name: int | str, approver: str = "owner"
-    ) -> int:
-        rec = self.get_custom_block(block_id_or_name)
-        if rec is None:
-            raise KeyError(f"no custom block {block_id_or_name!r}")
-        self.approvals[rec.name] = {
-            "approver": approver.strip(),
-            "approved_at": "2026-10-31T01:00:00Z",
-        }
-        return rec.id
-
-    def read_custom_block_approval_state(self, block_id_or_name: int | str) -> dict[str, Any]:
-        rec = self.get_custom_block(block_id_or_name)
-        if rec is None:
-            raise KeyError(f"no custom block {block_id_or_name!r}")
-        appr = self.approvals.get(rec.name)
-        return {
-            "block_id": rec.id,
-            "name": rec.name,
-            "kind": rec.kind,
-            "sha256": rec.sha256,
-            "approved": appr is not None,
-            "approved_at": appr["approved_at"] if appr else None,
-            "approver": appr["approver"] if appr else None,
-        }
-
-    def is_custom_block_approved(self, block_id_or_name: int | str) -> bool:
-        return self.read_custom_block_approval_state(block_id_or_name)["approved"]
-
-    def get_custom_block(self, block_id_or_name: int | str) -> FakeCustomBlockRecord | None:
-        if isinstance(block_id_or_name, int):
-            for b in self.blocks.values():
-                if b.id == block_id_or_name:
-                    return b
-            return None
-        return self.blocks.get(str(block_id_or_name).strip())
+    def __init__(self):
+        super().__init__(":memory:")
 
 
 def test_registry_registration_and_unapproved_by_default():
@@ -318,7 +238,7 @@ def test_changed_file_invalidates_approval():
 
     # Code is modified (v2)
     code_v2 = "def custom_filter(bars, p):\n    return bars.close > 20\n"
-    meta_v2 = reg.update_code("dyn_filter", code_v2)
+    meta_v2 = reg.update_code("dyn_filter", code_v2, block_def=bdef)
 
     # Approval MUST be invalidated because hash differs (ADR 0012)
     assert meta_v2.approved is False
@@ -378,7 +298,7 @@ BLOCK_NAME = "valid_block"
 BLOCK_KIND = Kind.FILTER
 
 class Params(BaseModel):
-    threshold: float = Field(100.0, ge=0.0)
+    threshold: float = Field(100.0, ge=0.0, le=5000.0)
 
 def valid_block(bars: Bars, p: Params) -> np.ndarray:
     return bars.close > p.threshold
@@ -431,7 +351,7 @@ BLOCK_NAME = "persisted_block"
 BLOCK_KIND = Kind.FILTER
 
 class Params(BaseModel):
-    mult: float = 1.0
+    mult: float = Field(1.0, ge=0.1, le=10.0)
 
 def persisted_block(bars, p):
     return bars.close > 0
@@ -483,30 +403,30 @@ def test_strategy_spec_rejects_unapproved_custom_blocks():
             SpecInvalid,
             match=r"custom block 'my_custom_entry' is not approved by the owner \(ADR 0012\)",
         ):
-            validate(spec_dict)
+            validate(spec_dict, registry=reg.to_block_registry(include_unapproved=True))
 
         # Approve the custom block -> accepted
         reg.approve("my_custom_entry", approver="owner")
 
-        spec = validate(spec_dict)
+        spec = validate(spec_dict, registry=reg.to_block_registry(include_unapproved=True))
         assert spec.entry.block == "my_custom_entry"
 
         # Grid expands cleanly
-        combos = expand_grid(spec)
+        combos = expand_grid(spec, registry=reg.to_block_registry())
         assert len(combos) == 1
         assert combos[0].entry.block == "my_custom_entry"
 
         from vibedesk.blocks.custom.lookahead import base_bars
 
         bars = base_bars(0)
-        signals = compile_signals(combos[0], bars)
+        signals = compile_signals(combos[0], bars, registry=reg.to_block_registry())
         assert len(signals.long_entry) == len(bars)
     finally:
         # Cleanup LIBRARY def
-        LIBRARY._defs.pop("my_custom_entry", None)
+        assert LIBRARY.get("my_custom_entry") is None
 
 
-def test_revoked_or_changed_custom_block_rejected_in_spec():
+def test_changed_custom_block_rejected_in_spec():
     reg = CustomBlockRegistry()
     bdef = BlockDef("revokable_entry", Kind.ENTRY, ValidEntryParams, valid_entry_fn, "doc")
     code_v1 = "def revokable_entry(bars, p): pass"
@@ -529,34 +449,21 @@ def test_revoked_or_changed_custom_block_rejected_in_spec():
             SpecInvalid,
             match=r"custom block 'revokable_entry' is not approved by the owner \(ADR 0012\)",
         ):
-            validate(spec_dict)
+            validate(spec_dict, registry=reg.to_block_registry(include_unapproved=True))
 
         # 2. Approved -> accepted
         reg.approve("revokable_entry", approver="owner")
-        assert validate(spec_dict).entry.block == "revokable_entry"
+        assert (
+            validate(spec_dict, registry=reg.to_block_registry(include_unapproved=True)).entry.block
+            == "revokable_entry"
+        )
 
-        # 3. Revoked -> unapproved again
-        reg.revoke("revokable_entry")
-        with pytest.raises(
-            SpecInvalid,
-            match=r"custom block 'revokable_entry' is not approved by the owner \(ADR 0012\)",
-        ):
-            validate(spec_dict)
-
-        # 4. Re-approved -> accepted
-        reg.approve("revokable_entry", approver="owner")
-        assert validate(spec_dict).entry.block == "revokable_entry"
-
-        # 5. Changed code hash -> unapproved again
-        code_v2 = "def revokable_entry(bars, p): return bars.close > 0"
-        reg.update_code("revokable_entry", code_v2)
-        with pytest.raises(
-            SpecInvalid,
-            match=r"custom block 'revokable_entry' is not approved by the owner \(ADR 0012\)",
-        ):
-            validate(spec_dict)
+        # Changed source without a reloaded callable is absent from the library.
+        reg.update_code("revokable_entry", "x = 2")
+        with pytest.raises(SpecInvalid, match="unknown block"):
+            validate(spec_dict, registry=reg.to_block_registry(include_unapproved=True))
     finally:
-        LIBRARY._defs.pop("revokable_entry", None)
+        assert LIBRARY.get("revokable_entry") is None
 
 
 def test_custom_block_decorator():
@@ -572,3 +479,126 @@ def test_custom_block_decorator():
     assert bdef.name == "decorated_filter"
     assert bdef.kind == Kind.FILTER
     assert bdef.doc == "Decorated doc"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "getattr(__builtins__, 'open')",
+        "().__class__.__base__.__subclasses__()",
+        "import pathlib",
+        "import ctypes",
+        "import pickle",
+        "import marshal",
+        "import io",
+        "import tempfile",
+        "import multiprocessing",
+        "import vibedesk.market.mt5",
+        "setattr(x, 'a', 1)",
+        "globals()",
+        "vars()",
+        "from . import other",
+        "import math as __hidden",
+    ],
+)
+def test_review_validator_bypasses(code):
+    assert validate_custom_block_code(code)[0] is False
+
+
+@pytest.mark.parametrize(
+    "fn,code",
+    [
+        (peeking_entry_fn, "def peek(bars, p): return bars.close"),
+        (valid_entry_fn, "import pathlib"),
+    ],
+)
+def test_failed_verification_cannot_be_approved(fn, code):
+    ledger = FakeLedger()
+    reg = CustomBlockRegistry(ledger=ledger)
+    params = PeekingEntryParams if fn is peeking_entry_fn else ValidEntryParams
+    bdef = BlockDef("bad", Kind.ENTRY, params, fn, "")
+    meta = reg.register("bad", "entry", code, block_def=bdef)
+    assert meta.error and not meta.verified
+    with pytest.raises(ValueError, match="failed verification"):
+        reg.approve("bad")
+    assert not ledger.is_custom_block_approved("bad")
+
+
+def test_missing_definition_cannot_be_approved():
+    reg = CustomBlockRegistry()
+    reg.register("missing", "entry", "x = 1")
+    with pytest.raises(ValueError, match="failed verification"):
+        reg.approve("missing")
+
+
+def test_builtin_names_and_global_library_are_protected():
+    reg = CustomBlockRegistry()
+    with pytest.raises(ValueError, match="clashes"):
+        reg.register("atr_stop", "stop", "x = 1")
+    with pytest.raises(ValueError, match="isolated"):
+        CustomBlockRegistry(library=LIBRARY)
+    assert not hasattr(reg, "revoke")
+
+
+def test_real_ledger_edit_reapprove_and_restart(tmp_path):
+    path = tmp_path / "versions.db"
+    bdef = BlockDef("versioned", Kind.ENTRY, ValidEntryParams, valid_entry_fn, "")
+    with Ledger(path) as ledger:
+        reg = CustomBlockRegistry(ledger=ledger)
+        first = reg.register("versioned", "entry", "x = 1", block_def=bdef)
+        reg.approve("versioned")
+        second = reg.update_code("versioned", "x = 2", block_def=bdef)
+        assert not second.approved
+        assert first.block_id != second.block_id
+        assert ledger.get_custom_block(first.block_id).approved
+        assert not ledger.get_custom_block("versioned").approved
+        reg.approve("versioned")
+    with Ledger(path) as ledger:
+        reg = CustomBlockRegistry(ledger=ledger)
+        assert reg.register("versioned", "entry", "x = 2", block_def=bdef).approved
+        assert len(ledger.list_custom_blocks()) == 2
+        reg.update_code("versioned", "x = 3")
+        with pytest.raises(ValueError, match="verification"):
+            reg.approve("versioned")
+
+
+def test_invalid_reload_removes_previously_approved_callable(tmp_path):
+    path = tmp_path / "example.py"
+    path.write_text(
+        """
+from pydantic import BaseModel
+from vibedesk.blocks.registry import Kind
+BLOCK_NAME = "different_name"
+BLOCK_KIND = Kind.FILTER
+class Params(BaseModel):
+    pass
+def run(bars, p):
+    return bars.close > bars.open
+""",
+        encoding="utf-8",
+    )
+    loader = CustomBlockLoader()
+    assert loader.load_file(path).verified
+    loader.registry.approve("different_name")
+    path.write_text("import pathlib", encoding="utf-8")
+    assert loader.load_file(path).error
+    assert not loader.registry.is_approved("different_name")
+    assert loader.registry.to_block_registry().get("different_name") is None
+
+
+def test_lookahead_seed_is_stable(monkeypatch):
+    import zlib
+
+    import vibedesk.blocks.custom.lookahead as module
+
+    seeds = []
+    original = np.random.default_rng
+
+    def capture(seed):
+        seeds.append(seed)
+        return original(seed)
+
+    monkeypatch.setattr(module.np.random, "default_rng", capture)
+    bdef = BlockDef("stable", Kind.ENTRY, ValidEntryParams, valid_entry_fn, "")
+    assert test_custom_block_lookahead(bdef, n_cases=2)
+    assert seeds[0] == zlib.crc32(b"stable")
