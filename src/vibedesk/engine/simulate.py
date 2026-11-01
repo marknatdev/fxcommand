@@ -43,7 +43,7 @@ from vibedesk.engine.costs import CostSnapshot
 from vibedesk.engine.prepared import PreparedMarket, prepare
 from vibedesk.market.bars import Bars
 
-logger = logging.getLogger("vibedesk.engine.simulate")
+logger = logging.getLogger(__name__)
 
 
 class ExitReason(IntEnum):
@@ -111,32 +111,23 @@ class Trades:
         return rows
 
 
-def simulate(
-    bars: Bars,
-    signals: Signals,
-    cost: CostSnapshot,
-    m1: Bars | None = None,
-    time_filter: np.ndarray | None = None,
-) -> Trades:
+def simulate(bars: Bars, signals: Signals, cost: CostSnapshot, m1: Bars | None = None) -> Trades:
     """Simulate one Combination's signals. `m1`, when given, settles bars where the stop and
     the target are both touched; without it, or without M1 bars inside that bar, the stop wins.
 
     To simulate the same bars many times, prepare them once and call simulate_prepared.
     """
-    return simulate_prepared(prepare(bars, cost, m1), signals, time_filter=time_filter)
+    return simulate_prepared(prepare(bars, cost, m1), signals)
 
 
-def simulate_prepared(
-    market: PreparedMarket,
-    signals: Signals,
-    time_filter: np.ndarray | None = None,
-) -> Trades:
+def simulate_prepared(market: PreparedMarket, signals: Signals) -> Trades:
     """Simulate one Combination's signals on a market from `prepare`."""
     n = len(market)
-    tf = signals.time_filter if time_filter is None else time_filter
-    has_tf = tf is not None
-    tf_array = np.ones(n, dtype=np.bool_) if tf is None else np.asarray(tf, dtype=np.bool_)
-    if len(tf_array) != n:
+    has_tf = signals.time_filter is not None
+    # Without a time filter the engine never reads the mask; any bool array of the right length
+    # will do, so reuse the prepared one rather than allocating per Combination.
+    time_filter = signals.time_filter if has_tf else market.never
+    if len(time_filter) != n:
         raise ValueError("signals.time_filter has a different length than the bars")
     trail_dist = market.no_trail if signals.trail_dist is None else signals.trail_dist
     exit_long = market.never if signals.exit_long is None else signals.exit_long
@@ -177,11 +168,11 @@ def simulate_prepared(
         market.m1_lo,
         market.m1_hi,
         has_tf,
-        tf_array,
+        time_filter,
     )
     if num_skips > 0:
-        logger.info(
-            "Fill-bar rule (CCC-71): skipped %d fill(s) that violated time filter at t+1",
+        logger.debug(
+            "Fill-bar rule (CCC-71): skipped %d fill(s) whose entry bar failed a time filter",
             num_skips,
         )
     entry_idx = table[:, _ENTRY_IDX].astype(np.int64)

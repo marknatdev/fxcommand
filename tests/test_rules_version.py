@@ -48,7 +48,7 @@ PINNED = {
     "block:atr_target": "e31746cbb9bac1aa",
     "block:atr_trailing": "74783ab65f894f05",
     "block:bollinger_touch": "373dfcfd3b4c7668",
-    "block:day_of_week": "1aa23258a63673f4",
+    "block:day_of_week": "259f6395e3252550",
     "block:donchian_breakout": "d0c341015becbbf3",
     "block:fixed_risk": "8fdad37b2f3cb0df",
     "block:ma_cross": "859c6e1510ebe53f",
@@ -58,11 +58,11 @@ PINNED = {
     "block:r_target": "558793eee8eeb3d2",
     "block:range_breakout": "5eb1a70d6ee6d4cd",
     "block:rsi_threshold": "18c1cc753696127c",
-    "block:session_window": "99b1c2445c91bcc2",
+    "block:session_window": "ebd401fb4dee3af3",
     "block:time_exit": "0805495db21c14e4",
     "engine:random": "b2a0f638504dbba5",
-    "engine:reversal": "f7c384d4df516fc7",
-    "trial": "b56ab66bab6ce658",
+    "engine:reversal": "a82c31efa9ab0f7e",
+    "trial": "a43259b14de20e96",
     "thresholds": "69aa95512d63496e",
 }
 

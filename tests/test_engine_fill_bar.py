@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 import numpy as np
 import pytest
 
+from vibedesk.blocks.compile import BlockCache, compile_signals
 from vibedesk.blocks.exits import AtrTargetParams, atr_target
 from vibedesk.blocks.registry import LIBRARY
+from vibedesk.blocks.spec import expand_grid, validate
 from vibedesk.engine.costs import CostSnapshot
 from vibedesk.engine.simulate import ExitReason, Signals, simulate
 from vibedesk.market.bars import Bars, Timeframe
@@ -162,7 +165,7 @@ def test_fill_bar_short_side_skip():
 
 
 def test_fill_bar_logging(caplog):
-    """Verify that skipped fills are logged at INFO level."""
+    """Verify that skipped fills are logged at DEBUG level."""
     bars = _make_bars(5)
     cost = _make_cost()
     n = len(bars)
@@ -183,7 +186,7 @@ def test_fill_bar_logging(caplog):
         time_filter=time_filter,
     )
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         simulate(bars, signals, cost)
 
     assert "Fill-bar rule (CCC-71): skipped 1 fill(s)" in caplog.text
@@ -357,3 +360,91 @@ def test_atr_target_registered_in_library():
     block = LIBRARY.get("atr_target")
     assert block.name == "atr_target"
     assert block.params is AtrTargetParams
+
+
+@pytest.mark.parametrize(
+    "start,end,extra,expected_mask,entries,skips",
+    [
+        ("02:00", "03:00", [], [False, False, True, False, False], [], 1),
+        ("02:00", "04:00", [], [False, False, True, True, False], [3], 0),
+        ("03:00", "05:00", [], [False, False, False, True, True], [], 0),
+        (
+            "02:00",
+            "04:00",
+            [{"block": "day_of_week", "params": {"mon": False}}],
+            [False] * 5,
+            [],
+            0,
+        ),
+    ],
+)
+def test_compiled_session_filter_checks_signal_and_actual_fill_bar(
+    start, end, extra, expected_mask, entries, skips
+):
+    bars = _breakout_bars([1704067200 + i * 3600 for i in range(5)])
+    filters = [
+        {
+            "block": "session_window",
+            "params": {
+                "zone": "london",
+                "start": start,
+                "end": end,
+            },
+        },
+        *extra,
+    ]
+    signals = _compile_breakout(bars, filters)
+    assert signals.time_filter.tolist() == expected_mask
+    assert not signals.time_filter.flags.writeable
+    trades = simulate(bars, signals, _make_cost())
+    assert trades.records["entry_idx"].tolist() == entries
+    assert trades.skipped_fills == skips
+    assert len(simulate_reference(bars, signals, _make_cost())) == len(entries)
+
+
+@pytest.mark.parametrize(
+    "excluded,entries,skips", [("mon", [], 1), ("fri", [], 0), ("tue", [3], 0)]
+)
+def test_compiled_weekday_filter_checks_actual_bar_across_weekend(excluded, entries, skips):
+    times = [int(datetime(2024, 1, day, 12, tzinfo=UTC).timestamp()) for day in (3, 4, 5, 8, 9)]
+    bars = _breakout_bars(times)
+    signals = _compile_breakout(bars, [{"block": "day_of_week", "params": {excluded: False}}])
+    trades = simulate(bars, signals, _make_cost())
+    assert trades.records["entry_idx"].tolist() == entries
+    assert trades.skipped_fills == skips
+
+
+def _breakout_bars(times):
+    close = np.array([100.0, 100.0, 103.0, 103.0, 103.0])
+    return Bars(
+        "GOLD", Timeframe.H1, 0.01, 2, times, close, close + 0.5, close - 0.5, close, np.zeros(5)
+    )
+
+
+def _compile_breakout(bars, filters):
+    [combination] = expand_grid(
+        validate(
+            {
+                "name": "compiled fill boundary",
+                "symbol": "GOLD",
+                "timeframe": "H1",
+                "direction": "long",
+                "entry": {"block": "donchian_breakout", "params": {"period": 2}},
+                "filters": filters,
+                "exit": {"stop": {"block": "atr_stop", "params": {"period": 2, "mult": 10.0}}},
+                "sizing": {"block": "fixed_risk", "params": {}},
+            }
+        )
+    )
+    cache = BlockCache(bars)
+    first = compile_signals(combination, bars, cache=cache)
+    second = compile_signals(combination, bars, cache=cache)
+    np.testing.assert_array_equal(first.time_filter, second.time_filter)
+    return second
+
+
+def test_compiled_strategy_without_time_filters_keeps_existing_fills():
+    bars = _breakout_bars([1704067200 + i * 3600 for i in range(5)])
+    signals = _compile_breakout(bars, [])
+    assert signals.time_filter is None
+    assert simulate(bars, signals, _make_cost()).records["entry_idx"].tolist() == [3]
