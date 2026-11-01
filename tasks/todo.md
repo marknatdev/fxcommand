@@ -746,7 +746,16 @@ The following items remain open for the owner:
 - [x] **W0-Tests:** Contract unit tests in `tests/test_layer_bc_contract.py` green.
 
 ## Wave 1: Core Engines and Isolation
-- [ ] **T-ArenaCore (CCC-66):** Forward Arena closed bar feed, dual fill tracks, gap replay catch-up, controls.
+- [x] **T-ArenaCore (CCC-66):** Forward Arena closed bar feed, dual fill tracks, gap replay catch-up, controls.
+  - `ArenaStrategy.step` on closed bars read from MT5 through read-only wrapper (`ReadOnlyMt5`), appending closed bars to cache.
+  - Fill-bar time filter check at $t+1$ (`session_window` and `day_of_week`), skipping fill and logging at INFO on filter violation (ADR 0008, CCC-71).
+  - Dual fill tracks (`backtest_cost` priced at Spread Floor + 1 pt slippage + swap nights; `live_spread` priced at signal's MT5 spread + 1 pt slippage).
+  - Virtual 10,000 USD `PaperAccount` per strategy sized by Spec's `fixed_risk` block (default 1.0% equity risk).
+  - Gap detection and `catch_up` replay from Parquet cache on host restart/reconnect, recording catch-up events in Ledger `arena_actions`.
+  - Owner controls (`pause`, `resume`, `remove`, `stop_arena`) auditing actions in Ledger `arena_actions` and updating strategy status.
+  - Enrolment eligibility enforcement: only `CANDIDATE` or Holdout `PASS` Hypotheses enter via explicit `send_to_arena`.
+  - Scheduler registration in `vibedesk.app.scheduler`: 10-second timer for Arena closed-bar poll and 07:00 Bangkok daily Night Shift brief job.
+  - Unit tests in `tests/test_arena_core.py` (8 passing tests), `tests/test_layer_bc_contract.py` (17 passing tests).
 - [ ] **T-Engine (CCC-71, CCC-79, CCC-80):** Fill-bar rule in `simulate.py`, Holdout trade close at last bar, remove unused `stop_distance` in `atr_target`, bump `RULES_VERSION = 4`, apply Migration 4 in `store.py`.
 - [x] **T-NightShift (CCC-75):** Overnight research loop with 20-Trial and 50% token caps, 07:00 Bangkok brief.
   - Implemented `run_night_shift` in `runner.py` with queued ideas and family parameter variations.
@@ -774,3 +783,11 @@ The following items remain open for the owner:
 
 - Plan: version Ledger records in migration 5, verify before approval, allowlist imports, isolate registries, remove nonpersistent revocation, stabilize look-ahead seeds.
 - Validate with targeted regression tests, full pytest, Ruff lint and format checks; push fixes and resolve all six review threads.
+
+## PR #35 review follow-up (2026-11-01)
+- [x] Restore non-removed Arena strategies from Ledger records on construction, including Hypothesis Spec, measured costs, initial balance, twin type, status, enrolment time, and global stop state.
+- [x] Parse enrolment timestamps explicitly as UTC for restart cache replay.
+- [x] Reject pausing a removed strategy before mutating memory or recording an action.
+- [x] Add real-Ledger restart regression coverage for cache replay, both paper accounts, global stop persistence, removed-record exclusion, and rejected pause state preservation.
+- Rebased PR #35 onto main (`9bda2ed`), preserving both PR #33 and PR #35 task notes in the sole merge conflict.
+- Validation: focused Arena suite passed (15 tests); Ruff lint and formatting checks passed (139 files). Full serial suite: 1,597 passed, 1 skipped, 13 deselected, 2 failures inherited from main: the Custom Block contract fixture lacks a valid BlockDef, and the Ledger source guard flags migration 5's DROP TABLE statements. The initial four-worker run exhausted system memory; serial execution avoided those allocation errors.
