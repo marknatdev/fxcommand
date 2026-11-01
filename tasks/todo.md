@@ -799,3 +799,5 @@ The following items remain open for the owner:
 - Completed: own-bar masks wired through compile_signals; session and weekend boundary regressions plus randomized twin parity; four v4 fingerprints updated. Changelog distinguishes CCC-71 from no-result CCC-79/80 changes.
 - Rebased PR #36 onto main 9bda2ed, retaining PR #33 and #36 notes in the sole conflict.
 - Validation: 34 focused tests passed; full serial suite 1,801 passed, 1 skipped, 2 failed. Both failures reproduce on unchanged main 9bda2ed: custom-block contract fixture lacks a valid BlockDef; Ledger SQL guard flags migration 5 DROP TABLE statements. Four-worker run exhausted host memory. Ruff check and format pass (139 files).
+
+- Second rebase onto main 68ecb0f (PR #35 Arena integration): retained completed Arena and Engine checklist entries, Migration 4 attribution, and all PR #33/#35/#36 notes. No engine source changes during rebase. Validation: 535 Arena/engine/filter/fingerprint tests passed; Ruff lint and format passed (140 files).
