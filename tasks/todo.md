@@ -795,3 +795,7 @@ The following items remain open for the owner:
 ## PR #36 review follow-up (2026-11-01)
 
 - Plan: finish own-bar time masks in compile_signals, cover signal/fill boundaries end to end, correct the v4 changelog, re-pin and run pytest/Ruff, then push and resolve both review threads.
+
+- Completed: own-bar masks wired through compile_signals; session and weekend boundary regressions plus randomized twin parity; four v4 fingerprints updated. Changelog distinguishes CCC-71 from no-result CCC-79/80 changes.
+- Rebased PR #36 onto main 9bda2ed, retaining PR #33 and #36 notes in the sole conflict.
+- Validation: 34 focused tests passed; full serial suite 1,801 passed, 1 skipped, 2 failed. Both failures reproduce on unchanged main 9bda2ed: custom-block contract fixture lacks a valid BlockDef; Ledger SQL guard flags migration 5 DROP TABLE statements. Four-worker run exhausted host memory. Ruff check and format pass (139 files).
