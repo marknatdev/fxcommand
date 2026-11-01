@@ -192,8 +192,19 @@ def _slot_grid(
 ) -> tuple[list[BaseModel], list[SpecError]]:
     block = registry.get(ref.block)
     if block is None:
-        known = ", ".join(sorted(b.name for b in registry.all() if b.kind is kind))
+        known = ", ".join(
+            sorted(
+                b.name for b in registry.all() if b.kind is kind and getattr(b, "approved", True)
+            )
+        )
         return [], [SpecError(f"{path}.block", f"unknown block; known {kind} blocks: {known}")]
+    if not getattr(block, "approved", True):
+        return [], [
+            SpecError(
+                f"{path}.block",
+                f"custom block {ref.block!r} is not approved by the owner (ADR 0012)",
+            )
+        ]
     if block.kind is not kind:
         return [], [SpecError(f"{path}.block", f"{ref.block} is a {block.kind} block, not {kind}")]
 

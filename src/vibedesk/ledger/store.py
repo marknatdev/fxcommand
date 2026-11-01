@@ -219,6 +219,33 @@ MIGRATIONS: tuple[str, ...] = (
         "custom_blocks",
         "custom_block_approvals",
     ),
+    # Rebuild the versioned tables, preserving all records and public IDs.
+    f"""
+    ALTER TABLE custom_block_approvals RENAME TO legacy_custom_block_approvals;
+    ALTER TABLE custom_blocks RENAME TO legacy_custom_blocks;
+    CREATE TABLE custom_blocks (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+        kind TEXT NOT NULL CHECK (length(trim(kind)) > 0),
+        code TEXT NOT NULL CHECK (length(trim(code)) > 0),
+        sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+        created_at TEXT NOT NULL DEFAULT ({_NOW}),
+        UNIQUE (name, sha256)
+    );
+    CREATE TABLE custom_block_approvals (
+        id INTEGER PRIMARY KEY,
+        block_id INTEGER NOT NULL UNIQUE REFERENCES custom_blocks (id),
+        approver TEXT NOT NULL CHECK (length(trim(approver)) > 0),
+        created_at TEXT NOT NULL DEFAULT ({_NOW})
+    );
+    INSERT INTO custom_blocks SELECT * FROM legacy_custom_blocks;
+    INSERT INTO custom_block_approvals SELECT * FROM legacy_custom_block_approvals;
+    DROP TABLE legacy_custom_block_approvals;
+    DROP TABLE legacy_custom_blocks;
+    """
+    + _append_only("custom_blocks", "custom_block_approvals").replace(
+        "CREATE TRIGGER custom_", "CREATE TRIGGER versioned_custom_"
+    ),
 )
 
 
@@ -1037,7 +1064,8 @@ class Ledger:
 
         with self._write() as db:
             existing = db.execute(
-                "SELECT 1 FROM custom_blocks WHERE name = ?", (clean_name,)
+                "SELECT 1 FROM custom_blocks WHERE name = ? AND sha256 = ?",
+                (clean_name, computed_digest),
             ).fetchone()
             if existing is not None:
                 raise ValueError(f"Custom block {clean_name!r} is already registered")
@@ -1065,7 +1093,8 @@ class Ledger:
                 ).fetchone()
             else:
                 row = db.execute(
-                    "SELECT id FROM custom_blocks WHERE name = ?", (str(block_id_or_name).strip(),)
+                    "SELECT id FROM custom_blocks WHERE name = ? ORDER BY id DESC LIMIT 1",
+                    (str(block_id_or_name).strip(),),
                 ).fetchone()
             if row is None:
                 raise NotFound(f"no custom block {block_id_or_name!r}")
@@ -1108,7 +1137,7 @@ class Ledger:
                            a.approver
                     FROM custom_blocks b
                     LEFT JOIN custom_block_approvals a ON a.block_id = b.id
-                    WHERE b.name = ?
+                    WHERE b.name = ? ORDER BY b.id DESC LIMIT 1
                 """
                 param = (str(block_id_or_name).strip(),)
             row = self._db.execute(sql, param).fetchone()
@@ -1145,7 +1174,7 @@ class Ledger:
                        b.created_at
                 FROM custom_blocks b
                 LEFT JOIN custom_block_approvals a ON a.block_id = b.id
-                WHERE {col} = ?
+                WHERE {col} = ? ORDER BY b.id DESC LIMIT 1
                 """,
                 (val,),
             ).fetchone()

@@ -758,7 +758,7 @@ The following items remain open for the owner:
   - Implemented per-item `try/log/continue` error isolation so single item failures do not abort the night.
   - Kept runner notifier-free; exposed `compile_morning_brief(state, notifier)` for scheduler dispatch at 07:00.
   - Full test coverage in `tests/test_nightshift.py` including real `Desk` test with synthetic bars, and contract verification in `tests/test_layer_bc_contract.py`.
-- [ ] **T-CustomBlocks (CCC-77):** Custom block dynamic loader, property tests, approval gate.
+- [x] **T-CustomBlocks (CCC-77):** Custom block dynamic loader, property tests, approval gate.
 
 ## Wave 2: Analysis, Gates and UI
 - [ ] **T-Leaderboard (CCC-67, CCC-69):** Rank by net R, decay calculation, Demo-Ready badge with override, per-TF live gate.
@@ -769,3 +769,8 @@ The following items remain open for the owner:
 ## Wave 3: Integration and Docs
 - [ ] **T-Integration:** End-to-end multi-layer tests on deterministic fakes in `tests/test_layer_bc_whole.py`.
 - [ ] **T-Docs:** Update `CLAUDE.md` and user guides.
+
+## PR #33 review fixes (2026-11-01)
+
+- Plan: version Ledger records in migration 5, verify before approval, allowlist imports, isolate registries, remove nonpersistent revocation, stabilize look-ahead seeds.
+- Validate with targeted regression tests, full pytest, Ruff lint and format checks; push fixes and resolve all six review threads.

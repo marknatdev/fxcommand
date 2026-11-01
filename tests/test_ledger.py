@@ -707,7 +707,7 @@ def test_migration_4_applies_cleanly(path):
         conn = sqlite3.connect(path)
         (version,) = conn.execute("PRAGMA user_version").fetchone()
         conn.close()
-        assert version == 4
+        assert version == len(MIGRATIONS)
         assert len(ledger.list_arena_strategies()) == 0
         assert len(ledger.list_custom_blocks()) == 0
         fam = ledger.family(1)
@@ -977,3 +977,29 @@ def test_custom_block_code_verbatim_and_sha_validation(ledger):
         sha256=expected_hash,
     )
     assert block_id2 > 0
+
+
+def test_migration_5_preserves_custom_approval_and_versions(path):
+    old = sqlite3.connect(path)
+    old.executescript(
+        "BEGIN;\n" + "\n".join(MIGRATIONS[:4]) + "\nPRAGMA user_version = 4;\nCOMMIT;"
+    )
+    import hashlib
+
+    digest = hashlib.sha256(b"x = 1").hexdigest()
+    old.execute(
+        "INSERT INTO custom_blocks (id, name, kind, code, sha256) VALUES (7, ?, ?, ?, ?)",
+        ("legacy", "filter", "x = 1", digest),
+    )
+    old.execute("INSERT INTO custom_block_approvals (block_id, approver) VALUES (7, 'owner')")
+    old.commit()
+    old.close()
+    with Ledger(path) as ledger:
+        assert ledger.get_custom_block(7).approved
+        new_id = ledger.register_custom_block("legacy", "filter", "x = 2")
+        assert new_id > 7
+        assert not ledger.get_custom_block("legacy").approved
+        ledger.record_custom_block_approval(new_id)
+        assert ledger.get_custom_block(new_id).approved
+        assert len(ledger.list_custom_blocks()) == 2
+        assert ledger._db.execute("PRAGMA foreign_key_check").fetchall() == []
