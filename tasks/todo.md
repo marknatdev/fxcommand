@@ -756,7 +756,7 @@ The following items remain open for the owner:
   - Enrolment eligibility enforcement: only `CANDIDATE` or Holdout `PASS` Hypotheses enter via explicit `send_to_arena`.
   - Scheduler registration in `vibedesk.app.scheduler`: 10-second timer for Arena closed-bar poll and 07:00 Bangkok daily Night Shift brief job.
   - Unit tests in `tests/test_arena_core.py` (8 passing tests), `tests/test_layer_bc_contract.py` (17 passing tests).
-- [ ] **T-Engine (CCC-71, CCC-79, CCC-80):** Fill-bar rule in `simulate.py`, Holdout trade close at last bar, remove unused `stop_distance` in `atr_target`, bump `RULES_VERSION = 4`, apply Migration 4 in `store.py`.
+- [x] **T-Engine (CCC-71, CCC-79, CCC-80):** Fill-bar rule in `simulate.py`, Holdout trade close at last bar, remove unused `stop_distance` in `atr_target`, bump `RULES_VERSION = 4`. Migration 4 was delivered separately in PR #32.
 - [x] **T-NightShift (CCC-75):** Overnight research loop with 20-Trial and 50% token caps, 07:00 Bangkok brief.
   - Implemented `run_night_shift` in `runner.py` with queued ideas and family parameter variations.
   - Enforced 20-Trial max cap and 50% daily token share cap (stopping early with typed reason). Treated non-positive daily token cap as unlimited.
@@ -791,3 +791,13 @@ The following items remain open for the owner:
 - [x] Add real-Ledger restart regression coverage for cache replay, both paper accounts, global stop persistence, removed-record exclusion, and rejected pause state preservation.
 - Rebased PR #35 onto main (`9bda2ed`), preserving both PR #33 and PR #35 task notes in the sole merge conflict.
 - Validation: focused Arena suite passed (15 tests); Ruff lint and formatting checks passed (139 files). Full serial suite: 1,597 passed, 1 skipped, 13 deselected, 2 failures inherited from main: the Custom Block contract fixture lacks a valid BlockDef, and the Ledger source guard flags migration 5's DROP TABLE statements. The initial four-worker run exhausted system memory; serial execution avoided those allocation errors.
+
+## PR #36 review follow-up (2026-11-01)
+
+- Plan: finish own-bar time masks in compile_signals, cover signal/fill boundaries end to end, correct the v4 changelog, re-pin and run pytest/Ruff, then push and resolve both review threads.
+
+- Completed: own-bar masks wired through compile_signals; session and weekend boundary regressions plus randomized twin parity; four v4 fingerprints updated. Changelog distinguishes CCC-71 from no-result CCC-79/80 changes.
+- Rebased PR #36 onto main 9bda2ed, retaining PR #33 and #36 notes in the sole conflict.
+- Validation: 34 focused tests passed; full serial suite 1,801 passed, 1 skipped, 2 failed. Both failures reproduce on unchanged main 9bda2ed: custom-block contract fixture lacks a valid BlockDef; Ledger SQL guard flags migration 5 DROP TABLE statements. Four-worker run exhausted host memory. Ruff check and format pass (139 files).
+
+- Second rebase onto main 68ecb0f (PR #35 Arena integration): retained completed Arena and Engine checklist entries, Migration 4 attribution, and all PR #33/#35/#36 notes. No engine source changes during rebase. Validation: 535 Arena/engine/filter/fingerprint tests passed; Ruff lint and format passed (140 files).

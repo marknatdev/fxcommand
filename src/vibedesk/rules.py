@@ -25,6 +25,10 @@ Versions:
    weeks between the US and European daylight-saving switches, server days and hours shift,
    altering day_of_week filters, swap nights, daily returns and baseline hours on unchanged
    bars. Old-clock Trials in the Ledger stay distinguishable.
+4. 2026-10-31: CCC-71 fill-bar rule (time filters evaluated on both signal bar t and fill
+   bar t+1; skip fill if t+1 violates time filter). The version also changes the Coin-Flip
+   Baseline seed. CCC-79 codifies the existing final-bar close with exit costs; CCC-80 is
+   atr_target signature cleanup only. Neither CCC-79 nor CCC-80 changes results.
 """
 
-RULES_VERSION = 3
+RULES_VERSION = 4

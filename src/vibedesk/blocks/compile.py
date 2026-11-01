@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 
+from vibedesk.blocks.filters import TIME_FILTERS
 from vibedesk.blocks.registry import LIBRARY, BlockRegistry
 from vibedesk.blocks.spec import Combination
 from vibedesk.engine.simulate import Signals
@@ -48,10 +49,14 @@ def compile_signals(
 
     raw_long, raw_short = (np.array(side, dtype=np.bool_) for side in run(combination.entry))
     long, short = raw_long.copy(), raw_short.copy()
+    time_filter = None  # the fill-bar mask (ADR 0008): every time filter, at each bar's own open
     for bound in combination.filters:
         allow_long, allow_short = run(bound)
         long &= allow_long
         short &= allow_short
+        if bound.block in TIME_FILTERS:
+            allowed = np.asarray(allow_long, dtype=np.bool_) & allow_short
+            time_filter = allowed if time_filter is None else time_filter & allowed
     if combination.direction == "long":
         short[:] = False
     elif combination.direction == "short":
@@ -80,8 +85,8 @@ def compile_signals(
 
     tradable = stop_dist > 0  # False where the stop is still NaN during warm-up
     # All read-only, like the cached arrays among them, so the engine sees one array type.
-    long, short, target_dist, exit_long, exit_short = _read_only(
-        (long & tradable, short & tradable, target_dist, exit_long, exit_short)
+    long, short, target_dist, exit_long, exit_short, time_filter = _read_only(
+        (long & tradable, short & tradable, target_dist, exit_long, exit_short, time_filter)
     )
     return Signals(
         long,
@@ -92,6 +97,7 @@ def compile_signals(
         time_bars=time_bars,
         exit_long=exit_long,
         exit_short=exit_short,
+        time_filter=time_filter,
     )
 
 

@@ -1,6 +1,7 @@
 """The engine against its independent reference twin, plus invariants that must always hold."""
 
 import math
+from dataclasses import replace
 from datetime import date
 from functools import cache
 
@@ -108,9 +109,14 @@ def random_case(seed: int):
     )
 
 
+@pytest.mark.parametrize("with_time_filter", [False, True])
 @pytest.mark.parametrize("seed", range(200))
-def test_engine_matches_the_reference_twin(seed):
+def test_engine_matches_the_reference_twin(seed, with_time_filter):
     bars, signals, cost, m1, trades = run_case(**random_case(seed))
+    if with_time_filter:
+        mask = np.random.default_rng(seed).random(len(bars)) > 0.3
+        signals = replace(signals, time_filter=mask)
+        trades = simulate(bars, signals, cost, m1=m1)
     expected = simulate_reference(bars, signals, cost, m1=m1)
 
     actual = trades.as_dicts()

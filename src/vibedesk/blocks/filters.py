@@ -1,9 +1,10 @@
 """Filter Blocks: each returns (allow_long, allow_short), combined with the entry by AND.
 
 The value at bar t decides whether an entry signalled at bar t's close may be taken. Market
-filters judge the market at that close. Time filters (`session_window`, `day_of_week`) judge
-when the trade would open: the entry bar, the next bar's open (owner's decision, 2026-10-22).
-That reads the next bar's open time, a fact of the clock and never a price.
+filters judge the market at that close. Time filters (`session_window`, `day_of_week`, named in
+TIME_FILTERS) judge bar t's own open time. Under the fill-bar rule (ADR 0008, CCC-71) a time
+filter must also pass on the entry bar t+1: compile_signals hands the same mask to the engine
+as Signals.time_filter, and the engine skips a fill whose bar fails it.
 """
 
 import re
@@ -116,21 +117,12 @@ def _minutes(hhmm: str) -> int:
     return int(hours) * 60 + int(minutes)
 
 
-def entry_times(bars: Bars) -> np.ndarray:
-    """When an entry signalled at each bar would open: the next bar's open, so a Friday signal
-    on D1 opens on Monday. The last bar has no next bar yet; its entry would never fill, so it
-    gets one bar later on the clock."""
-    if not len(bars):
-        return bars.time.copy()
-    return np.append(bars.time[1:], bars.time[-1] + bars.timeframe.seconds)
-
-
 @LIBRARY.register("session_window", Kind.FILTER, SessionWindowParams)
 def session_window(bars: Bars, p: SessionWindowParams) -> tuple[np.ndarray, np.ndarray]:
-    """Trade only when the trade's entry bar opens inside a local-time window of the zone:
-    [start, end). An end before the start wraps past midnight, for example tokyo 22:00 to
-    02:00."""
-    minute = local_minute_of_day(entry_times(bars), p.zone)
+    """Trade only when the signal bar and the trade's entry bar both open inside a local-time
+    window of the zone: [start, end). An end before the start wraps past midnight, for example
+    tokyo 22:00 to 02:00. The Block judges the signal bar; the engine judges the entry bar."""
+    minute = local_minute_of_day(bars.time, p.zone)
     start, end = _minutes(p.start), _minutes(p.end)
     if start < end:
         allowed = (minute >= start) & (minute < end)
@@ -155,9 +147,15 @@ class DayOfWeekParams(_Params):
 
 @LIBRARY.register("day_of_week", Kind.FILTER, DayOfWeekParams)
 def day_of_week(bars: Bars, p: DayOfWeekParams) -> tuple[np.ndarray, np.ndarray]:
-    """Trade only when the trade's entry bar opens on one of the chosen server-clock weekdays
-    (the broker's trading days)."""
-    time = entry_times(bars)
+    """Trade only when the signal bar and the trade's entry bar both open on one of the chosen
+    server-clock weekdays (the broker's trading days). The Block judges the signal bar; the
+    engine judges the entry bar."""
+    time = bars.time
     days = np.array([p.mon, p.tue, p.wed, p.thu, p.fri, False, False])
     allowed = days[server_weekdays(time)]
     return allowed, allowed.copy()
+
+
+# Filters that read only the clock. Each judges a bar's own open time, so the same output is
+# the fill-bar mask the engine checks on the entry bar (ADR 0008).
+TIME_FILTERS = frozenset({"session_window", "day_of_week"})
