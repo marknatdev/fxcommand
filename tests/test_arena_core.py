@@ -29,13 +29,15 @@ from vibedesk.arena import (
     StrategyStatus,
 )
 from vibedesk.arena.strategy import check_fill_bar_time_filters
-from vibedesk.blocks.spec import StrategySpec, validate
+from vibedesk.blocks.spec import StrategySpec, expand_grid, validate
+from vibedesk.ledger import Ledger
 from vibedesk.market.bars import Bars, Timeframe
 from vibedesk.market.cache import write_chunk
 from vibedesk.market.costs import CostMeasurement, record_cost
 from vibedesk.market.fake_mt5 import FakeMt5
 from vibedesk.market.synthetic import SyntheticBarSource
 from vibedesk.notify import NoticeKind, RecordingNotifier
+from vibedesk.rules import RULES_VERSION
 
 
 def _make_spec(
@@ -303,6 +305,104 @@ def test_gap_detection_and_catch_up_replay(tmp_path: Path):
 
 
 # --- Owner Controls Tests ---
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+def test_restart_restores_ledger_strategies_and_replays_cache(tmp_path, monkeypatch, stopped):
+    import vibedesk.arena.runtime as runtime_module
+
+    spec = _make_spec()
+    measurement = CostMeasurement(
+        symbol="GOLD",
+        measured_at="2026-01-01T00:00:00Z",
+        point=0.01,
+        spread_floor_points=65.0,
+        spread_p90_points=70.0,
+        ticks=1000,
+        swap_long_points=-92.0,
+        swap_short_points=25.0,
+        triple_swap_day=4,
+    )
+    record_cost(tmp_path, measurement)
+    with Ledger(tmp_path / "desk.db") as ledger:
+        family = ledger.create_family("Restart regression")
+        hypothesis = ledger.register_hypothesis(family, spec)
+        trial_bars = SyntheticBarSource(1, date(2024, 1, 1), date(2024, 2, 1)).fetch(
+            "GOLD", Timeframe.H1
+        )
+        ledger.record_trial(
+            hypothesis,
+            combinations=[(expand_grid(spec)[0], 0.0)],
+            verdict="CANDIDATE",
+            closest_miss=None,
+            cost=measurement.snapshot(),
+            bars=trial_bars,
+            rules_version=RULES_VERSION,
+            result_json='{"folds": [], "checks": []}',
+        )
+        original = ArenaRuntime(tmp_path, ledger)
+        strategy = original.send_to_arena(hypothesis, initial_balance=12_000.0)
+        removed = original.send_to_arena(hypothesis)
+        original.controls.remove_strategy(removed.id)
+        actions_before = list(original.controls.actions)
+        with pytest.raises(ValueError, match="cannot be paused"):
+            original.controls.pause_strategy(removed.id)
+        assert removed.status == StrategyStatus.REMOVED
+        assert ledger.arena_strategy(removed.id).status == "removed"
+        assert original.controls.actions == actions_before
+
+        record = ledger.arena_strategy(strategy.id)
+        assert record.created_at.endswith("Z")
+        enrolled_at = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
+        base_time = int(enrolled_at.timestamp()) // 3600 * 3600 + 3600
+        bars = _make_sample_bars(30, base_time=base_time)
+        cache_bars = Bars(
+            symbol="GOLD",
+            timeframe=Timeframe.H1,
+            point=0.01,
+            digits=2,
+            time=np.array([b["time"] for b in bars], dtype=np.int64),
+            open=np.array([b["open"] for b in bars]),
+            high=np.array([b["high"] for b in bars]),
+            low=np.array([b["low"] for b in bars]),
+            close=np.array([b["close"] for b in bars]),
+            spread=np.array([b["spread"] for b in bars], dtype=np.int32),
+        )
+        for year in {datetime.fromtimestamp(b["time"], UTC).year for b in bars}:
+            start = int(datetime(year, 1, 1, tzinfo=UTC).timestamp())
+            end = int(datetime(year + 1, 1, 1, tzinfo=UTC).timestamp())
+            write_chunk(tmp_path, cache_bars.between(start, end), year)
+
+        class RecoveryClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.fromtimestamp(base_time + 31 * 3600, tz=tz)
+
+        monkeypatch.setattr(runtime_module, "datetime", RecoveryClock)
+        if stopped:
+            original.controls.stop_arena()
+        strategy.catch_up(bars)
+        if not stopped:
+            assert strategy.account_backtest.closed_trades
+
+    with Ledger(tmp_path / "desk.db") as ledger:
+        restarted = ArenaRuntime(tmp_path, ledger)
+        restored = restarted.get_strategy(strategy.id)
+        assert restored is not None
+        assert restarted.get_strategy(removed.id) is None
+        assert restarted._stopped is stopped
+        assert restored.status == (StrategyStatus.PAUSED if stopped else StrategyStatus.ACTIVE)
+        assert restored.spec == spec
+        assert restored.created_at == record.created_at
+        assert restored.initial_balance == 12_000.0
+        assert restored.spread_floor == 65.0
+        assert restored.swap_long_points == -92.0
+        assert restored.triple_day == 4
+        assert restarted.check_and_recover_gaps() == 30
+        assert restored.last_bar_time == bars[-1]["time"]
+        assert restored.account_backtest == strategy.account_backtest
+        assert restored.account_live == strategy.account_live
+        assert restarted.check_and_recover_gaps() == 0
 
 
 def test_arena_controls_lifecycle():

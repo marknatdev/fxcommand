@@ -783,3 +783,10 @@ The following items remain open for the owner:
 
 - Plan: version Ledger records in migration 5, verify before approval, allowlist imports, isolate registries, remove nonpersistent revocation, stabilize look-ahead seeds.
 - Validate with targeted regression tests, full pytest, Ruff lint and format checks; push fixes and resolve all six review threads.
+
+## PR #35 review follow-up (2026-11-01)
+- [x] Restore non-removed Arena strategies from Ledger records on construction, including Hypothesis Spec, measured costs, initial balance, twin type, status, enrolment time, and global stop state.
+- [x] Parse enrolment timestamps explicitly as UTC for restart cache replay.
+- [x] Reject pausing a removed strategy before mutating memory or recording an action.
+- [x] Add real-Ledger restart regression coverage for cache replay, both paper accounts, global stop persistence, removed-record exclusion, and rejected pause state preservation.
+- Validation: focused Arena suite passed (15 tests); Ruff lint and formatting checks passed. Full suite pending.

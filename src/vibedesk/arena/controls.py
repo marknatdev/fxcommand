@@ -23,6 +23,10 @@ class ArenaControls:
         if self.runtime is not None and hasattr(self.runtime, "strategies"):
             strat = self.runtime.strategies.get(strategy_id)
             if strat is not None:
+                if strat.status == StrategyStatus.REMOVED:
+                    raise ValueError(
+                        f"Strategy {strategy_id} has been removed and cannot be paused"
+                    )
                 strat.status = StrategyStatus.PAUSED
         self._record_action(strategy_id=strategy_id, action="paused", reason=reason)
 

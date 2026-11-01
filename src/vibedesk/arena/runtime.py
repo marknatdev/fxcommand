@@ -32,6 +32,33 @@ class ArenaRuntime:
         self.strategies: dict[int, ArenaStrategy] = {}
         self.controls = ArenaControls(ledger=ledger, runtime=self)
         self._stopped: bool = False
+        if ledger is not None:
+            from vibedesk.blocks.spec import validate
+            from vibedesk.market.costs import CostError, current_cost
+
+            self._stopped = bool(ledger.arena_stopped())
+            for record in ledger.list_arena_strategies():
+                if record.status == StrategyStatus.REMOVED:
+                    continue
+                hypothesis = ledger.hypothesis(record.hypothesis_id)
+                try:
+                    cost_snapshot = current_cost(self.root, record.symbol)
+                except CostError:
+                    cost_snapshot = None
+                self.register_strategy(
+                    ArenaStrategy(
+                        strategy_id=record.id,
+                        hypothesis_id=record.hypothesis_id,
+                        spec=validate(hypothesis.spec_json),
+                        symbol=record.symbol,
+                        timeframe=record.timeframe,
+                        twin_type=TwinType(record.twin_type),
+                        status=StrategyStatus(record.status),
+                        initial_balance=record.initial_balance,
+                        created_at=record.created_at,
+                        cost_snapshot=cost_snapshot,
+                    )
+                )
 
     def register_strategy(self, strategy: ArenaStrategy) -> None:
         self.strategies[strategy.id] = strategy
@@ -369,7 +396,12 @@ class ArenaRuntime:
             if last_time <= 0:
                 if strategy.created_at:
                     try:
-                        last_time = int(datetime.fromisoformat(strategy.created_at).timestamp())
+                        created_at = datetime.fromisoformat(
+                            strategy.created_at.replace("Z", "+00:00")
+                        )
+                        if created_at.tzinfo is None:
+                            created_at = created_at.replace(tzinfo=UTC)
+                        last_time = int(created_at.timestamp())
                     except Exception:
                         continue
                 else:
